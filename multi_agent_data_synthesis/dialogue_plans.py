@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import hashlib
+import random
 from typing import Any
 
 
@@ -20,8 +20,7 @@ def decide_second_round_reply_strategy(
     include_issue_probability: float,
 ) -> str:
     probability = max(0.0, min(1.0, float(include_issue_probability)))
-    digest = hashlib.sha256(f"{scenario_id}:second_round_include_issue".encode("utf-8")).digest()
-    score = int.from_bytes(digest[:8], byteorder="big", signed=False) / 2**64
+    score = random.random()
     if score < probability:
         return SECOND_ROUND_REPLY_CONFIRM_WITH_ISSUE
     return SECOND_ROUND_REPLY_CONFIRM_ONLY

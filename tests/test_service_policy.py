@@ -1063,6 +1063,46 @@ class ServicePolicyTests(unittest.TestCase):
             "江苏省南京市鼓楼区汉中门大街 288 号金陵世纪花园 6 幢 1 单元 1204 室",
         )
 
+    def test_partial_address_after_denying_full_known_address_requires_more_detail(self):
+        policy = ServiceDialoguePolicy()
+        state = ServiceRuntimeState(awaiting_full_address=True, address_input_attempts=0)
+        scenario_data = build_scenario().to_dict()
+        scenario_data["customer"]["address"] = "湖北省武汉市洪山区尤李湾路56号万珑小区5栋2单元502室"
+        scenario = Scenario.from_dict(scenario_data)
+        collected_slots = {
+            "issue_description": "对，家里热水器加热很慢。",
+            "surname": "张",
+            "phone": "13800138001",
+            "address": "",
+            "product_model": "",
+            "request_type": "fault",
+            "availability": "",
+            "phone_contactable": "yes",
+            "phone_contact_owner": "本人当前来电",
+            "phone_collection_attempts": "0",
+        }
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(speaker="service", text="需要登记下您的地址，麻烦您完整的说下省、市、区、乡镇，精确到门牌号。", round_index=10),
+                DialogueTurn(
+                    speaker="user",
+                    text="湖北省武汉市洪山区尤李湾路56号万珑小区5栋2单元",
+                    round_index=11,
+                ),
+            ],
+            collected_slots=collected_slots,
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "请您继续提供一下小区、楼栋和门牌号。")
+        self.assertFalse(state.expected_address_confirmation)
+        self.assertEqual(
+            state.partial_address_candidate,
+            "湖北省武汉市洪山区尤李湾路56号万珑小区5栋2单元",
+        )
+
     def test_confirmed_collected_address_moves_to_next_slot(self):
         policy = ServiceDialoguePolicy()
         state = ServiceRuntimeState(

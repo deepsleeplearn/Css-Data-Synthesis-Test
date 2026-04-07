@@ -5,8 +5,10 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from multi_agent_data_synthesis.config import AppConfig
+from multi_agent_data_synthesis.dialogue_plans import decide_second_round_reply_strategy
 from multi_agent_data_synthesis.hidden_settings_tool import (
     HiddenSettingsRepository,
     HiddenSettingsTool,
@@ -200,6 +202,17 @@ def build_candidate(
 
 
 class HiddenSettingsToolTests(unittest.TestCase):
+    def test_second_round_reply_strategy_is_not_derived_from_scenario_id(self):
+        with patch(
+            "multi_agent_data_synthesis.dialogue_plans.random.random",
+            side_effect=[0.9, 0.1],
+        ):
+            first = decide_second_round_reply_strategy("same_scenario", 0.5)
+            second = decide_second_round_reply_strategy("same_scenario", 0.5)
+
+        self.assertEqual(first, "confirm_only")
+        self.assertEqual(second, "confirm_with_issue")
+
     def test_normalize_generated_payload_rejects_multiple_fault_symptoms_by_default(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store_path = Path(temp_dir) / "hidden_settings_history.jsonl"
@@ -507,6 +520,30 @@ class UserPromptTests(unittest.TestCase):
 
         self.assertIn("当前客服在核对地址", messages[1]["content"])
         self.assertIn("不要在这一轮再重复故障、电话、型号或其他旧信息", messages[1]["content"])
+
+    def test_user_prompt_blocks_repeating_installation_request_during_product_arrival_confirmation(self):
+        scenario = build_installation_scenario()
+        messages = build_user_agent_messages(
+            scenario,
+            transcript=[
+                DialogueTurn(
+                    speaker="user",
+                    text="对，是的，我希望安排师傅上门安装一下。",
+                    round_index=2,
+                ),
+                DialogueTurn(
+                    speaker="service",
+                    text="好的，请问空气能热水机到货了没？",
+                    round_index=2,
+                ),
+            ],
+            round_index=3,
+            second_round_reply_strategy="confirm_only",
+        )
+
+        self.assertIn("当前客服在确认产品是否到货", messages[1]["content"])
+        self.assertIn("不要重复前面已经确认过的安装诉求", messages[1]["content"])
+        self.assertIn("优先补充新的细节", messages[1]["content"])
 
     def test_retries_when_candidate_is_too_similar(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -899,6 +936,51 @@ class UserPromptTests(unittest.TestCase):
 
             self.assertFalse(generated.hidden_context["service_known_address"])
             self.assertNotEqual(
+                generated.hidden_context["address_input_round_1"],
+                generated.customer.address,
+            )
+            self.assertEqual(
+                generated.hidden_context["address_input_round_2"],
+                generated.customer.address,
+            )
+
+    def test_mismatched_known_address_forces_full_correct_address_on_followup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store_path = Path(temp_dir) / "hidden_settings_history.jsonl"
+            tool = HiddenSettingsTool(
+                SequenceFakeClient(
+                    [
+                        build_candidate(
+                            full_name="赵欣",
+                            surname="赵",
+                            phone="13876543210",
+                            address="湖北省武汉市洪山区尤李湾路56号万珑小区5栋2单元502室",
+                            persona="语气温和，但希望客服快一点登记完",
+                            speech_style="整体简洁，确认信息时会按流程快速回答",
+                            issue="新装的空气能热水器试机时发现制热速度偏慢，想尽快预约检查",
+                            desired_resolution="尽快安排人员上门确认安装情况和机器状态",
+                            availability="周日下午两点后",
+                            emotion="有些担心",
+                            urgency="中",
+                            prior_attempts="暂时还没有自行处理",
+                            special_constraints="白天家里只有老人，最好周末联系",
+                        )
+                    ]
+                ),
+                build_config(
+                    store_path,
+                    service_known_address_probability=1.0,
+                    service_known_address_matches_probability=0.0,
+                    address_confirmation_direct_correction_probability=0.0,
+                    address_collection_followup_probability=1.0,
+                ),
+            )
+
+            generated = tool.generate_for_scenario(build_base_scenario())
+
+            self.assertTrue(generated.hidden_context["service_known_address"])
+            self.assertFalse(generated.hidden_context["service_known_address_matches_actual"])
+            self.assertEqual(
                 generated.hidden_context["address_input_round_1"],
                 generated.customer.address,
             )

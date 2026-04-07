@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import random
 import re
@@ -438,8 +437,7 @@ class HiddenSettingsTool:
     def _issue_allows_multi_fault(self, scenario_id: str, issue_text: str) -> bool:
         if not scenario_id or not issue_text:
             return False
-        digest = hashlib.sha256(f"{scenario_id}:multi_fault:{issue_text}".encode("utf-8")).digest()
-        score = int.from_bytes(digest[:8], byteorder="big", signed=False) / 2**64
+        score = random.random()
         return score < self.config.hidden_settings_multi_fault_probability
 
     @staticmethod
@@ -460,7 +458,7 @@ class HiddenSettingsTool:
         )
 
     def _attach_contact_plan(self, scenario_id: str, candidate: dict[str, Any]) -> None:
-        rng = random.Random(self._seed_for_scenario(scenario_id))
+        rng = random.Random()
         current_call_contactable = (
             rng.random() < self.config.current_call_contactable_probability
         )
@@ -516,7 +514,7 @@ class HiddenSettingsTool:
         )
 
     def _attach_address_plan(self, scenario_id: str, candidate: dict[str, Any]) -> None:
-        rng = random.Random(self._seed_for_scenario(f"{scenario_id}:address"))
+        rng = random.Random()
         actual_address = candidate["customer"]["address"]
         service_knows_address = rng.random() < self.config.service_known_address_probability
         address_round_1 = actual_address
@@ -552,7 +550,13 @@ class HiddenSettingsTool:
                         ]
                     )
 
-        if rng.random() < self.config.address_collection_followup_probability:
+        should_force_full_address_after_known_mismatch = (
+            service_knows_address and not service_known_address_matches_actual
+        )
+        if should_force_full_address_after_known_mismatch:
+            address_round_1 = actual_address
+            address_round_2 = actual_address
+        elif rng.random() < self.config.address_collection_followup_probability:
             if rng.random() < 0.5:
                 address_round_1 = self._generate_partial_address(actual_address)
             else:
@@ -665,11 +669,6 @@ class HiddenSettingsTool:
             "请显著拉开以下字段差异：姓名、地址、用户画像、说话方式、问题细节、预约时间、既往处理、上门限制。\n"
             "不要复述历史样本内容，不要解释原因，只返回新的 JSON。"
         )
-
-    @staticmethod
-    def _seed_for_scenario(scenario_id: str) -> int:
-        digest = hashlib.sha256(scenario_id.encode("utf-8")).digest()
-        return int.from_bytes(digest[:8], byteorder="big", signed=False)
 
     @staticmethod
     def _generate_mobile_phone(

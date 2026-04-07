@@ -392,7 +392,10 @@ class ServiceDialoguePolicy:
                         use_known_address_prompt=False,
                     )
                 return ServicePolicyResult(
-                    reply=self._address_followup_prompt(normalized_candidate),
+                    reply=self._address_followup_prompt_for_actual(
+                        candidate=normalized_candidate,
+                        actual_address=scenario.customer.address,
+                    ),
                     slot_updates=slot_updates,
                     is_ready_to_close=False,
                 )
@@ -476,7 +479,10 @@ class ServiceDialoguePolicy:
             )
 
         return ServicePolicyResult(
-            reply=self._address_followup_prompt(address_candidate),
+            reply=self._address_followup_prompt_for_actual(
+                candidate=address_candidate,
+                actual_address=scenario.customer.address,
+            ),
             slot_updates=slot_updates,
             is_ready_to_close=False,
         )
@@ -918,7 +924,11 @@ class ServiceDialoguePolicy:
         normalized_actual = cls._normalize_address_text(actual_address)
         if candidate == normalized_actual:
             return True
-        return cls._address_has_region_info(candidate) and cls._address_has_detail_info(candidate)
+        return (
+            cls._address_has_region_info(candidate)
+            and cls._address_has_detail_info(candidate)
+            and cls._has_required_address_precision(candidate, actual_address)
+        )
 
     @classmethod
     def _address_has_region_info(cls, candidate: str) -> bool:
@@ -950,6 +960,22 @@ class ServiceDialoguePolicy:
         has_community = bool(re.search(r"(小区|花园|公寓|苑|府|里|村|大厦|中心|广场|城)", normalized))
         has_road_number = bool(re.search(r"(路|街|大道|巷|弄|胡同).*\d+号", normalized))
         return has_room or (has_building and (has_community or has_road_number))
+
+    @classmethod
+    def _has_required_address_precision(cls, candidate: str, actual_address: str) -> bool:
+        normalized_candidate = cls._normalize_address_text(candidate)
+        normalized_actual = cls._normalize_address_text(actual_address)
+
+        required_patterns = (
+            r"\d+\s*室",
+            r"\d+\s*单元",
+            r"\d+\s*(?:号楼|栋|幢|座|楼)",
+        )
+        for pattern in required_patterns:
+            actual_match = re.search(pattern, normalized_actual)
+            if actual_match and not re.search(pattern, normalized_candidate):
+                return False
+        return True
 
     @classmethod
     def _merge_address_candidate(cls, existing: str, new: str) -> str:
@@ -1190,6 +1216,15 @@ class ServiceDialoguePolicy:
         if followup_kind == "region":
             return self._choose_prompt_text(self.ADDRESS_REGION_FOLLOWUP_PROMPT)
         return self._choose_prompt_text(self.ADDRESS_PROMPT)
+
+    def _address_followup_prompt_for_actual(self, *, candidate: str, actual_address: str) -> str:
+        if (
+            self._address_has_region_info(candidate)
+            and self._address_has_detail_info(candidate)
+            and not self._has_required_address_precision(candidate, actual_address)
+        ):
+            return self._choose_prompt_text(self.ADDRESS_DETAIL_FOLLOWUP_PROMPT)
+        return self._address_followup_prompt(candidate)
 
     def _address_confirmation_prompt(
         self,
