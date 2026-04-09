@@ -9,7 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from multi_agent_data_synthesis.address_utils import build_address_progressive_segments
+from multi_agent_data_synthesis.address_utils import (
+    build_address_progressive_segments,
+    extract_address_components,
+)
 from multi_agent_data_synthesis.config import AppConfig
 from multi_agent_data_synthesis.dialogue_plans import decide_second_round_reply_strategy
 from multi_agent_data_synthesis.llm import OpenAIChatClient
@@ -31,6 +34,31 @@ VARIABLE_FIELDS = (
     "prior_attempts",
     "special_constraints",
 )
+
+COHERENT_REGION_OPTIONS: tuple[dict[str, Any], ...] = (
+    {"province": "广东省", "city": "广州市", "districts": ("天河区", "海珠区", "越秀区")},
+    {"province": "广东省", "city": "深圳市", "districts": ("南山区", "福田区", "宝安区")},
+    {"province": "浙江省", "city": "杭州市", "districts": ("西湖区", "余杭区", "拱墅区")},
+    {"province": "浙江省", "city": "宁波市", "districts": ("鄞州区", "海曙区")},
+    {"province": "江苏省", "city": "南京市", "districts": ("鼓楼区", "秦淮区")},
+    {"province": "江苏省", "city": "苏州市", "districts": ("吴中区", "工业园区")},
+    {"province": "山东省", "city": "济南市", "districts": ("历下区", "历城区")},
+    {"province": "山东省", "city": "青岛市", "districts": ("市南区", "崂山区")},
+    {"province": "河南省", "city": "郑州市", "districts": ("金水区", "中原区")},
+    {"province": "湖北省", "city": "武汉市", "districts": ("洪山区", "江汉区", "武昌区")},
+    {"province": "湖南省", "city": "长沙市", "districts": ("岳麓区", "芙蓉区")},
+    {"province": "四川省", "city": "成都市", "districts": ("武侯区", "高新区", "锦江区")},
+    {"province": "福建省", "city": "福州市", "districts": ("仓山区", "鼓楼区", "台江区")},
+    {"province": "安徽省", "city": "合肥市", "districts": ("蜀山区", "包河区")},
+)
+COHERENT_MUNICIPALITY_OPTIONS: tuple[dict[str, Any], ...] = (
+    {"province": "", "city": "北京市", "districts": ("朝阳区", "海淀区")},
+    {"province": "", "city": "上海市", "districts": ("浦东新区", "闵行区")},
+    {"province": "", "city": "天津市", "districts": ("南开区", "河西区")},
+    {"province": "", "city": "重庆市", "districts": ("渝北区", "渝中区")},
+)
+FEMALE_NAME_HINT_CHARS = frozenset("丽娜静敏艳娟婷颖雪倩芳琳洁欣怡蓉莹燕璐璇岚妍媛")
+MALE_NAME_HINT_CHARS = frozenset("强伟磊军勇涛超鹏杰峰斌刚浩东博飞健志明龙宁凯晨亮")
 
 
 @dataclass
@@ -470,6 +498,7 @@ class HiddenSettingsTool:
                 {
                     "current_call_contactable": True,
                     "contact_phone_owner": "本人当前来电",
+                    "contact_phone_owner_spoken_label": "我这个号码",
                     "contact_phone": primary_phone,
                     "phone_input_attempts_required": 0,
                     "phone_input_round_1": f"{primary_phone}#",
@@ -501,11 +530,16 @@ class HiddenSettingsTool:
             if attempts_required >= 3
             else f"{backup_phone}#"
         )
+        spoken_label = self._pick_contact_phone_owner_spoken_label(
+            backup_owner,
+            candidate["customer"].get("full_name", ""),
+        )
 
         candidate["hidden_context"].update(
             {
                 "current_call_contactable": False,
                 "contact_phone_owner": backup_owner,
+                "contact_phone_owner_spoken_label": spoken_label,
                 "contact_phone": backup_phone,
                 "phone_input_attempts_required": attempts_required,
                 "phone_input_round_1": first_input,
@@ -523,23 +557,24 @@ class HiddenSettingsTool:
         service_known_address_value = ""
         service_known_address_matches_actual = False
         address_confirmation_no_reply = "不对。"
+        service_known_address_mismatch_start_level = ""
+        mismatch_correction_value = actual_address
 
         if service_knows_address:
             service_known_address_matches_actual = (
                 rng.random() < self.config.service_known_address_matches_probability
             )
-            service_known_address_value = (
-                actual_address
-                if service_known_address_matches_actual
-                else self._generate_stale_address(actual_address, rng)
-            )
+            if service_known_address_matches_actual:
+                service_known_address_value = actual_address
+            else:
+                (
+                    service_known_address_value,
+                    service_known_address_mismatch_start_level,
+                    mismatch_correction_value,
+                ) = self._build_known_address_mismatch_plan(actual_address, rng)
             if not service_known_address_matches_actual:
                 if rng.random() < self.config.address_confirmation_direct_correction_probability:
-                    correction_address = self._generate_address_correction(
-                        actual_address=actual_address,
-                        stale_address=service_known_address_value,
-                        rng=rng,
-                    )
+                    correction_address = mismatch_correction_value
                     correction_address = self._maybe_compact_address_input(
                         correction_address,
                         rng,
@@ -560,7 +595,7 @@ class HiddenSettingsTool:
         )
         address_rounds = [actual_address]
         if should_force_full_address_after_known_mismatch:
-            address_rounds = [actual_address]
+            address_rounds = [mismatch_correction_value]
         elif rng.random() < self.config.address_collection_followup_probability:
             address_rounds = build_address_progressive_segments(actual_address, rng)
 
@@ -585,6 +620,8 @@ class HiddenSettingsTool:
                 "service_known_address": service_knows_address,
                 "service_known_address_value": service_known_address_value,
                 "service_known_address_matches_actual": service_known_address_matches_actual,
+                "service_known_address_mismatch_start_level": service_known_address_mismatch_start_level,
+                "service_known_address_correction_value": mismatch_correction_value,
                 "address_confirmation_no_reply": address_confirmation_no_reply,
                 "address_input_round_1": address_round_1,
                 "address_input_round_2": address_round_2,
@@ -885,40 +922,331 @@ class HiddenSettingsTool:
             )
         return f"{address}1号"
 
+    def _build_known_address_mismatch_plan(
+        self,
+        actual_address: str,
+        rng: random.Random,
+    ) -> tuple[str, str, str]:
+        level = self._choose_address_mismatch_start_level(actual_address, rng)
+        stale_address = self._generate_stale_address_from_level(actual_address, level, rng)
+        correction_value = self._address_suffix_from_level(actual_address, level)
+        if stale_address == actual_address or not correction_value:
+            fallback_stale = self._generate_stale_address(actual_address, rng)
+            fallback_correction = self._generate_address_correction(
+                actual_address=actual_address,
+                stale_address=fallback_stale,
+                rng=rng,
+            )
+            return fallback_stale, self._infer_mismatch_start_level(actual_address, fallback_stale), fallback_correction
+        return stale_address, level, correction_value
+
+    def _choose_address_mismatch_start_level(
+        self,
+        actual_address: str,
+        rng: random.Random,
+    ) -> str:
+        components = extract_address_components(actual_address)
+        available_levels = [
+            level
+            for level in ("province", "city", "district", "locality", "building", "unit", "floor", "room")
+            if self._address_level_is_available(level, components)
+        ]
+        if not available_levels:
+            return "room"
+        weights = self.config.address_known_mismatch_start_level_weights
+        level_weights = [max(0.0, float(weights.get(level, 0.0))) for level in available_levels]
+        if sum(level_weights) <= 0:
+            level_weights = [1.0] * len(available_levels)
+        return rng.choices(available_levels, weights=level_weights, k=1)[0]
+
+    @staticmethod
+    def _address_level_is_available(level: str, components: Any) -> bool:
+        if level == "province":
+            return bool(components.province)
+        if level == "city":
+            return bool(components.city)
+        if level == "district":
+            return bool(components.district)
+        if level == "locality":
+            return bool(components.town or components.road or components.community)
+        if level == "building":
+            return bool(components.building)
+        if level == "unit":
+            return bool(components.unit)
+        if level == "floor":
+            return bool(components.floor)
+        if level == "room":
+            return bool(components.room)
+        return False
+
+    @classmethod
+    def _address_suffix_from_level(cls, address: str, level: str) -> str:
+        components = extract_address_components(address)
+        level_values = {
+            "province": components.province,
+            "city": components.city,
+            "district": components.district,
+            "locality": "".join(part for part in (components.town, components.road, components.community) if part),
+            "building": components.building,
+            "unit": components.unit,
+            "floor": components.floor,
+            "room": components.room,
+        }
+        ordered_levels = ("province", "city", "district", "locality", "building", "unit", "floor", "room")
+        try:
+            start_index = ordered_levels.index(level)
+        except ValueError:
+            return address
+        suffix = "".join(level_values[name] for name in ordered_levels[start_index:] if level_values[name])
+        return suffix or address
+
+    def _generate_stale_address_from_level(
+        self,
+        actual_address: str,
+        level: str,
+        rng: random.Random,
+    ) -> str:
+        if level in {"province", "city", "district"}:
+            stale = self._generate_region_stale_address_from_level(actual_address, level, rng)
+            if stale != actual_address:
+                return stale
+        if level == "locality":
+            stale = self._generate_locality_stale_address(actual_address, rng)
+            if stale != actual_address:
+                return stale
+        detail_stale = self._generate_detail_stale_address(actual_address, level, rng)
+        return detail_stale if detail_stale != actual_address else self._generate_stale_address(actual_address, rng)
+
+    @staticmethod
+    def _region_options_for_address(address: str) -> tuple[dict[str, Any], ...]:
+        components = extract_address_components(address)
+        if components.province:
+            return COHERENT_REGION_OPTIONS
+        return COHERENT_MUNICIPALITY_OPTIONS
+
+    @classmethod
+    def _generate_region_stale_address_from_level(
+        cls,
+        actual_address: str,
+        level: str,
+        rng: random.Random,
+    ) -> str:
+        components = extract_address_components(actual_address)
+        options = cls._region_options_for_address(actual_address)
+        if level == "province":
+            candidates = [
+                option
+                for option in options
+                if str(option.get("province", "")) and option.get("province") != components.province
+            ]
+            if not candidates:
+                return actual_address
+            replacement = rng.choice(candidates)
+            stale = actual_address.replace(components.province, str(replacement["province"]), 1)
+            stale = stale.replace(components.city, str(replacement["city"]), 1)
+            if components.district:
+                stale = stale.replace(components.district, str(rng.choice(tuple(replacement["districts"]))), 1)
+            return stale
+
+        if level == "city":
+            if components.province:
+                candidates = [
+                    option
+                    for option in options
+                    if option.get("province") == components.province and option.get("city") != components.city
+                ]
+            else:
+                candidates = [option for option in options if option.get("city") != components.city]
+            if not candidates:
+                return actual_address
+            replacement = rng.choice(candidates)
+            stale = actual_address.replace(components.city, str(replacement["city"]), 1)
+            if components.district:
+                stale = stale.replace(components.district, str(rng.choice(tuple(replacement["districts"]))), 1)
+            return stale
+
+        if level == "district":
+            candidates = [
+                district
+                for option in options
+                if option.get("province", "") == components.province and option.get("city") == components.city
+                for district in tuple(option.get("districts", ()))
+                if district != components.district
+            ]
+            if not candidates:
+                return actual_address
+            return actual_address.replace(components.district, str(rng.choice(candidates)), 1)
+
+        return actual_address
+
+    @staticmethod
+    def _replace_first(address: str, pattern: str, replacement: str) -> str:
+        return re.sub(pattern, replacement, address, count=1)
+
+    @classmethod
+    def _generate_locality_stale_address(cls, actual_address: str, rng: random.Random) -> str:
+        stale = actual_address
+        community_match = re.search(
+            r"([A-Za-z0-9\u4e00-\u9fa5]+?(?:小区|花园|公寓|苑|府|里|村|大厦|中心|广场|城|家园|新村|碧桂园))",
+            stale,
+        )
+        if community_match:
+            pool = ["幸福花园", "阳光花园", "金色家园", "滨江花园", "锦绣苑", "星辰花园"]
+            alternatives = [value for value in pool if value != community_match.group(1)]
+            if alternatives:
+                return stale.replace(community_match.group(1), rng.choice(alternatives), 1)
+
+        road_number_match = re.search(r"([^\d]{1,20}(?:路|街|大道|巷|弄|胡同))(\d+)号", stale)
+        if road_number_match:
+            prefix = road_number_match.group(1)
+            number = int(road_number_match.group(2))
+            replacement = f"{prefix}{number + rng.choice([2, 4, 6])}号"
+            return stale.replace(road_number_match.group(0), replacement, 1)
+
+        town_match = re.search(r"([^\d]{1,12}(?:街道|镇|乡))", stale)
+        if town_match:
+            pool = ["东城街道", "五常街道", "安宜镇", "大良街道", "观音桥街道"]
+            alternatives = [value for value in pool if value != town_match.group(1)]
+            if alternatives:
+                return stale.replace(town_match.group(1), rng.choice(alternatives), 1)
+        return actual_address
+
+    @classmethod
+    def _generate_detail_stale_address(
+        cls,
+        actual_address: str,
+        level: str,
+        rng: random.Random,
+    ) -> str:
+        patterns = {
+            "building": r"(\d+)\s*(号楼|栋|幢|座|楼)",
+            "unit": r"(\d+)\s*(单元)",
+            "floor": r"(\d+)\s*(层)",
+            "room": r"(\d{2,4})\s*(室)",
+        }
+        pattern = patterns.get(level)
+        if not pattern:
+            return actual_address
+        match = re.search(pattern, actual_address)
+        if not match:
+            return actual_address
+        replacement = f"{max(1, int(match.group(1)) + rng.choice([1, 2, 3]))}{match.group(2)}"
+        return (
+            actual_address[: match.start()]
+            + replacement
+            + actual_address[match.end() :]
+        )
+
+    @classmethod
+    def _infer_mismatch_start_level(cls, actual_address: str, stale_address: str) -> str:
+        actual = extract_address_components(actual_address)
+        stale = extract_address_components(stale_address)
+        checks = (
+            ("province", actual.province, stale.province),
+            ("city", actual.city, stale.city),
+            ("district", actual.district, stale.district),
+            (
+                "locality",
+                "".join(part for part in (actual.town, actual.road, actual.community) if part),
+                "".join(part for part in (stale.town, stale.road, stale.community) if part),
+            ),
+            ("building", actual.building, stale.building),
+            ("unit", actual.unit, stale.unit),
+            ("floor", actual.floor, stale.floor),
+            ("room", actual.room, stale.room),
+        )
+        for level, actual_value, stale_value in checks:
+            if actual_value and stale_value and actual_value != stale_value:
+                return level
+        return "province"
+
     @staticmethod
     def _generate_region_stale_address(address: str, rng: random.Random) -> str:
+        components = extract_address_components(address)
+        if not components.city:
+            return address
+
+        if components.province:
+            options = [
+                option
+                for option in COHERENT_REGION_OPTIONS
+                if option["province"] != components.province or option["city"] != components.city
+            ]
+        else:
+            options = [
+                option
+                for option in COHERENT_MUNICIPALITY_OPTIONS
+                if option["city"] != components.city
+            ]
+        if not options:
+            return address
+
+        replacement = rng.choice(options)
         stale = address
-        changed = False
+        if components.province:
+            stale = stale.replace(components.province, str(replacement["province"]), 1)
+        stale = stale.replace(components.city, str(replacement["city"]), 1)
 
-        province_match = re.search(r"^[^省]+省", stale)
-        if province_match and rng.random() >= 0.5:
-            pool = ["广东省", "浙江省", "江苏省", "山东省", "河南省", "湖北省", "湖南省", "四川省", "福建省", "安徽省"]
-            original = province_match.group(0)
-            alternatives = [value for value in pool if value != original]
-            if alternatives:
-                stale = stale[: province_match.start()] + rng.choice(alternatives) + stale[province_match.end() :]
-                changed = True
+        replacement_districts = tuple(str(value) for value in replacement.get("districts", ()))
+        if components.district and replacement_districts:
+            district_options = [value for value in replacement_districts if value != components.district]
+            replacement_district = rng.choice(district_options or list(replacement_districts))
+            stale = stale.replace(components.district, replacement_district, 1)
 
-        city_pattern = r"(?<=省)[^市]+市" if re.search(r"^[^省]+省", stale) else r"^[^市]+市"
-        city_match = re.search(city_pattern, stale)
-        if city_match and rng.random() >= 0.5:
-            pool = ["广州市", "深圳市", "杭州市", "宁波市", "南京市", "苏州市", "青岛市", "郑州市", "武汉市", "长沙市", "成都市", "佛山市", "济南市"]
-            original = city_match.group(0)
-            alternatives = [value for value in pool if value != original]
-            if alternatives:
-                stale = stale[: city_match.start()] + rng.choice(alternatives) + stale[city_match.end() :]
-                changed = True
+        return stale if stale != address else address
 
-        district_match = re.search(r"(?<=市)[^区县]+(?:区|县)", stale)
-        if district_match and rng.random() >= 0.5:
-            pool = ["天河区", "南山区", "西湖区", "浦东新区", "鼓楼区", "历下区", "金水区", "顺德区", "鄞州区", "盘龙区", "市南区", "余杭区"]
-            original = district_match.group(0)
-            alternatives = [value for value in pool if value != original]
-            if alternatives:
-                stale = stale[: district_match.start()] + rng.choice(alternatives) + stale[district_match.end() :]
-                changed = True
+    @staticmethod
+    def _infer_name_gender(full_name: str) -> str:
+        normalized = str(full_name or "").strip()
+        if not normalized:
+            return "unknown"
+        given_name = normalized[1:] if len(normalized) > 1 else normalized
+        female_hits = sum(char in FEMALE_NAME_HINT_CHARS for char in given_name)
+        male_hits = sum(char in MALE_NAME_HINT_CHARS for char in given_name)
+        if female_hits > male_hits:
+            return "female"
+        if male_hits > female_hits:
+            return "male"
+        return "unknown"
 
-        return stale if changed else address
+    @classmethod
+    def _pick_contact_phone_owner_spoken_label(
+        cls,
+        owner: str,
+        full_name: str,
+    ) -> str:
+        normalized_owner = str(owner or "").strip()
+        gender = cls._infer_name_gender(full_name)
+
+        options_map = {
+            "本人备用号码": ("我另一个号码", "我备用号"),
+            "爸": ("我爸", "我父亲"),
+            "妈": ("我妈", "我母亲"),
+            "儿子": ("我儿子", "我家孩子"),
+            "女儿": ("我女儿", "我闺女"),
+            "室友": ("我室友", "合租室友"),
+        }
+        if normalized_owner == "爱人":
+            if gender == "female":
+                options = ("我老公", "我丈夫", "我爱人")
+                return options[cls._stable_choice_index(normalized_owner, full_name, len(options))]
+            if gender == "male":
+                options = ("我媳妇", "我老婆", "我爱人")
+                return options[cls._stable_choice_index(normalized_owner, full_name, len(options))]
+            options = ("我爱人", "家里人")
+            return options[cls._stable_choice_index(normalized_owner, full_name, len(options))]
+
+        options = options_map.get(normalized_owner)
+        if options:
+            return options[cls._stable_choice_index(normalized_owner, full_name, len(options))]
+        return normalized_owner or "这个号码"
+
+    @staticmethod
+    def _stable_choice_index(owner: str, full_name: str, size: int) -> int:
+        if size <= 0:
+            return 0
+        seed_text = f"{owner}:{full_name}"
+        return sum(ord(char) for char in seed_text) % size
 
     @staticmethod
     def _extract_address_detail_token(address: str, pattern: str) -> str:

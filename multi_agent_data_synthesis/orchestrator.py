@@ -25,11 +25,13 @@ class DialogueOrchestrator:
         config: AppConfig,
         auto_generate_hidden_settings: bool = False,
         show_dialogue_progress: bool = False,
+        show_persona_profile: bool = False,
     ):
         self.config = config
         self.client = OpenAIChatClient(config)
         self.auto_generate_hidden_settings = auto_generate_hidden_settings
         self.show_dialogue_progress = show_dialogue_progress
+        self.show_persona_profile = show_persona_profile
         self._print_lock = asyncio.Lock()
         self.hidden_settings_tool = HiddenSettingsTool(self.client, config)
         self.user_agent = UserAgent(
@@ -197,13 +199,16 @@ class DialogueOrchestrator:
         return all(collected_slots.get(slot, "").strip() for slot in required_slots)
 
     @staticmethod
-    def _print_dialogue_header(scenario: Scenario) -> None:
+    def _print_dialogue_header(scenario: Scenario, show_persona_profile: bool = False) -> None:
         print(f"\n=== Scenario: {scenario.scenario_id} ===")
         print(
             f"Product: {scenario.product.brand} {scenario.product.category} {scenario.product.model}"
         )
         print(f"Request Type: {scenario.request.request_type}")
         print(f"Call Start Time: {scenario.call_start_time or 'N/A'}")
+        if show_persona_profile:
+            print(f"Persona: {scenario.customer.persona or 'N/A'}")
+            print(f"Speech Style: {scenario.customer.speech_style or 'N/A'}")
 
     @staticmethod
     def _print_turn(speaker: str, round_index: int, text: str) -> None:
@@ -219,7 +224,7 @@ class DialogueOrchestrator:
 
     async def _print_dialogue_header_async(self, scenario: Scenario) -> None:
         async with self._print_lock:
-            self._print_dialogue_header(scenario)
+            self._print_dialogue_header(scenario, show_persona_profile=self.show_persona_profile)
 
     async def _print_turn_async(self, speaker: str, round_index: int, text: str) -> None:
         async with self._print_lock:

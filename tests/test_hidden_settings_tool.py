@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from multi_agent_data_synthesis.address_utils import extract_address_components
 from multi_agent_data_synthesis.config import AppConfig
 from multi_agent_data_synthesis.dialogue_plans import decide_second_round_reply_strategy
 from multi_agent_data_synthesis.hidden_settings_tool import (
@@ -53,6 +54,7 @@ def build_config(
     address_segment_strategy_weights: dict[str, float] | None = None,
     address_input_omit_province_city_suffix_probability: float = 0.0,
     address_confirmation_direct_correction_probability: float = 0.5,
+    address_known_mismatch_start_level_weights: dict[str, float] | None = None,
 ) -> AppConfig:
     if address_segmented_reply_probability is None:
         address_segmented_reply_probability = address_collection_followup_probability
@@ -66,6 +68,17 @@ def build_config(
             "province_city__district__locality_detail": 0.10,
             "province_city_district_locality__detail": 0.15,
             "province_city_district__locality_detail": 0.10,
+        }
+    if address_known_mismatch_start_level_weights is None:
+        address_known_mismatch_start_level_weights = {
+            "province": 0.05,
+            "city": 0.10,
+            "district": 0.15,
+            "locality": 0.25,
+            "building": 0.15,
+            "unit": 0.10,
+            "floor": 0.05,
+            "room": 0.15,
         }
     return AppConfig(
         openai_base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -103,6 +116,7 @@ def build_config(
         address_segment_strategy_weights=address_segment_strategy_weights,
         address_input_omit_province_city_suffix_probability=address_input_omit_province_city_suffix_probability,
         address_confirmation_direct_correction_probability=address_confirmation_direct_correction_probability,
+        address_known_mismatch_start_level_weights=address_known_mismatch_start_level_weights,
     )
 
 
@@ -543,6 +557,28 @@ class UserPromptTests(unittest.TestCase):
 
         self.assertIn("当前客服在核对地址", messages[1]["content"])
         self.assertIn("不要在这一轮再重复故障、电话、型号或其他旧信息", messages[1]["content"])
+
+    def test_user_prompt_exposes_natural_contact_owner_label(self):
+        scenario = build_base_scenario()
+        scenario.hidden_context["current_call_contactable"] = False
+        scenario.hidden_context["contact_phone_owner"] = "爱人"
+        scenario.hidden_context["contact_phone_owner_spoken_label"] = "我老公"
+
+        messages = build_user_agent_messages(
+            scenario,
+            transcript=[
+                DialogueTurn(
+                    speaker="service",
+                    text="这个来电号码可以联系到您吗？",
+                    round_index=3,
+                )
+            ],
+            round_index=4,
+            second_round_reply_strategy="confirm_only",
+        )
+
+        self.assertIn("可参考这个含义相近的口语称呼: 我老公", messages[1]["content"])
+        self.assertIn("可以自然地用含义相近的口语称呼", messages[1]["content"])
 
     def test_user_prompt_blocks_repeating_installation_request_during_product_arrival_confirmation(self):
         scenario = build_installation_scenario()
@@ -1129,7 +1165,7 @@ class UserPromptTests(unittest.TestCase):
                 "江苏省南京市鼓楼区汉中门大街288号金陵世纪花园6幢1单元1204室",
             )
 
-    def test_mismatched_known_address_forces_full_correct_address_on_followup(self):
+    def test_mismatched_known_address_followup_starts_from_configured_mismatch_level(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store_path = Path(temp_dir) / "hidden_settings_history.jsonl"
             tool = HiddenSettingsTool(
@@ -1158,6 +1194,16 @@ class UserPromptTests(unittest.TestCase):
                     service_known_address_matches_probability=0.0,
                     address_confirmation_direct_correction_probability=0.0,
                     address_collection_followup_probability=1.0,
+                    address_known_mismatch_start_level_weights={
+                        "province": 0.0,
+                        "city": 0.0,
+                        "district": 0.0,
+                        "locality": 0.0,
+                        "building": 0.0,
+                        "unit": 0.0,
+                        "floor": 0.0,
+                        "room": 1.0,
+                    },
                 ),
             )
 
@@ -1167,11 +1213,15 @@ class UserPromptTests(unittest.TestCase):
             self.assertFalse(generated.hidden_context["service_known_address_matches_actual"])
             self.assertEqual(
                 generated.hidden_context["address_input_rounds"],
-                [generated.customer.address],
+                ["502室"],
             )
             self.assertEqual(
                 generated.hidden_context["address_input_round_1"],
-                generated.customer.address,
+                "502室",
+            )
+            self.assertEqual(
+                generated.hidden_context["service_known_address_mismatch_start_level"],
+                "room",
             )
 
     def test_stale_known_address_stays_precise(self):
@@ -1248,6 +1298,78 @@ class UserPromptTests(unittest.TestCase):
             self.assertNotIn(reply, {"不对。", "不对，不是这个地址。", "不对，地址不对。", "不是这个地址。"})
             self.assertTrue(reply.endswith("。"))
 
+    def test_mismatched_known_address_direct_reply_can_follow_room_level(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store_path = Path(temp_dir) / "hidden_settings_history.jsonl"
+            tool = HiddenSettingsTool(
+                SequenceFakeClient(
+                    [
+                        build_candidate(
+                            full_name="赵欣",
+                            surname="赵",
+                            phone="13876543210",
+                            address="广东省广州市天河区天府路12号3栋502室",
+                            persona="语气温和，但希望客服快一点登记完",
+                            speech_style="整体简洁，确认信息时会按流程快速回答",
+                            issue="新装的空气能热水器试机时发现制热速度偏慢，想尽快预约检查",
+                            desired_resolution="尽快安排人员上门确认安装情况和机器状态",
+                            availability="周日下午两点后",
+                            emotion="有些担心",
+                            urgency="中",
+                            prior_attempts="暂时还没有自行处理",
+                            special_constraints="白天家里只有老人，最好周末联系",
+                        )
+                    ]
+                ),
+                build_config(
+                    store_path,
+                    service_known_address_probability=1.0,
+                    service_known_address_matches_probability=0.0,
+                    address_confirmation_direct_correction_probability=1.0,
+                    address_known_mismatch_start_level_weights={
+                        "province": 0.0,
+                        "city": 0.0,
+                        "district": 0.0,
+                        "locality": 0.0,
+                        "building": 0.0,
+                        "unit": 0.0,
+                        "floor": 0.0,
+                        "room": 1.0,
+                    },
+                ),
+            )
+
+            generated = tool.generate_for_scenario(build_base_scenario())
+
+            self.assertIn("502室", generated.hidden_context["address_confirmation_no_reply"])
+            self.assertEqual(generated.hidden_context["service_known_address_correction_value"], "502室")
+
+    def test_generate_region_stale_address_keeps_valid_province_city_pairing(self):
+        stale_address = HiddenSettingsTool._generate_region_stale_address(
+            "江苏省苏州市工业园区星湖街888号星辰花园8栋302室",
+            random.Random(7),
+        )
+        components = extract_address_components(stale_address)
+        valid_pairs = {
+            ("广东省", "广州市"),
+            ("广东省", "深圳市"),
+            ("浙江省", "杭州市"),
+            ("浙江省", "宁波市"),
+            ("江苏省", "南京市"),
+            ("江苏省", "苏州市"),
+            ("山东省", "济南市"),
+            ("山东省", "青岛市"),
+            ("河南省", "郑州市"),
+            ("湖北省", "武汉市"),
+            ("湖南省", "长沙市"),
+            ("四川省", "成都市"),
+            ("福建省", "福州市"),
+            ("安徽省", "合肥市"),
+        }
+
+        self.assertIn((components.province, components.city), valid_pairs)
+        self.assertNotEqual(stale_address, "江苏省苏州市工业园区星湖街888号星辰花园8栋302室")
+
     def test_mismatched_known_address_can_only_deny_without_correction(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store_path = Path(temp_dir) / "hidden_settings_history.jsonl"
@@ -1281,6 +1403,19 @@ class UserPromptTests(unittest.TestCase):
 
             generated = tool.generate_for_scenario(build_base_scenario())
             self.assertNotIn("正确地址是", generated.hidden_context["address_confirmation_no_reply"])
+
+    def test_pick_contact_phone_owner_spoken_label_varies_spouse_title_by_name_hint(self):
+        female_label = HiddenSettingsTool._pick_contact_phone_owner_spoken_label(
+            "爱人",
+            "李敏",
+        )
+        male_label = HiddenSettingsTool._pick_contact_phone_owner_spoken_label(
+            "爱人",
+            "刘强",
+        )
+
+        self.assertIn(female_label, {"我老公", "我丈夫", "我爱人"})
+        self.assertIn(male_label, {"我媳妇", "我老婆", "我爱人"})
 
     def test_generate_address_correction_can_return_room_only_for_fine_grained_mismatch(self):
         correction = HiddenSettingsTool._generate_address_correction(

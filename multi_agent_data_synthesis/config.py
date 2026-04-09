@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
@@ -57,6 +57,16 @@ DEFAULT_ADDRESS_SEGMENT_STRATEGY_WEIGHTS = {
     "province_city_district_locality__detail": 0.15,
     "province_city_district__locality_detail": 0.10,
 }
+DEFAULT_ADDRESS_KNOWN_MISMATCH_START_LEVEL_WEIGHTS = {
+    "province": 0.05,
+    "city": 0.10,
+    "district": 0.15,
+    "locality": 0.25,
+    "building": 0.15,
+    "unit": 0.10,
+    "floor": 0.05,
+    "room": 0.15,
+}
 
 
 @dataclass(frozen=True)
@@ -96,6 +106,9 @@ class AppConfig:
     address_segment_strategy_weights: dict[str, float]
     address_input_omit_province_city_suffix_probability: float
     address_confirmation_direct_correction_probability: float
+    address_known_mismatch_start_level_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_ADDRESS_KNOWN_MISMATCH_START_LEVEL_WEIGHTS)
+    )
 
 
 def load_model_request_profiles() -> dict[str, dict[str, object]]:
@@ -240,5 +253,9 @@ def load_config() -> AppConfig:
         ),
         address_confirmation_direct_correction_probability=float(
             os.getenv("ADDRESS_CONFIRMATION_DIRECT_CORRECTION_PROBABILITY", "0.5")
+        ),
+        address_known_mismatch_start_level_weights=_load_weight_map(
+            "ADDRESS_KNOWN_MISMATCH_START_LEVEL_WEIGHTS",
+            DEFAULT_ADDRESS_KNOWN_MISMATCH_START_LEVEL_WEIGHTS,
         ),
     )

@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="生成对话时在终端打印每轮交互过程",
     )
     generate_parser.add_argument(
+        "--show-persona",
+        action="store_true",
+        help="配合 --show-dialogue 使用，在终端额外打印初始用户画像与说话方式",
+    )
+    generate_parser.add_argument(
         "--concurrency",
         type=int,
         default=None,
@@ -104,6 +109,7 @@ async def run_generate_async(args: argparse.Namespace) -> None:
         config,
         auto_generate_hidden_settings=args.auto_hidden_settings,
         show_dialogue_progress=args.show_dialogue,
+        show_persona_profile=args.show_persona,
     )
     concurrency = max(1, args.concurrency or config.max_concurrency)
     samples = await orchestrator.generate_dialogues_async(scenarios, concurrency=concurrency)

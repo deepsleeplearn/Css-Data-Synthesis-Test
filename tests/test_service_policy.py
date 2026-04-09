@@ -863,6 +863,55 @@ class ServicePolicyTests(unittest.TestCase):
         )
         self.assertTrue(state.expected_address_confirmation)
 
+    def test_known_address_confirmation_no_with_detail_only_denial_asks_detail_followup(self):
+        policy = ServiceDialoguePolicy()
+        state = ServiceRuntimeState(expected_address_confirmation=True)
+        scenario_data = build_scenario(
+            service_known_address=True,
+            service_known_address_value="北京市朝阳区五星街道幸福小区5号楼2单元305室",
+            service_known_address_matches_actual=False,
+        ).to_dict()
+        scenario_data["customer"]["address"] = "北京市朝阳区五星街道幸福小区5号楼2单元302室"
+        scenario = Scenario.from_dict(scenario_data)
+        transcript = [
+            DialogueTurn(
+                speaker="service",
+                text="您的地址是北京市朝阳区五星街道幸福小区5号楼2单元305室，对吗？",
+                round_index=5,
+            ),
+            DialogueTurn(
+                speaker="user",
+                text="不对，地址不对。",
+                round_index=6,
+            ),
+        ]
+        collected_slots = {
+            "issue_description": "热水器加热慢。",
+            "surname": "张",
+            "phone": "13800138001",
+            "address": "",
+            "product_model": "",
+            "request_type": "fault",
+            "availability": "",
+            "phone_contactable": "yes",
+            "phone_contact_owner": "本人当前来电",
+            "phone_collection_attempts": "0",
+        }
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots=collected_slots,
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "请问是几栋几单元几楼几号呢？")
+        self.assertTrue(state.awaiting_full_address)
+        self.assertEqual(
+            state.partial_address_candidate,
+            "北京市朝阳区五星街道幸福小区5号楼2单元305室",
+        )
+
     def test_known_address_confirmation_no_with_cross_city_correction_starts_confirmation(self):
         policy = ServiceDialoguePolicy()
         state = ServiceRuntimeState(expected_address_confirmation=True)

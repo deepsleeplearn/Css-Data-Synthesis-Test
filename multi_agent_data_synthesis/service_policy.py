@@ -419,6 +419,23 @@ class ServiceDialoguePolicy:
                     slot_updates=slot_updates,
                     is_ready_to_close=False,
                 )
+            if self._is_detail_only_confirmation_mismatch(
+                confirmation_address=confirmation_address,
+                actual_address=scenario.customer.address,
+            ):
+                runtime_state.awaiting_full_address = True
+                runtime_state.address_input_attempts = 0
+                runtime_state.pending_address_confirmation = ""
+                runtime_state.partial_address_candidate = confirmation_address
+                runtime_state.address_vague_retry_count = 0
+                return ServicePolicyResult(
+                    reply=self._remember_address_followup_prompt(
+                        runtime_state,
+                        self._address_building_followup_prompt(),
+                    ),
+                    slot_updates=slot_updates,
+                    is_ready_to_close=False,
+                )
             runtime_state.awaiting_full_address = True
             runtime_state.address_input_attempts = 0
             runtime_state.pending_address_confirmation = ""
@@ -1093,6 +1110,52 @@ class ServiceDialoguePolicy:
             )
             replaced = True
         return merged if replaced else existing
+
+    @classmethod
+    def _is_detail_only_confirmation_mismatch(
+        cls,
+        *,
+        confirmation_address: str,
+        actual_address: str,
+    ) -> bool:
+        confirmation = extract_address_components(confirmation_address)
+        actual = extract_address_components(actual_address)
+        prefix_matches = cls._address_prefix_without_precise_detail(
+            confirmation_address
+        ) == cls._address_prefix_without_precise_detail(actual_address)
+        locality_matches = (
+            confirmation.province == actual.province
+            and confirmation.city == actual.city
+            and confirmation.district == actual.district
+            and confirmation.town == actual.town
+            and confirmation.road == actual.road
+            and confirmation.community == actual.community
+        )
+        if not prefix_matches and not locality_matches:
+            return False
+        return (
+            confirmation.building != actual.building
+            or confirmation.unit != actual.unit
+            or confirmation.floor != actual.floor
+            or confirmation.room != actual.room
+        )
+
+    @classmethod
+    def _address_prefix_without_precise_detail(cls, address: str) -> str:
+        value = str(address or "").strip()
+        if not value:
+            return ""
+        patterns = (
+            r"\d+\s*室.*$",
+            r"\d+\s*单元.*$",
+            r"\d+\s*层.*$",
+            r"\d+\s*(?:号楼|栋|幢|座|楼).*$",
+        )
+        for pattern in patterns:
+            stripped = re.sub(pattern, "", value)
+            if stripped != value:
+                return cls._normalize_address_text(stripped)
+        return cls._normalize_address_text(value)
 
     @classmethod
     def _address_followup_kind(cls, candidate: str) -> str:

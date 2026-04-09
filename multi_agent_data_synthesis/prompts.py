@@ -178,6 +178,9 @@ def build_user_agent_messages(
     contact_phone_owner = str(
         scenario.hidden_context.get("contact_phone_owner", "本人当前来电")
     ).strip()
+    contact_phone_owner_spoken_label = str(
+        scenario.hidden_context.get("contact_phone_owner_spoken_label", contact_phone_owner)
+    ).strip()
     phone_input_round_1 = str(
         scenario.hidden_context.get("phone_input_round_1", f"{scenario.customer.phone}#")
     ).strip()
@@ -255,6 +258,7 @@ def build_user_agent_messages(
 - 安装场景下产品是否已到货: {product_arrived}
 - 当前来电是否可以联系到用户: {current_call_contactable}
 - 如果当前来电不能联系，登记号码归属: {contact_phone_owner}
+- 如果当前来电不能联系，如需自然提到联系人，可参考这个含义相近的口语称呼: {contact_phone_owner_spoken_label}
 - 若客服要求拨号盘输入号码，第 1 次应输入: {phone_input_round_1}
 - 若客服要求拨号盘输入号码，第 2 次应输入: {phone_input_round_2}
 - 若客服要求拨号盘输入号码，第 3 次应输入: {phone_input_round_3}
@@ -281,7 +285,7 @@ def build_user_agent_messages(
 1. 如果这一轮是在直接回应客服开场确认，严格按照“本场景第二轮回复策略”执行；不是这个场景时，再按客服实际追问自然回答。
 2. 故障场景下，默认只围绕隐藏设定中的 1 个故障点来描述；只有当隐藏设定本身已经明确给了 2 个相关故障点时，才可以一起提到，但不要再继续追加第 3 个问题或过多温度对比数据。
 3. 如果客服问“请问您贵姓”，无论前面是否带“好的”或其他安抚前缀，都只回答姓氏相关信息，不要重复之前已经说过的别的信息。
-4. 如果客服问当前来电号码能否联系到你，严格按照隐藏设定回答；如果不能联系，可以说明留谁的号码，但不要直接口述完整号码。
+4. 如果客服问当前来电号码能否联系到你，严格按照隐藏设定回答；如果不能联系，可以说明留谁的号码，但不要直接口述完整号码；表达上可以自然地用含义相近的口语称呼，不必拘泥于登记标签原词。
 5. 如果客服要求你在拨号盘上输入联系方式并以#号键结束，只输出本轮应输入的内容，不要附带任何解释。
 6. 如果客服用“号码是某个号码，对吗”这类话术核对号码，无论前面是否带“好的”，都根据事实回答对或不对。
 7. 如果客服用“跟您确认一下，地址是某个地址，对吗？”或“您的地址是某个地址，对吗？”这类话术核对地址，无论前面是否带“好的”，都要根据隐藏设定回答；如果地址正确，通常只简短表示肯定，不要重复完整地址；如果地址不对，就优先按“若客服核对了错误地址，你这一轮应答”来回复，这一轮可以只是表达否定，也可以顺带直接给更正地址。

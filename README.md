@@ -103,6 +103,8 @@ SERVICE_AGENT_MODEL=<model-for-service-agent>
 python -m multi_agent_data_synthesis.cli generate \
   --count 10 \
   --auto-hidden-settings \
+  --show-dialogue \
+  --show-persona \
   --concurrency 5
 ```
 
@@ -141,6 +143,7 @@ python -m multi_agent_data_synthesis.cli generate [options]
 - `--json-output`：JSON 输出路径，默认 `outputs/dialogues.json`
 - `--auto-hidden-settings`：生成前自动补齐隐藏设定
 - `--show-dialogue`：在终端打印逐轮对话
+- `--show-persona`：配合 `--show-dialogue` 使用，额外打印初始用户画像与说话方式
 - `--concurrency`：覆盖默认并发数
 
 ### `generate-hidden-settings`
