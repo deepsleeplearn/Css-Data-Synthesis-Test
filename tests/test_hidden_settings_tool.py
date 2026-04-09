@@ -213,6 +213,7 @@ def build_candidate(
     urgency: str,
     prior_attempts: str,
     special_constraints: str,
+    gender: str = "",
 ) -> dict:
     return {
         "customer": {
@@ -230,6 +231,7 @@ def build_candidate(
             "availability": availability,
         },
         "hidden_context": {
+            "gender": gender,
             "emotion": emotion,
             "urgency": urgency,
             "prior_attempts": prior_attempts,
@@ -327,6 +329,59 @@ class HiddenSettingsToolTests(unittest.TestCase):
             )
 
             self.assertEqual(normalized["customer"]["phone"], "13912345678")
+
+    def test_normalize_generated_payload_keeps_explicit_gender(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store_path = Path(temp_dir) / "hidden_settings_history.jsonl"
+            tool = HiddenSettingsTool(SequenceFakeClient([]), build_config(store_path))
+
+            normalized = tool._normalize_generated_payload(
+                build_candidate(
+                    full_name="李敏",
+                    surname="李",
+                    phone="13912345678",
+                    address="江苏省苏州市吴中区金枫路88号3幢1201室",
+                    persona="普通住户，平时主要在家照顾老人和孩子。",
+                    speech_style="表达比较日常，偶尔会重复一句确认下。",
+                    issue="家里的美的空气能热水器最近早晚水温不稳定，偶尔会突然变温",
+                    desired_resolution="希望尽快安排师傅上门检查温控和主机运行情况",
+                    availability="周五晚上七点后或者周日白天",
+                    emotion="有些着急但还算克制",
+                    urgency="中高",
+                    prior_attempts="重启过一次机器，没有改善",
+                    special_constraints="家里有老人，晚上更需要稳定热水",
+                    gender="女",
+                ),
+                "fault",
+            )
+
+            self.assertEqual(normalized["hidden_context"]["gender"], "女")
+
+    def test_normalize_generated_payload_can_infer_gender_when_missing(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store_path = Path(temp_dir) / "hidden_settings_history.jsonl"
+            tool = HiddenSettingsTool(SequenceFakeClient([]), build_config(store_path))
+
+            normalized = tool._normalize_generated_payload(
+                build_candidate(
+                    full_name="刘强",
+                    surname="刘",
+                    phone="13688889999",
+                    address="广东省深圳市南山区科技园路88号中科轩逸小区3栋1402室",
+                    persona="普通上班族，白天忙，处理问题时希望尽快说清楚。",
+                    speech_style="说话偏短句，偶尔会想一下再接着说。",
+                    issue="家里的空气能热水器这两天制热明显变慢",
+                    desired_resolution="想让师傅尽快上门看看机器现在是什么情况",
+                    availability="本周四下午 3 点到 5 点",
+                    emotion="略显焦躁",
+                    urgency="较为紧急",
+                    prior_attempts="重启过设备",
+                    special_constraints="小区门禁需提前登记",
+                ),
+                "fault",
+            )
+
+            self.assertEqual(normalized["hidden_context"]["gender"], "男")
 
     def test_rejects_unsupported_brand(self):
         with self.assertRaises(ValueError):
@@ -560,6 +615,7 @@ class UserPromptTests(unittest.TestCase):
 
     def test_user_prompt_exposes_natural_contact_owner_label(self):
         scenario = build_base_scenario()
+        scenario.hidden_context["gender"] = "女"
         scenario.hidden_context["current_call_contactable"] = False
         scenario.hidden_context["contact_phone_owner"] = "爱人"
         scenario.hidden_context["contact_phone_owner_spoken_label"] = "我老公"
@@ -579,6 +635,19 @@ class UserPromptTests(unittest.TestCase):
 
         self.assertIn("可参考这个含义相近的口语称呼: 我老公", messages[1]["content"])
         self.assertIn("可以自然地用含义相近的口语称呼", messages[1]["content"])
+
+    def test_user_prompt_exposes_gender_attribute(self):
+        scenario = build_base_scenario()
+        scenario.hidden_context["gender"] = "女"
+
+        messages = build_user_agent_messages(
+            scenario,
+            transcript=[],
+            round_index=1,
+            second_round_reply_strategy="confirm_only",
+        )
+
+        self.assertIn("用户性别: 女", messages[1]["content"])
 
     def test_user_prompt_blocks_repeating_installation_request_during_product_arrival_confirmation(self):
         scenario = build_installation_scenario()
@@ -1412,6 +1481,21 @@ class UserPromptTests(unittest.TestCase):
         male_label = HiddenSettingsTool._pick_contact_phone_owner_spoken_label(
             "爱人",
             "刘强",
+        )
+
+        self.assertIn(female_label, {"我老公", "我丈夫", "我爱人"})
+        self.assertIn(male_label, {"我媳妇", "我老婆", "我爱人"})
+
+    def test_pick_contact_phone_owner_spoken_label_prefers_explicit_gender(self):
+        female_label = HiddenSettingsTool._pick_contact_phone_owner_spoken_label(
+            "爱人",
+            "赵晨",
+            "女",
+        )
+        male_label = HiddenSettingsTool._pick_contact_phone_owner_spoken_label(
+            "爱人",
+            "赵晨",
+            "男",
         )
 
         self.assertIn(female_label, {"我老公", "我丈夫", "我爱人"})

@@ -307,7 +307,9 @@ class HiddenSettingsTool:
 3. 输出必须具体、自然、生活化，避免模板化和高相似复用。
 4. 电话、地址、用户画像、问题细节、预约时间、历史尝试等都要有变化。
 5. 用户画像与说话方式要拆开写，二者都要具体，方便塑造人物。
-6. 只返回一个 JSON 对象，不要解释。
+6. 大多数用户设定为普通家庭用户，文化程度和表达能力都比较一般，不要频繁生成过于精英、逻辑特别强或表达特别书面的角色。
+7. 说话方式可以自然体现轻微停顿、重复、表达不够顺或想到哪说到哪，但不要夸张到影响理解，也不要刻板化描写。
+8. 只返回一个 JSON 对象，不要解释。
 
 输出 JSON 结构：
 {{
@@ -326,6 +328,7 @@ class HiddenSettingsTool:
     "availability": "可预约时间"
   }},
   "hidden_context": {{
+    "gender": "男 或 女",
     "emotion": "情绪状态",
     "urgency": "紧急程度",
     "prior_attempts": "此前是否做过处理或排查",
@@ -348,10 +351,12 @@ class HiddenSettingsTool:
 - 用户信息必须完整，可直接用于后续对话
 - 地址必须是合理的中国地址
 - 电话必须是 11 位中国大陆手机号
+- `hidden_context.gender` 必须填写为“男”或“女”
 - 故障场景下，大多数 issue 只写 1 个具体故障点，只保留一个核心现象
 - 只有极少数场景可以写 2 个相关故障点，但不要扩展到第 3 个问题，也不要堆砌过多结果后果或温度对比数据
 - 安装场景与故障场景要区分明显
 - 用户画像与说话方式都要具体，且不要写成同一句的重复改写
+- 大多数用户应更像普通来电用户，不要总写成创业者、高管、专家或表达特别流畅的人
 - 如果收到“与历史样本相似度过高”的反馈，说明这次生成和历史记录太像，需要整体换一版内容
 
 {rejection_feedback}
@@ -371,6 +376,16 @@ class HiddenSettingsTool:
         customer = payload.get("customer") or {}
         request = payload.get("request") or {}
         hidden_context = payload.get("hidden_context") or {}
+        normalized_gender = self._normalize_gender(
+            hidden_context.get("gender", ""),
+            str(customer.get("full_name", "")).strip(),
+        )
+        normalized_hidden_context = {
+            str(key): str(value).strip()
+            for key, value in hidden_context.items()
+            if str(key).strip() != "gender" and str(value).strip()
+        }
+        normalized_hidden_context["gender"] = normalized_gender
 
         normalized = {
             "customer": {
@@ -387,11 +402,7 @@ class HiddenSettingsTool:
                 "desired_resolution": str(request.get("desired_resolution", "")).strip(),
                 "availability": str(request.get("availability", "")).strip(),
             },
-            "hidden_context": {
-                str(key): str(value).strip()
-                for key, value in hidden_context.items()
-                if str(value).strip()
-            },
+            "hidden_context": normalized_hidden_context,
         }
 
         self._validate_issue_description(
@@ -533,6 +544,7 @@ class HiddenSettingsTool:
         spoken_label = self._pick_contact_phone_owner_spoken_label(
             backup_owner,
             candidate["customer"].get("full_name", ""),
+            candidate["hidden_context"].get("gender", ""),
         )
 
         candidate["hidden_context"].update(
@@ -1210,13 +1222,29 @@ class HiddenSettingsTool:
         return "unknown"
 
     @classmethod
+    def _normalize_gender(cls, raw_gender: Any, full_name: str = "") -> str:
+        normalized = str(raw_gender or "").strip().lower()
+        if normalized in {"女", "女性", "female", "woman", "f"}:
+            return "女"
+        if normalized in {"男", "男性", "male", "man", "m"}:
+            return "男"
+
+        inferred = cls._infer_name_gender(full_name)
+        if inferred == "female":
+            return "女"
+        if inferred == "male":
+            return "男"
+        return "未知"
+
+    @classmethod
     def _pick_contact_phone_owner_spoken_label(
         cls,
         owner: str,
         full_name: str,
+        gender: str = "",
     ) -> str:
         normalized_owner = str(owner or "").strip()
-        gender = cls._infer_name_gender(full_name)
+        normalized_gender = cls._normalize_gender(gender, full_name)
 
         options_map = {
             "本人备用号码": ("我另一个号码", "我备用号"),
@@ -1227,10 +1255,10 @@ class HiddenSettingsTool:
             "室友": ("我室友", "合租室友"),
         }
         if normalized_owner == "爱人":
-            if gender == "female":
+            if normalized_gender == "女":
                 options = ("我老公", "我丈夫", "我爱人")
                 return options[cls._stable_choice_index(normalized_owner, full_name, len(options))]
-            if gender == "male":
+            if normalized_gender == "男":
                 options = ("我媳妇", "我老婆", "我爱人")
                 return options[cls._stable_choice_index(normalized_owner, full_name, len(options))]
             options = ("我爱人", "家里人")

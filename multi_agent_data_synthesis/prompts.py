@@ -175,6 +175,7 @@ def build_user_agent_messages(
   - call_complete: 布尔值，表示你是否认为本次通话可以结束
 """
     current_call_contactable = "是" if scenario.hidden_context.get("current_call_contactable", True) else "否"
+    user_gender = str(scenario.hidden_context.get("gender", "未知")).strip() or "未知"
     contact_phone_owner = str(
         scenario.hidden_context.get("contact_phone_owner", "本人当前来电")
     ).strip()
@@ -242,6 +243,7 @@ def build_user_agent_messages(
 隐藏设定：
 - 用户姓名: {scenario.customer.full_name}
 - 用户姓氏: {scenario.customer.surname}
+- 用户性别: {user_gender}
 - 用户电话: {scenario.customer.phone}
 - 用户地址: {scenario.customer.address}
 - 用户画像: {scenario.customer.persona}
