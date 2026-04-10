@@ -123,6 +123,8 @@ class Scenario:
         )
 
     def validate_domain(self) -> None:
+        if str(self.product.brand).strip() != "美的":
+            raise ValueError("Only 美的 product scenarios are supported.")
         if not str(self.product.category).strip():
             raise ValueError(
                 "Product category must not be empty."

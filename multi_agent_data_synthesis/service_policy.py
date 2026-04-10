@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 import re
 from dataclasses import dataclass
+from typing import Any, Callable
 
 from multi_agent_data_synthesis.address_utils import (
     MUNICIPALITY_PREFIXES,
@@ -30,6 +31,7 @@ from multi_agent_data_synthesis.static_utterances import (
 
 
 MOBILE_PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
+ADDRESS_COMMUNITY_LABEL_SUFFIXES = ("小区", "社区", "花园", "公寓", "苑", "府", "里", "村")
 PromptVariant = str | tuple[str, float]
 PromptConfig = list[PromptVariant]
 
@@ -62,28 +64,29 @@ class ServicePolicyResult:
 
 
 class ServiceDialoguePolicy:
-    FAULT_ACKNOWLEDGEMENT_PREFIX = "非常抱歉，给您添麻烦了，我这就安排师傅上门维修"
+    FAULT_ACKNOWLEDGEMENT_PREFIX = "非常抱歉，给您添麻烦了，我这就安排是否上门维修"
 
-    SURNAME_PROMPT = "请问您贵姓？"
+    SURNAME_PROMPT = "请问您贵姓"
     CONTACTABLE_PROMPT = "请问您当前这个来电号码能联系到您吗？"
-    PHONE_KEYPAD_PROMPT = "请您在拨号盘上输入您的联系方式，并以#号键结束。"
-    PHONE_KEYPAD_RETRY_PROMPT = "您输入的号码有误，请重新在拨号盘上输入您的联系方式，并以#号键结束。"
+    PHONE_KEYPAD_PROMPT = "请您在拨号盘上输入您的联系方式，并以#号键结束"
+    PHONE_KEYPAD_RETRY_PROMPT = "您输入的号码有误，请重新在拨号盘上输入您的联系方式，并以#号键结束"
     PHONE_CONFIRMATION_TEMPLATE = "号码是{phone}，对吗？"
     FAULT_ISSUE_PROMPT = "请问{product}现在是出现了什么问题？"
     ADDRESS_PROMPT = "需要登记下您的地址，麻烦您完整的说下省、市、区、乡镇，精确到门牌号。"
     ADDRESS_CITY_DISTRICT_FOLLOWUP_TEMPLATE = "好的，您是在{city}的哪个区县呢？具体小区门牌号也提供一下呢？"
     ADDRESS_LOCALITY_FOLLOWUP_PROMPT = "好的，请您继续说一下小区、楼栋和门牌号。"
     ADDRESS_BUILDING_FOLLOWUP_PROMPT = "请问是几栋几单元几楼几号呢？"
+    ADDRESS_RURAL_DETAIL_FOLLOWUP_PROMPT = "好的，请您提供一下详细的地址，具体到门牌号。"
     ADDRESS_CONFIRMATION_TEMPLATE = "跟您确认一下，地址是{address}，对吗？"
     KNOWN_ADDRESS_CONFIRMATION_TEMPLATE = "您的地址是{address}，对吗？"
     PRODUCT_ARRIVAL_PROMPT = "请问{product}到货了没？"
     PRODUCT_MODEL_PROMPT = "请问产品型号方便提供一下吗？"
     # 每条话术支持配置为 [(文案, 权重), ...]，每次发送时使用 random.choices 按权重随机选择。
-    SURNAME_PROMPT: PromptConfig = [("请问您贵姓？", 1.0)]
+    SURNAME_PROMPT: PromptConfig = [("请问您贵姓", 1.0)]
     CONTACTABLE_PROMPT: PromptConfig = [("请问您当前这个来电号码能联系到您吗？", 1.0)]
-    PHONE_KEYPAD_PROMPT: PromptConfig = [("请您在拨号盘上输入您的联系方式，并以#号键结束。", 1.0)]
+    PHONE_KEYPAD_PROMPT: PromptConfig = [("请您在拨号盘上输入您的联系方式，并以#号键结束", 1.0)]
     PHONE_KEYPAD_RETRY_PROMPT: PromptConfig = [
-        ("您输入的号码有误，请重新在拨号盘上输入您的联系方式，并以#号键结束。", 1.0)
+        ("您输入的号码有误，请重新在拨号盘上输入您的联系方式，并以#号键结束", 1.0)
     ]
     PHONE_CONFIRMATION_TEMPLATE: PromptConfig = [("号码是{phone}，对吗？", 1.0)]
     FAULT_ISSUE_PROMPT: PromptConfig = [("请问{product}现在是出现了什么问题？", 1.0)]
@@ -93,6 +96,7 @@ class ServiceDialoguePolicy:
     ]
     ADDRESS_LOCALITY_FOLLOWUP_PROMPT: PromptConfig = [("好的，请您继续说一下小区、楼栋和门牌号。", 1.0)]
     ADDRESS_BUILDING_FOLLOWUP_PROMPT: PromptConfig = [("请问是几栋几单元几楼几号呢？", 1.0)]
+    ADDRESS_RURAL_DETAIL_FOLLOWUP_PROMPT: PromptConfig = [("好的，请您提供一下详细的地址，具体到门牌号。", 1.0)]
     ADDRESS_CONFIRMATION_TEMPLATE: PromptConfig = [("跟您确认一下，地址是{address}，对吗？", 1.0)]
     KNOWN_ADDRESS_CONFIRMATION_TEMPLATE: PromptConfig = [("您的地址是{address}，对吗？", 1.0)]
     PRODUCT_ARRIVAL_PROMPT: PromptConfig = [("请问{product}到货了没？", 1.0)]
@@ -101,9 +105,11 @@ class ServiceDialoguePolicy:
         self,
         ok_prefix_probability: float = 1.0,
         rng: random.Random | None = None,
+        address_inference_callback: Callable[..., dict[str, Any] | None] | None = None,
     ):
         self.ok_prefix_probability = max(0.0, min(1.0, ok_prefix_probability))
         self.rng = rng or random.Random()
+        self.address_inference_callback = address_inference_callback
 
     def respond(
         self,
@@ -265,8 +271,42 @@ class ServiceDialoguePolicy:
     ) -> ServicePolicyResult:
         intent = self._classify_yes_no(user_text)
         runtime_state.expected_contactable_confirmation = False
+        has_known_phone = self._has_known_value(scenario.customer.phone)
+        direct_phone = self._extract_mobile_phone(user_text)
+
+        if (
+            self._interactive_test_freeform_enabled(scenario)
+            and not has_known_phone
+            and direct_phone
+            and intent != "no"
+        ):
+            runtime_state.expected_phone_number_confirmation = True
+            runtime_state.pending_phone_number_confirmation = direct_phone
+            runtime_state.phone_input_attempts = 0
+            return ServicePolicyResult(
+                reply=self._phone_confirmation_prompt(direct_phone),
+                slot_updates={
+                    "phone_contactable": "yes",
+                    "phone_contact_owner": "本人当前来电",
+                    "phone_collection_attempts": "0",
+                },
+                is_ready_to_close=False,
+            )
 
         if intent == "yes":
+            if not has_known_phone and self._interactive_test_freeform_enabled(scenario):
+                runtime_state.awaiting_phone_keypad_input = True
+                runtime_state.phone_input_attempts = 0
+                return ServicePolicyResult(
+                    reply=self._phone_keypad_prompt(),
+                    slot_updates={
+                        "phone_contactable": "yes",
+                        "phone_contact_owner": "本人当前来电",
+                        "phone_collection_attempts": "0",
+                    },
+                    is_ready_to_close=False,
+                )
+
             slot_updates = {
                 "phone": scenario.customer.phone,
                 "phone_contactable": "yes",
@@ -374,7 +414,10 @@ class ServiceDialoguePolicy:
 
         if intent == "yes":
             slot_updates = dict(slot_updates)
-            slot_updates["address"] = scenario.customer.address
+            if self._interactive_test_freeform_enabled(scenario) and not self._has_known_value(scenario.customer.address):
+                slot_updates["address"] = confirmation_address
+            else:
+                slot_updates["address"] = scenario.customer.address
             runtime_state.pending_address_confirmation = ""
             merged_slots = dict(collected_slots)
             merged_slots.update(slot_updates)
@@ -392,6 +435,13 @@ class ServiceDialoguePolicy:
                 user_text=user_text,
                 confirmation_address=confirmation_address,
             )
+            if not denial_address:
+                denial_address = self._infer_address_candidate_with_callback(
+                    user_text=user_text,
+                    confirmation_address=confirmation_address,
+                    partial_address_candidate="",
+                    last_address_followup_prompt="",
+                )
             if denial_address:
                 runtime_state.awaiting_full_address = True
                 runtime_state.address_input_attempts = 1
@@ -415,23 +465,6 @@ class ServiceDialoguePolicy:
                         candidate=normalized_candidate,
                         actual_address=scenario.customer.address,
                         ),
-                    ),
-                    slot_updates=slot_updates,
-                    is_ready_to_close=False,
-                )
-            if self._is_detail_only_confirmation_mismatch(
-                confirmation_address=confirmation_address,
-                actual_address=scenario.customer.address,
-            ):
-                runtime_state.awaiting_full_address = True
-                runtime_state.address_input_attempts = 0
-                runtime_state.pending_address_confirmation = ""
-                runtime_state.partial_address_candidate = confirmation_address
-                runtime_state.address_vague_retry_count = 0
-                return ServicePolicyResult(
-                    reply=self._remember_address_followup_prompt(
-                        runtime_state,
-                        self._address_building_followup_prompt(),
                     ),
                     slot_updates=slot_updates,
                     is_ready_to_close=False,
@@ -501,7 +534,27 @@ class ServiceDialoguePolicy:
         slot_updates: dict[str, str],
     ) -> ServicePolicyResult:
         prepared_address = self._prepare_address_for_confirmation(user_text)
+        if not prepared_address:
+            prepared_address = self._infer_address_candidate_with_callback(
+                user_text=user_text,
+                confirmation_address=runtime_state.pending_address_confirmation,
+                partial_address_candidate=runtime_state.partial_address_candidate,
+                last_address_followup_prompt=runtime_state.last_address_followup_prompt,
+            )
         previous_candidate = runtime_state.partial_address_candidate
+        if self._contains_rural_no_building_statement(user_text) and self._is_rural_address_candidate(
+            f"{previous_candidate}{user_text}"
+        ):
+            runtime_state.address_input_attempts += 1
+            runtime_state.address_vague_retry_count = 0
+            return ServicePolicyResult(
+                reply=self._remember_address_followup_prompt(
+                    runtime_state,
+                    self._address_rural_detail_followup_prompt(),
+                ),
+                slot_updates=slot_updates,
+                is_ready_to_close=False,
+            )
         combined_address = self._merge_address_candidate(
             previous_candidate,
             prepared_address,
@@ -511,6 +564,28 @@ class ServiceDialoguePolicy:
             incoming=prepared_address,
             merged=combined_address,
         )
+        if not progress_made:
+            inferred_address = self._infer_address_candidate_with_callback(
+                user_text=user_text,
+                confirmation_address=runtime_state.pending_address_confirmation,
+                partial_address_candidate=previous_candidate,
+                last_address_followup_prompt=runtime_state.last_address_followup_prompt,
+            )
+            if (
+                inferred_address
+                and self._normalize_address_text(inferred_address)
+                != self._normalize_address_text(prepared_address)
+            ):
+                prepared_address = inferred_address
+                combined_address = self._merge_address_candidate(
+                    previous_candidate,
+                    prepared_address,
+                )
+                progress_made = self._address_input_makes_progress(
+                    existing=previous_candidate,
+                    incoming=prepared_address,
+                    merged=combined_address,
+                )
         runtime_state.address_input_attempts += 1
         if not progress_made:
             return ServicePolicyResult(
@@ -661,9 +736,13 @@ class ServiceDialoguePolicy:
             "surname" in collected_slots
             and not collected_slots["surname"].strip()
             and self._signature_matches_prompt(previous_service_signature, self.SURNAME_PROMPT)
-            and scenario.customer.surname in user_text
         ):
-            slot_updates["surname"] = scenario.customer.surname
+            if self._has_known_value(scenario.customer.surname) and scenario.customer.surname in user_text:
+                slot_updates["surname"] = scenario.customer.surname
+            elif self._interactive_test_freeform_enabled(scenario):
+                freeform_surname = self._extract_freeform_surname(user_text)
+                if freeform_surname:
+                    slot_updates["surname"] = freeform_surname
 
         if (
             "product_model" in collected_slots
@@ -924,6 +1003,12 @@ class ServiceDialoguePolicy:
         normalized_actual = cls._normalize_address_text(actual_address)
         if not normalized_candidate or normalized_candidate == normalized_actual:
             return address
+        if (
+            normalized_candidate in normalized_actual
+            and cls._address_has_detail_info(address)
+            and cls._has_required_address_precision(address, actual_address)
+        ):
+            return actual_address
         if cls._compact_address_text(address) == cls._compact_address_text(actual_address):
             return actual_address
         candidate_components = extract_address_components(address)
@@ -932,8 +1017,8 @@ class ServiceDialoguePolicy:
             return actual_address
         return address
 
-    @staticmethod
-    def _prepare_address_for_confirmation(text: str) -> str:
+    @classmethod
+    def _prepare_address_for_confirmation(cls, text: str) -> str:
         cleaned = (text or "").strip().strip("，,。！？!?")
         prefix_patterns = (
             r"^(好的[，,\s]*)?地址是",
@@ -946,7 +1031,59 @@ class ServiceDialoguePolicy:
             cleaned = re.sub(pattern, "", cleaned)
         cleaned = re.split(r"[。！？!?]", cleaned, maxsplit=1)[0]
         cleaned = re.split(r"[，,]\s*(?:麻烦|另外|还有|辛苦|谢谢|尽快|催一下|师傅)", cleaned, maxsplit=1)[0]
+        structured = cls._extract_structured_address_from_text(cleaned)
+        if structured:
+            return structured
         return cleaned.strip().strip("，,。！？!?")
+
+    @classmethod
+    def _extract_structured_address_from_text(cls, text: str) -> str:
+        clauses = [
+            re.sub(r"^(?:哦|嗯|额|呃|那个|就是|然后|还有)\s*", "", clause.strip())
+            for clause in re.split(r"[，,；;]", text or "")
+            if clause.strip()
+        ]
+        if not clauses:
+            return ""
+
+        ordered_parts: dict[str, str] = {}
+        matched_label = False
+        patterns = (
+            ("province", r"^(?:省份|省)\s*(?:是|在)?\s*(.+)$"),
+            ("city", r"^(?:城市|市)\s*(?:是|在)?\s*(.+)$"),
+            ("district", r"^(?:区县|区|县)\s*(?:是|在)?\s*(.+)$"),
+            ("town", r"^(?:街道|乡镇|镇|乡)\s*(?:是|在)?\s*(.+)$"),
+            ("road", r"^(?:路|街道地址|街|大道|巷|弄|胡同)\s*(?:是|在)?\s*(.+)$"),
+            ("community", r"^(?:小区|社区|楼盘)\s*(?:是|在)?\s*(.+)$"),
+            ("building", r"^(?:楼栋|栋|幢|座|楼号|楼)\s*(?:是|在)?\s*(.+)$"),
+            ("unit", r"^(?:单元)\s*(?:是|在)?\s*(.+)$"),
+            ("floor", r"^(?:楼层|层)\s*(?:是|在)?\s*(.+)$"),
+            ("room", r"^(?:房间|房号|门牌号|门牌|室)\s*(?:是|在)?\s*(.+)$"),
+        )
+        for clause in clauses:
+            for kind, pattern in patterns:
+                match = re.match(pattern, clause)
+                if not match:
+                    continue
+                matched_label = True
+                value = match.group(1).strip("：:，,。；; ")
+                if not value:
+                    break
+                if kind == "community":
+                    if not value.endswith(ADDRESS_COMMUNITY_LABEL_SUFFIXES):
+                        value = f"{value}小区"
+                elif kind == "room" and re.fullmatch(r"\d{2,4}", value):
+                    value = f"{value}室"
+                ordered_parts[kind] = value
+                break
+
+        if not matched_label:
+            return ""
+
+        return "".join(
+            ordered_parts.get(kind, "")
+            for kind in ("province", "city", "district", "town", "road", "community", "building", "unit", "floor", "room")
+        )
 
     @classmethod
     def _extract_address_candidate_from_denial(
@@ -955,40 +1092,54 @@ class ServiceDialoguePolicy:
         user_text: str,
         confirmation_address: str,
     ) -> str:
-        prepared = cls._prepare_address_for_confirmation(user_text)
-        if not prepared:
-            return ""
+        raw_candidates = [
+            segment.strip("，,。！？!? ")
+            for segment in re.split(r"[。！？!?]", user_text or "")
+            if segment.strip("，,。！？!? ")
+        ]
+        raw_candidates.append(str(user_text or "").strip())
 
-        cleaned = prepared
         cleanup_patterns = (
             r"^(不对|不是这个地址|地址不对|不太对)[，,\s]*",
         )
-        for pattern in cleanup_patterns:
-            cleaned = re.sub(pattern, "", cleaned)
-        cleaned = re.sub(r"^(正确地址是|地址是|是)[，,\s]*", "", cleaned)
         correction_patterns = (
             r"(?:就是|改成|换成|应该是|应为)\s*([^，,。！？!?]+)$",
             r"(?:正确的是|正确地址是)\s*([^，,。！？!?]+)$",
         )
-        for pattern in correction_patterns:
-            match = re.search(pattern, cleaned)
-            if match:
-                cleaned = match.group(1)
-                break
 
-        cleaned = cleaned.strip("，,。！？!? ")
-        normalized = cls._normalize_address_text(cleaned)
         normalized_confirmation = cls._normalize_address_text(confirmation_address)
-        if not normalized or normalized == normalized_confirmation:
-            return ""
-        components = extract_address_components(cleaned)
-        if components.has_precise_detail:
-            return cleaned
-        if cls._address_has_admin_region(cleaned):
-            return cleaned
+        confirmation_components = extract_address_components(confirmation_address)
         strong_detail_markers = r"(路|街|大道|巷|弄|胡同|小区|花园|公寓|苑|府|里|村|大厦|中心|广场|城|栋|幢|座|楼|单元|室|号)"
-        if re.search(strong_detail_markers, normalized) and cls._address_has_detail_info(cleaned):
-            return cleaned
+
+        for raw_candidate in reversed(raw_candidates):
+            prepared = cls._prepare_address_for_confirmation(raw_candidate)
+            if not prepared:
+                continue
+
+            cleaned = prepared
+            for pattern in cleanup_patterns:
+                cleaned = re.sub(pattern, "", cleaned)
+            cleaned = re.sub(r"^(正确地址是|地址是|是)[，,\s]*", "", cleaned)
+            for pattern in correction_patterns:
+                match = re.search(pattern, cleaned)
+                if match:
+                    cleaned = match.group(1)
+                    break
+
+            cleaned = cleaned.strip("，,。！？!? ")
+            normalized = cls._normalize_address_text(cleaned)
+            if not normalized or normalized == normalized_confirmation:
+                continue
+
+            components = extract_address_components(cleaned)
+            if components.has_precise_detail and components_match(components, confirmation_components):
+                continue
+            if components.has_precise_detail:
+                return cleaned
+            if cls._address_has_admin_region(cleaned):
+                return cleaned
+            if re.search(strong_detail_markers, normalized) and cls._address_has_detail_info(cleaned):
+                return cleaned
         return ""
 
     @staticmethod
@@ -1009,16 +1160,10 @@ class ServiceDialoguePolicy:
         if candidate == normalized_actual or compact_candidate == compact_actual:
             return True
         candidate_components = extract_address_components(candidate)
-        actual_components = extract_address_components(actual_address)
-        if (
-            candidate_components.has_precise_detail
-            and components_match(candidate_components, actual_components)
-            and (candidate_components.has_admin_region or candidate_components.has_locality)
-            and cls._has_required_address_precision(candidate, actual_address)
-        ):
-            return True
+        if not cls._address_matches_actual(candidate, actual_address):
+            return False
         return (
-            cls._address_has_region_info(candidate)
+            (candidate_components.has_admin_region or candidate_components.has_locality)
             and cls._address_has_detail_info(candidate)
             and cls._has_required_address_precision(candidate, actual_address)
         )
@@ -1035,7 +1180,9 @@ class ServiceDialoguePolicy:
     @classmethod
     def _address_has_detail_info(cls, candidate: str) -> bool:
         components = extract_address_components(candidate)
-        return components.has_locality and components.has_precise_detail
+        return components.has_locality and (
+            components.has_precise_detail or cls._has_nonstandard_address_detail(candidate)
+        )
 
     @classmethod
     def _has_required_address_precision(cls, candidate: str, actual_address: str) -> bool:
@@ -1046,6 +1193,22 @@ class ServiceDialoguePolicy:
         if actual_components.unit and not candidate_components.unit:
             return False
         if actual_components.building and not candidate_components.building:
+            return False
+        actual_group = cls._extract_village_group_token(actual_address)
+        candidate_group = cls._extract_village_group_token(candidate)
+        if actual_group and not candidate_group:
+            return False
+        if actual_group and candidate_group and not cls._numeric_address_tokens_match(candidate_group, actual_group):
+            return False
+        actual_house_number = cls._extract_house_number_token(actual_address)
+        candidate_house_number = cls._extract_house_number_token(candidate)
+        if actual_house_number and not candidate_house_number:
+            return False
+        if (
+            actual_house_number
+            and candidate_house_number
+            and not cls._numeric_address_tokens_match(candidate_house_number, actual_house_number)
+        ):
             return False
         return True
 
@@ -1065,12 +1228,36 @@ class ServiceDialoguePolicy:
         if normalized_new in normalized_existing:
             return prepared_existing
 
+        existing_components = extract_address_components(prepared_existing)
+        new_components = extract_address_components(prepared_new)
+        if new_components.has_precise_detail and components_match(new_components, existing_components):
+            return prepared_existing
+
         existing_has_region = cls._address_has_region_info(prepared_existing)
         existing_has_detail = cls._address_has_detail_info(prepared_existing)
         new_has_region = cls._address_has_region_info(prepared_new)
         new_has_detail = cls._address_has_detail_info(prepared_new)
         existing_has_admin_region = cls._address_has_admin_region(prepared_existing)
         new_has_admin_region = cls._address_has_admin_region(prepared_new)
+        new_has_nonstandard_detail = cls._has_nonstandard_address_detail(prepared_new)
+        existing_admin_prefix = cls._address_admin_region_prefix(prepared_existing)
+
+        if existing_has_admin_region and not new_has_admin_region and (
+            new_components.has_locality or new_has_nonstandard_detail
+        ):
+            merged_with_region = f"{existing_admin_prefix}{prepared_new}"
+            if cls._normalize_address_text(merged_with_region):
+                return merged_with_region
+
+        if (
+            existing_admin_prefix
+            and new_components.district
+            and not new_components.province
+            and not new_components.city
+        ):
+            merged_with_region = f"{existing_admin_prefix}{prepared_new}"
+            if cls._normalize_address_text(merged_with_region):
+                return merged_with_region
 
         if new_has_region and new_has_detail:
             return prepared_new
@@ -1079,12 +1266,162 @@ class ServiceDialoguePolicy:
             detail_merged = cls._merge_address_detail_replacements(prepared_existing, prepared_new)
             if detail_merged != prepared_existing:
                 return detail_merged
+            if existing_has_admin_region and existing_components.has_precise_detail and new_components.has_precise_detail:
+                return prepared_existing
 
         if new_has_admin_region and not existing_has_admin_region and existing_has_detail and not new_has_detail:
             return f"{prepared_new}{prepared_existing}"
         if existing_has_admin_region and not new_has_admin_region and new_has_detail and not existing_has_detail:
             return f"{prepared_existing}{prepared_new}"
         return f"{prepared_existing}{prepared_new}"
+
+    @classmethod
+    def _address_matches_actual(cls, candidate: str, actual_address: str) -> bool:
+        candidate_components = extract_address_components(candidate)
+        actual_components = extract_address_components(actual_address)
+        if not components_match(candidate_components, actual_components):
+            return False
+
+        candidate_group = cls._extract_village_group_token(candidate)
+        actual_group = cls._extract_village_group_token(actual_address)
+        if candidate_group:
+            if not actual_group:
+                return False
+            if not cls._numeric_address_tokens_match(candidate_group, actual_group):
+                return False
+
+        candidate_house_number = cls._extract_house_number_token(candidate)
+        actual_house_number = cls._extract_house_number_token(actual_address)
+        if candidate_house_number:
+            if not actual_house_number:
+                return False
+            if not cls._numeric_address_tokens_match(candidate_house_number, actual_house_number):
+                return False
+
+        return True
+
+    def _infer_address_candidate_with_callback(
+        self,
+        *,
+        user_text: str,
+        confirmation_address: str,
+        partial_address_candidate: str,
+        last_address_followup_prompt: str,
+    ) -> str:
+        if self.address_inference_callback is None:
+            return ""
+        try:
+            payload = self.address_inference_callback(
+                user_text=user_text,
+                confirmation_address=confirmation_address,
+                partial_address_candidate=partial_address_candidate,
+                last_address_followup_prompt=last_address_followup_prompt,
+            )
+        except Exception:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+
+        candidate = self._prepare_address_for_confirmation(
+            str(payload.get("address_candidate", "")).strip()
+        )
+        if not candidate:
+            return ""
+
+        components = extract_address_components(candidate)
+        granularity = str(payload.get("granularity", "")).strip().lower()
+        if granularity in {"none", "non_address"}:
+            return ""
+        if not (
+            components.has_admin_region
+            or components.has_locality
+            or components.has_precise_detail
+            or self._has_nonstandard_address_detail(candidate)
+        ):
+            return ""
+        if (
+            confirmation_address
+            and self._normalize_address_text(candidate)
+            == self._normalize_address_text(confirmation_address)
+        ):
+            return ""
+        return candidate
+
+    @classmethod
+    def _address_admin_region_prefix(cls, address: str) -> str:
+        components = extract_address_components(address)
+        return "".join(
+            value
+            for value in (components.province, components.city, components.district)
+            if value
+        )
+
+    @classmethod
+    def _extract_village_group_token(cls, address: str) -> str:
+        normalized = cls._normalize_address_text(address)
+        match = re.search(r"([零一二三四五六七八九十两\d]+组)", normalized)
+        return match.group(1) if match else ""
+
+    @classmethod
+    def _extract_house_number_token(cls, address: str) -> str:
+        normalized = cls._normalize_address_text(address)
+        if not normalized:
+            return ""
+
+        road_token = cls._normalize_address_text(extract_address_components(address).road)
+        matches = list(re.finditer(r"([零一二三四五六七八九十两\d]+号)(?!楼|栋|幢|座|单元|层|室)", normalized))
+        for match in reversed(matches):
+            token = match.group(1)
+            if road_token and token in road_token:
+                continue
+            return token
+        return ""
+
+    @classmethod
+    def _has_nonstandard_address_detail(cls, address: str) -> bool:
+        return bool(cls._extract_village_group_token(address) or cls._extract_house_number_token(address))
+
+    @classmethod
+    def _numeric_address_token_value(cls, token: str) -> str:
+        normalized = cls._normalize_address_text(token)
+        match = re.search(r"[零一二三四五六七八九十两\d]+", normalized)
+        if not match:
+            return normalized
+        number_text = match.group(0)
+        if number_text.isdigit():
+            return number_text
+
+        mapping = {
+            "零": 0,
+            "一": 1,
+            "二": 2,
+            "两": 2,
+            "三": 3,
+            "四": 4,
+            "五": 5,
+            "六": 6,
+            "七": 7,
+            "八": 8,
+            "九": 9,
+        }
+        if number_text == "十":
+            return "10"
+        if "十" in number_text:
+            left, _, right = number_text.partition("十")
+            tens = mapping.get(left, 1 if left == "" else -1)
+            units = mapping.get(right, 0 if right == "" else -1)
+            if tens >= 0 and units >= 0:
+                return str(tens * 10 + units)
+        digits: list[str] = []
+        for char in number_text:
+            if char not in mapping:
+                return number_text
+            digits.append(str(mapping[char]))
+        return "".join(digits)
+
+    @classmethod
+    def _numeric_address_tokens_match(cls, left: str, right: str) -> bool:
+        return cls._numeric_address_token_value(left) == cls._numeric_address_token_value(right)
 
     @classmethod
     def _merge_address_detail_replacements(cls, existing: str, new: str) -> str:
@@ -1256,8 +1593,10 @@ class ServiceDialoguePolicy:
             or normalized.startswith("好的，您是在")
             or normalized in cls._prompt_signatures(cls.ADDRESS_LOCALITY_FOLLOWUP_PROMPT)
             or normalized in cls._prompt_signatures(cls.ADDRESS_BUILDING_FOLLOWUP_PROMPT)
+            or normalized in cls._prompt_signatures(cls.ADDRESS_RURAL_DETAIL_FOLLOWUP_PROMPT)
             or normalized.startswith("好的，请您继续说一下小区、楼栋和门牌号")
             or normalized.startswith("请问是几栋几单元几楼几号")
+            or normalized.startswith("好的，请您提供一下详细的地址")
         )
 
     @classmethod
@@ -1274,9 +1613,31 @@ class ServiceDialoguePolicy:
         )
 
     @classmethod
+    def is_surname_prompt(cls, text: str) -> bool:
+        return cls._signature_matches_prompt(text, cls.SURNAME_PROMPT)
+
+    @classmethod
+    def is_contactable_prompt(cls, text: str) -> bool:
+        return cls._signature_matches_prompt(text, cls.CONTACTABLE_PROMPT)
+
+    @classmethod
+    def is_product_arrival_prompt(cls, text: str) -> bool:
+        normalized = cls._normalize_prompt_text(text)
+        return normalized.startswith("请问") and normalized.endswith("到货了没")
+
+    @classmethod
+    def is_product_model_prompt(cls, text: str) -> bool:
+        return cls._signature_matches_prompt(text, cls.PRODUCT_MODEL_PROMPT)
+
+    @classmethod
     def is_closing_notice_prompt(cls, text: str) -> bool:
         normalized = cls._normalize_prompt_text(text)
         return normalized.startswith("您的工单已受理成功")
+
+    @classmethod
+    def is_satisfaction_prompt(cls, text: str) -> bool:
+        normalized = cls._normalize_prompt_text(text)
+        return "对本次通话服务打分" in normalized and "1、非常满意" in normalized
 
     def _choose_prompt_text(self, prompt_config: str | PromptConfig, **format_kwargs: str) -> str:
         texts, weights = self._resolve_prompt_variants(prompt_config)
@@ -1342,6 +1703,9 @@ class ServiceDialoguePolicy:
     def _address_building_followup_prompt(self) -> str:
         return self._choose_prompt_text(self.ADDRESS_BUILDING_FOLLOWUP_PROMPT)
 
+    def _address_rural_detail_followup_prompt(self) -> str:
+        return self._choose_prompt_text(self.ADDRESS_RURAL_DETAIL_FOLLOWUP_PROMPT)
+
     def _address_followup_prompt(self, candidate: str, actual_address: str) -> str:
         components = extract_address_components(candidate)
         if not components.district:
@@ -1358,6 +1722,8 @@ class ServiceDialoguePolicy:
 
     def _address_followup_prompt_for_actual(self, *, candidate: str, actual_address: str) -> str:
         components = extract_address_components(candidate)
+        if self._is_rural_address_candidate(candidate) and not components.has_precise_detail:
+            return self._address_rural_detail_followup_prompt()
         if components.has_locality and not self._has_required_address_precision(candidate, actual_address):
             return self._address_building_followup_prompt()
         if components.has_locality and not components.has_precise_detail:
@@ -1374,6 +1740,64 @@ class ServiceDialoguePolicy:
         if city:
             return city if city.endswith("市") else f"{city}市"
         return ""
+
+    @staticmethod
+    def _interactive_test_freeform_enabled(scenario: Scenario) -> bool:
+        return bool(scenario.hidden_context.get("interactive_test_freeform", False))
+
+    @staticmethod
+    def _has_known_value(value: str) -> bool:
+        normalized = str(value or "").strip().lower()
+        return normalized not in {"", "未知", "unknown", "n/a", "na", "null", "none"}
+
+    @classmethod
+    def _extract_mobile_phone(cls, text: str) -> str:
+        digits = re.sub(r"\D", "", text or "")
+        match = MOBILE_PHONE_PATTERN.search(digits)
+        return match.group(0) if match else ""
+
+    @classmethod
+    def _extract_freeform_surname(cls, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned or cls._classify_yes_no(cleaned) in {"yes", "no"}:
+            return ""
+
+        explicit_patterns = (
+            r"(?:我姓|姓)\s*([一-龥])",
+            r"(?:免贵姓|贵姓)\s*([一-龥])",
+            r"(?:我叫|名字是|姓名是)\s*([一-龥]{2,4})",
+        )
+        for pattern in explicit_patterns:
+            match = re.search(pattern, cleaned)
+            if match:
+                return match.group(1)[0]
+
+        compact = re.sub(r"[，,。！？!?：:\s]", "", cleaned)
+        compact = re.sub(r"^(好的|嗯|啊|呃|额|是|对)+", "", compact)
+        if re.fullmatch(r"[一-龥]{1,4}", compact):
+            return compact[0]
+        return ""
+
+    @classmethod
+    def _is_rural_address_candidate(cls, text: str) -> bool:
+        normalized = cls._normalize_address_text(text)
+        return bool(re.search(r"(村|自然村|屯|\d+组|[零一二三四五六七八九十两]+组|\d+队)", normalized))
+
+    @classmethod
+    def _contains_rural_no_building_statement(cls, text: str) -> bool:
+        normalized = cls._normalize_address_text(text)
+        patterns = (
+            r"村.*没.*栋",
+            r"村.*没有.*栋",
+            r"没.*楼栋",
+            r"没有.*楼栋",
+            r"没.*单元",
+            r"没有.*单元",
+            r"不是楼房",
+            r"自建房",
+            r"平房",
+        )
+        return any(re.search(pattern, normalized) for pattern in patterns)
 
     @staticmethod
     def _address_component_count(components: AddressComponents) -> int:

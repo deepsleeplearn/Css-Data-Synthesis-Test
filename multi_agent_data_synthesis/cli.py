@@ -9,6 +9,11 @@ from multi_agent_data_synthesis.config import load_config
 from multi_agent_data_synthesis.exporter import write_json, write_jsonl
 from multi_agent_data_synthesis.hidden_settings_tool import HiddenSettingsTool
 from multi_agent_data_synthesis.llm import OpenAIChatClient
+from multi_agent_data_synthesis.manual_test import (
+    default_manual_test_output_path,
+    load_manual_test_scenario,
+    run_manual_test_session,
+)
 from multi_agent_data_synthesis.orchestrator import DialogueOrchestrator
 from multi_agent_data_synthesis.scenario_factory import ScenarioFactory
 
@@ -90,6 +95,46 @@ def build_parser() -> argparse.ArgumentParser:
         help="异步并发生成的任务数，默认使用配置中的 MAX_CONCURRENCY",
     )
 
+    interactive_parser = subparsers.add_parser(
+        "interactive-test",
+        help="手工输入用户话术，与现有客服状态机交互测试",
+    )
+    interactive_parser.add_argument(
+        "--scenario-file",
+        type=Path,
+        default=Path("data/seed_scenarios.json"),
+        help="场景配置 JSON 文件路径",
+    )
+    interactive_parser.add_argument(
+        "--scenario-id",
+        type=str,
+        default="",
+        help="指定要测试的 scenario_id，优先级高于 scenario-index",
+    )
+    interactive_parser.add_argument(
+        "--scenario-index",
+        type=int,
+        default=0,
+        help="指定要测试的场景下标，默认取第 1 个",
+    )
+    interactive_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="测试结果 JSON 输出路径，默认写入 outputs/manual_tests/",
+    )
+    interactive_parser.add_argument(
+        "--max-rounds",
+        type=int,
+        default=None,
+        help="最大交互轮数，默认使用场景里的 max_turns",
+    )
+    interactive_parser.add_argument(
+        "--auto-hidden-settings",
+        action="store_true",
+        help="先调用隐藏设定生成 TOOL，再进入手工交互测试",
+    )
+
     return parser
 
 
@@ -157,6 +202,32 @@ async def run_generate_hidden_settings_async(args: argparse.Namespace) -> None:
     print(f"History store: {config.hidden_settings_store}")
 
 
+def run_interactive_test(args: argparse.Namespace) -> None:
+    scenario = load_manual_test_scenario(
+        args.scenario_file,
+        scenario_id=args.scenario_id,
+        scenario_index=args.scenario_index,
+    )
+    scenario.hidden_context["interactive_test_freeform"] = True
+
+    if args.auto_hidden_settings:
+        config = load_config()
+        tool = HiddenSettingsTool(OpenAIChatClient(config), config)
+        scenario = tool.generate_for_scenario(scenario)
+        scenario.hidden_context["interactive_test_freeform"] = True
+        ok_prefix_probability = config.service_ok_prefix_probability
+    else:
+        ok_prefix_probability = 0.7
+
+    output_path = args.output or default_manual_test_output_path(scenario.scenario_id)
+    run_manual_test_session(
+        scenario,
+        output_path=output_path,
+        max_rounds=args.max_rounds,
+        ok_prefix_probability=ok_prefix_probability,
+    )
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
@@ -165,6 +236,8 @@ def main() -> None:
         run_generate(args)
     elif args.command == "generate-hidden-settings":
         run_generate_hidden_settings(args)
+    elif args.command == "interactive-test":
+        run_interactive_test(args)
 
 
 if __name__ == "__main__":

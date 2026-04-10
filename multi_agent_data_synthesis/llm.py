@@ -35,6 +35,24 @@ class OpenAIChatClient:
     def __init__(self, config: AppConfig):
         self.config = config
 
+    @staticmethod
+    def _is_qwen_family_model(model: str) -> bool:
+        return model.strip().lower().startswith("qwen")
+
+    @staticmethod
+    def _requires_qwen_model_path(model: str) -> bool:
+        return model.strip().lower().startswith("qwen3-")
+
+    @staticmethod
+    def _summarize_response_body(response: httpx.Response, *, limit: int = 300) -> str:
+        body = response.text.strip()
+        if not body:
+            return "<empty body>"
+        compact = " ".join(body.split())
+        if len(compact) <= limit:
+            return compact
+        return f"{compact[:limit]}..."
+
     def _build_headers(self, model: str) -> dict[str, str]:
         headers = {
             "Aimp-Biz-Id": model,
@@ -74,6 +92,17 @@ class OpenAIChatClient:
         if isinstance(extra_body, dict):
             payload.update(extra_body)
 
+        if self._is_qwen_family_model(model):
+            chat_template_kwargs = payload.get("chat_template_kwargs", {})
+            if not isinstance(chat_template_kwargs, dict):
+                chat_template_kwargs = {}
+            chat_template_kwargs.setdefault("enable_thinking", enable_thinking)
+            payload["chat_template_kwargs"] = chat_template_kwargs
+            payload.setdefault("stream", False)
+
+            if self._requires_qwen_model_path(model):
+                payload["model"] = f"/model/{model}"
+
         return payload
 
     @staticmethod
@@ -87,7 +116,113 @@ class OpenAIChatClient:
         profile.setdefault("max_tokens_param", "max_tokens")
         profile.setdefault("include_enable_thinking", True)
         profile.setdefault("enable_thinking_param", "enable_thinking")
+        if model.strip().lower().startswith("qwen"):
+            profile["include_enable_thinking"] = False
         return profile
+
+    @classmethod
+    def _parse_event_stream_payload(cls, body: str) -> dict[str, Any]:
+        events: list[dict[str, Any]] = []
+        for raw_line in body.splitlines():
+            line = raw_line.strip()
+            if not line or not line.startswith("data:"):
+                continue
+            event_text = line[5:].strip()
+            if not event_text or event_text == "[DONE]":
+                continue
+            try:
+                event = json.loads(event_text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+
+        if not events:
+            raise ValueError("No JSON event payloads found in stream response.")
+
+        for event in reversed(events):
+            choices = event.get("choices")
+            if (
+                isinstance(choices, list)
+                and choices
+                and isinstance(choices[0], dict)
+                and isinstance(choices[0].get("message"), dict)
+            ):
+                return event
+
+        aggregated_choices: dict[int, dict[str, Any]] = {}
+        usage: Any = None
+        last_event = events[-1]
+
+        for event in events:
+            if event.get("usage") is not None:
+                usage = event.get("usage")
+
+            choices = event.get("choices")
+            if not isinstance(choices, list):
+                continue
+
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                index = int(choice.get("index", 0))
+                aggregate = aggregated_choices.setdefault(
+                    index,
+                    {
+                        "index": index,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": None,
+                            "tool_calls": None,
+                        },
+                        "logprobs": None,
+                        "finish_reason": None,
+                        "matched_stop": None,
+                    },
+                )
+
+                message = aggregate["message"]
+                delta = choice.get("delta")
+                if isinstance(delta, dict):
+                    role = delta.get("role")
+                    if isinstance(role, str) and role:
+                        message["role"] = role
+
+                    content = delta.get("content")
+                    if isinstance(content, str):
+                        message["content"] += content
+
+                    reasoning_content = delta.get("reasoning_content")
+                    if isinstance(reasoning_content, str):
+                        existing_reasoning = message.get("reasoning_content")
+                        if isinstance(existing_reasoning, str):
+                            message["reasoning_content"] = existing_reasoning + reasoning_content
+                        else:
+                            message["reasoning_content"] = reasoning_content
+
+                    tool_calls = delta.get("tool_calls")
+                    if tool_calls is not None:
+                        message["tool_calls"] = tool_calls
+
+                if choice.get("finish_reason") is not None:
+                    aggregate["finish_reason"] = choice.get("finish_reason")
+                if choice.get("matched_stop") is not None:
+                    aggregate["matched_stop"] = choice.get("matched_stop")
+                if choice.get("logprobs") is not None:
+                    aggregate["logprobs"] = choice.get("logprobs")
+
+        if not aggregated_choices:
+            raise ValueError("No usable choices found in stream response.")
+
+        return {
+            "id": last_event.get("id"),
+            "object": "chat.completion",
+            "created": last_event.get("created"),
+            "model": last_event.get("model"),
+            "choices": [aggregated_choices[index] for index in sorted(aggregated_choices)],
+            "usage": usage,
+        }
 
     @staticmethod
     def _extract_message_content(payload: dict[str, Any]) -> str:
@@ -123,11 +258,7 @@ class OpenAIChatClient:
     ) -> dict[str, Any]:
         with httpx.Client(timeout=self.config.request_timeout) as client:
             response = client.post(self.config.openai_base_url, json=payload, headers=headers)
-        if response.status_code >= 400:
-            raise RuntimeError(
-                f"Model request failed with status {response.status_code}: {response.text}"
-            )
-        return response.json()
+        return self._parse_response(response)
 
     async def _send_request_async(
         self,
@@ -137,11 +268,38 @@ class OpenAIChatClient:
     ) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
             response = await client.post(self.config.openai_base_url, json=payload, headers=headers)
+        return self._parse_response(response)
+
+    def _parse_response(self, response: httpx.Response) -> dict[str, Any]:
         if response.status_code >= 400:
             raise RuntimeError(
-                f"Model request failed with status {response.status_code}: {response.text}"
+                f"Model request failed with status {response.status_code}: "
+                f"{self._summarize_response_body(response)}"
             )
-        return response.json()
+        content_type = response.headers.get("content-type", "<missing>")
+        if "text/event-stream" in content_type.lower():
+            try:
+                return self._parse_event_stream_payload(response.text)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "Model response event stream could not be parsed: "
+                    f"{self._summarize_response_body(response)}"
+                ) from exc
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Model response was not valid JSON "
+                f"(status {response.status_code}, content-type {content_type}): "
+                f"{self._summarize_response_body(response)}"
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                "Model response JSON root must be an object, "
+                f"got {type(payload).__name__}: {self._summarize_response_body(response)}"
+            )
+        return payload
 
     def complete(
         self,

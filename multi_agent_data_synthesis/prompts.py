@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from multi_agent_data_synthesis.address_utils import compact_address_text, normalize_address_text
 from multi_agent_data_synthesis.dialogue_plans import (
     SECOND_ROUND_REPLY_CONFIRM_ONLY,
     SECOND_ROUND_REPLY_CONFIRM_WITH_ISSUE,
@@ -11,6 +12,7 @@ from multi_agent_data_synthesis.schemas import (
     DialogueTurn,
     Scenario,
     SERVICE_SPEAKER,
+    USER_SPEAKER,
     display_speaker,
     normalize_speaker,
     effective_required_slots,
@@ -59,17 +61,13 @@ def next_phone_input_value(scenario: Scenario, transcript: list[DialogueTurn]) -
     return str(hidden_context.get("phone_input_round_3", "")).strip() or "无"
 
 
-def next_address_input_value(scenario: Scenario, transcript: list[DialogueTurn]) -> str:
-    prompt_count = count_address_collection_prompts(transcript)
-    if prompt_count <= 0:
-        return "无"
-
+def _address_plan_round_values(scenario: Scenario) -> list[str]:
     hidden_context = scenario.hidden_context
     round_values = hidden_context.get("address_input_rounds", [])
     if isinstance(round_values, list):
         normalized_round_values = [str(value).strip() for value in round_values if str(value).strip()]
         if normalized_round_values:
-            return normalized_round_values[min(prompt_count - 1, len(normalized_round_values) - 1)]
+            return normalized_round_values
 
     fallback_keys = (
         "address_input_round_1",
@@ -78,10 +76,69 @@ def next_address_input_value(scenario: Scenario, transcript: list[DialogueTurn])
         "address_input_round_4",
     )
     fallback_values = [str(hidden_context.get(key, "")).strip() for key in fallback_keys]
-    fallback_values = [value for value in fallback_values if value]
-    if fallback_values:
-        return fallback_values[min(prompt_count - 1, len(fallback_values) - 1)]
-    return "无"
+    return [value for value in fallback_values if value]
+
+
+def _address_collection_user_replies(transcript: list[DialogueTurn]) -> list[str]:
+    replies: list[str] = []
+    for index in range(1, len(transcript)):
+        previous_turn = transcript[index - 1]
+        current_turn = transcript[index]
+        if (
+            normalize_speaker(previous_turn.speaker) == SERVICE_SPEAKER
+            and ServiceDialoguePolicy.is_address_collection_prompt(previous_turn.text)
+            and normalize_speaker(current_turn.speaker) == USER_SPEAKER
+        ):
+            replies.append(current_turn.text)
+    return replies
+
+
+def _reply_matches_address_value(reply: str, expected: str) -> bool:
+    normalized_reply = normalize_address_text(reply)
+    normalized_expected = normalize_address_text(expected)
+    if not normalized_reply or not normalized_expected:
+        return False
+    if (
+        normalized_reply == normalized_expected
+        or normalized_reply in normalized_expected
+        or normalized_expected in normalized_reply
+    ):
+        return True
+    return compact_address_text(reply) == compact_address_text(expected)
+
+
+def _consumed_address_plan_steps(scenario: Scenario, transcript: list[DialogueTurn]) -> int:
+    planned_values = _address_plan_round_values(scenario)
+    if not planned_values:
+        return 0
+
+    actual_address = str(scenario.customer.address or "").strip()
+    consumed_steps = 0
+    for reply in _address_collection_user_replies(transcript):
+        if actual_address and _reply_matches_address_value(reply, actual_address):
+            return len(planned_values)
+        matched_step = None
+        for index in range(consumed_steps, len(planned_values)):
+            if _reply_matches_address_value(reply, planned_values[index]):
+                matched_step = index
+                break
+        if matched_step is not None:
+            consumed_steps = matched_step + 1
+    return consumed_steps
+
+
+def next_address_input_value(scenario: Scenario, transcript: list[DialogueTurn]) -> str:
+    if count_address_collection_prompts(transcript) <= 0:
+        return "无"
+
+    planned_values = _address_plan_round_values(scenario)
+    if not planned_values:
+        return str(scenario.customer.address or "").strip() or "无"
+
+    consumed_steps = _consumed_address_plan_steps(scenario, transcript)
+    if consumed_steps < len(planned_values):
+        return planned_values[consumed_steps]
+    return str(scenario.customer.address or "").strip() or planned_values[-1]
 
 
 def count_phone_keypad_prompts(transcript: list[DialogueTurn]) -> int:
@@ -100,6 +157,30 @@ def count_address_collection_prompts(transcript: list[DialogueTurn]) -> int:
         if normalize_speaker(turn.speaker) == SERVICE_SPEAKER
         and ServiceDialoguePolicy.is_address_collection_prompt(turn.text)
     )
+
+
+def _count_service_prompts(transcript: list[DialogueTurn], predicate) -> int:
+    return sum(
+        1
+        for turn in transcript
+        if normalize_speaker(turn.speaker) == SERVICE_SPEAKER and predicate(turn.text)
+    )
+
+
+def count_surname_prompts(transcript: list[DialogueTurn]) -> int:
+    return _count_service_prompts(transcript, ServiceDialoguePolicy.is_surname_prompt)
+
+
+def count_contactable_prompts(transcript: list[DialogueTurn]) -> int:
+    return _count_service_prompts(transcript, ServiceDialoguePolicy.is_contactable_prompt)
+
+
+def count_product_arrival_prompts(transcript: list[DialogueTurn]) -> int:
+    return _count_service_prompts(transcript, ServiceDialoguePolicy.is_product_arrival_prompt)
+
+
+def count_product_model_prompts(transcript: list[DialogueTurn]) -> int:
+    return _count_service_prompts(transcript, ServiceDialoguePolicy.is_product_model_prompt)
 
 
 def is_replying_to_service_opening(
@@ -149,7 +230,51 @@ def build_topic_guardrail_note(transcript: list[DialogueTurn]) -> str:
             "当前客服是在通知工单已受理并准备收尾。你通常只简短确认即可，比如“好的”“知道了”。"
             "不要再重复地址、故障、电话、型号等前面已经说过的内容。"
         )
+    if ServiceDialoguePolicy.is_satisfaction_prompt(last_service_text):
+        return (
+            "当前客服是在邀请你对本次通话打分。你必须只回复单个数字“1”或“2”，"
+            "不要回复“挺好的”“满意”“好的”之类的自然语言，也不要补充其他内容。"
+        )
     return "当前没有额外的话题限制。"
+
+
+def build_repeat_prompt_guardrail_note(transcript: list[DialogueTurn]) -> str:
+    if not transcript:
+        return "当前没有额外的重复追问约束。"
+
+    last_turn = transcript[-1]
+    if normalize_speaker(last_turn.speaker) != SERVICE_SPEAKER:
+        return "当前没有额外的重复追问约束。"
+
+    last_service_text = last_turn.text
+    if ServiceDialoguePolicy.is_surname_prompt(last_service_text):
+        prompt_count = count_surname_prompts(transcript)
+        if prompt_count >= 2:
+            return (
+                f"客服已第 {prompt_count} 次询问姓氏。你这一轮必须直接回答姓氏，"
+                "不能继续答非所问，也不要重复上一轮自己说过的安装、维修或确认话术。"
+            )
+        return "当前客服在问姓氏。你只回答姓氏，不要重复之前已经说过的诉求。"
+
+    if ServiceDialoguePolicy.is_product_arrival_prompt(last_service_text):
+        prompt_count = count_product_arrival_prompts(transcript)
+        if prompt_count >= 2:
+            return (
+                f"客服已第 {prompt_count} 次确认产品是否到货。你这一轮必须直接回答是否到货，"
+                "不要继续复述之前的安装诉求或上一轮原话。"
+            )
+        return "当前客服在确认产品是否到货。你只围绕是否到货回答，不要重复安装诉求。"
+
+    if ServiceDialoguePolicy.is_product_model_prompt(last_service_text):
+        prompt_count = count_product_model_prompts(transcript)
+        if prompt_count >= 2:
+            return (
+                f"客服已第 {prompt_count} 次询问型号。你这一轮必须直接回答型号相关信息，"
+                "不要继续答非所问，也不要复读上一轮旧内容。"
+            )
+        return "当前客服在问型号。你只回答型号相关信息，不要展开旧话题。"
+
+    return "当前没有额外的重复追问约束。"
 
 
 def build_user_agent_messages(
@@ -198,6 +323,20 @@ def build_user_agent_messages(
     service_known_address_matches_actual = (
         "是" if scenario.hidden_context.get("service_known_address_matches_actual", False) else "否"
     )
+    service_known_address_mismatch_start_level = str(
+        scenario.hidden_context.get("service_known_address_mismatch_start_level", "")
+    ).strip() or "无"
+    service_known_address_rewrite_levels = scenario.hidden_context.get(
+        "service_known_address_rewrite_levels",
+        [],
+    )
+    if not isinstance(service_known_address_rewrite_levels, list):
+        service_known_address_rewrite_levels = []
+    service_known_address_rewrite_levels_text = " -> ".join(
+        str(value).strip()
+        for value in service_known_address_rewrite_levels
+        if str(value).strip()
+    ) or "无"
     address_input_round_1 = str(
         scenario.hidden_context.get("address_input_round_1", scenario.customer.address)
     ).strip()
@@ -213,6 +352,25 @@ def build_user_agent_messages(
     address_confirmation_no_reply = str(
         scenario.hidden_context.get("address_confirmation_no_reply", "不对。")
     ).strip()
+    user_address_style = str(
+        scenario.hidden_context.get("user_address_style", "standard_residential")
+    ).strip() or "standard_residential"
+    user_address_style_instruction = str(
+        scenario.hidden_context.get("user_address_style_instruction", "")
+    ).strip() or "默认标准住宅地址"
+    user_reply_noise_enabled = (
+        "是" if bool(scenario.hidden_context.get("user_reply_noise_enabled", False)) else "否"
+    )
+    user_reply_noise_target = str(
+        scenario.hidden_context.get("user_reply_noise_target", "")
+    ).strip() or "无"
+    try:
+        user_reply_noise_rounds = int(scenario.hidden_context.get("user_reply_noise_rounds", 0) or 0)
+    except (TypeError, ValueError):
+        user_reply_noise_rounds = 0
+    user_reply_noise_instruction = str(
+        scenario.hidden_context.get("user_reply_noise_instruction", "")
+    ).strip() or "整体正常配合客服，不需要刻意答非所问。"
     product_arrived = "是" if str(scenario.hidden_context.get("product_arrived", "yes")).strip().lower() == "yes" else "否"
     resolved_second_round_reply_strategy = normalize_second_round_reply_strategy(
         second_round_reply_strategy or scenario.hidden_context.get("second_round_reply_strategy", "")
@@ -224,6 +382,7 @@ def build_user_agent_messages(
         else "只做简短确认，不继续补充故障或安装细节"
     )
     topic_guardrail_note = build_topic_guardrail_note(transcript)
+    repeat_prompt_guardrail_note = build_repeat_prompt_guardrail_note(transcript)
     expression_mode_note = f"""
 第二轮回复策略补充要求：
 1. 当你是在直接回应客服开场确认时，必须严格执行本场景的固定策略，不要临场自行切换。
@@ -237,6 +396,9 @@ def build_user_agent_messages(
 
 当前话题限制：
 {topic_guardrail_note}
+
+重复追问约束：
+{repeat_prompt_guardrail_note}
 """.strip()
     user_prompt = f"""当前是第 {round_index} 轮。
 
@@ -266,15 +428,27 @@ def build_user_agent_messages(
 - 若客服要求拨号盘输入号码，第 3 次应输入: {phone_input_round_3}
 - 当前已被要求拨号盘输入号码的次数: {count_phone_keypad_prompts(transcript)}
 - 如果这轮正被要求拨号盘输入，本轮应输入: {next_phone_input_value(scenario, transcript)}
+- 当前已被问姓氏的次数: {count_surname_prompts(transcript)}
+- 当前已被问到货情况的次数: {count_product_arrival_prompts(transcript)}
+- 当前已被问型号的次数: {count_product_model_prompts(transcript)}
+- 当前已被问当前号码能否联系的次数: {count_contactable_prompts(transcript)}
 - 客服侧是否已知地址: {service_known_address}
 - 若客服已知地址，客服掌握的地址内容: {service_known_address_value}
 - 若客服已知地址，该地址是否与真实地址一致: {service_known_address_matches_actual}
+- 若客服已知地址但地址不对，错误起始粒度: {service_known_address_mismatch_start_level}
+- 若客服已知地址但地址不对，需要重塑的地址粒度链路: {service_known_address_rewrite_levels_text}
 - 若客服核对了错误地址，你这一轮应答: {address_confirmation_no_reply}
 - 若客服第一次询问地址信息，第 1 次应答: {address_input_round_1}
 - 若客服继续追问剩余地址细节，第 2 次应答: {address_input_round_2}
 - 地址分段回复计划: {address_input_rounds_text}
 - 当前已被要求提供地址信息的次数: {count_address_collection_prompts(transcript)}
 - 如果这轮正被要求补充地址信息，本轮应答: {next_address_input_value(scenario, transcript)}
+- 用户地址形态类型: {user_address_style}
+- 用户地址形态说明: {user_address_style_instruction}
+- 是否允许轻微答非所问: {user_reply_noise_enabled}
+- 若允许，目标环节: {user_reply_noise_target}
+- 若允许，该环节最多可轻微答偏的轮数: {user_reply_noise_rounds}
+- 若允许，本场景的轻微答偏说明: {user_reply_noise_instruction}
 - 额外隐藏设定:
 {format_hidden_context(scenario.hidden_context)}
 
@@ -294,10 +468,14 @@ def build_user_agent_messages(
 8. 如果客服问地址，你可以按隐藏设定分几轮逐步补充；客服继续追问缺失部分时，就只补当前还没说到的那部分，也可以在合适时直接给出完整地址。完整地址确认完后，如果客服再按固定话术核对地址，就只做简短确认。
 9. 如果客服问产品或者产品到货了没，就按隐藏设定回答，说话不需要太正式，口语化些；已经确认过“要安装/要维修”后，不要把同一句诉求又重复一遍，除非客服重新追问。
 10. 如果客服通知“工单已受理成功”并说明后续联系时间，这一轮通常只做简短确认回复。
-11. 如果客服要求你对本次通话按 1 到 5 打分，回复1-2。
+11. 如果客服要求你对本次通话按 1 到 5 打分，必须只回复单个数字“1”或“2”；不要回复“挺好的”“满意”“好的”等自然语言，也不要输出其他解释。
 12. 除了客服明确问到的内容，不要主动再说已经沟通过的诉求、地址、电话号码等；如果要补充，也优先补充新的细节，不要原句复述上一轮已经说过的话。
 13. 回复风格要明显符合“用户画像”和“用户说话方式”；如果设定为简短就少说，如果设定为啰嗦就自然多解释一点，如果设定为略有停顿或结巴，只能轻微体现，不能夸张到影响理解。
 14. 已经确认过的旧信息，不要在后续不相关话题里重复；尤其在号码核对、地址核对、工单受理收尾这几类场景里，只围绕当前话题简短回答。
+15. 如果本场景允许“轻微答非所问”，只能按隐藏设定说明在对应环节发生，而且最多持续给定的轮数；必须是轻微偏题或先说一部分，不能离题太远，也不能超过配置轮数；客服再次追问后要恢复正常配合。
+16. 地址表达要符合“用户地址形态类型”：标准住宅地址可以自然说栋/单元/室；门牌号型地址可以只说到多少号；乡村组号型地址可以说到村、组、号；地标型地址可以自然提到医院、饭店、酒店、园区、学校、门店等，但仍要给出足够定位的信息。
+17. 对非电话、非地址槽位，如果客服已经第 2 次或更多次重复追问同一项，这一轮必须直接回答该槽位，不能继续答非所问。
+18. 如果上一轮你已经对同一个问题答偏了，这一轮不要复述上一轮自己说过的话，要直接回答当前问题。
 
 请直接给出 JSON。"""
     return [

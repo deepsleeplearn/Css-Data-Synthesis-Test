@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from multi_agent_data_synthesis.address_utils import (
+    MUNICIPALITY_PREFIXES,
     build_address_progressive_segments,
     extract_address_components,
 )
@@ -59,6 +60,16 @@ COHERENT_MUNICIPALITY_OPTIONS: tuple[dict[str, Any], ...] = (
 )
 FEMALE_NAME_HINT_CHARS = frozenset("丽娜静敏艳娟婷颖雪倩芳琳洁欣怡蓉莹燕璐璇岚妍媛")
 MALE_NAME_HINT_CHARS = frozenset("强伟磊军勇涛超鹏杰峰斌刚浩东博飞健志明龙宁凯晨亮")
+ADDRESS_LEVEL_ORDER = (
+    "province",
+    "city",
+    "district",
+    "locality",
+    "building",
+    "unit",
+    "floor",
+    "room",
+)
 
 
 @dataclass
@@ -75,6 +86,16 @@ class HiddenSettingsRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class UserGenerationPlan:
+    address_style: str
+    address_instruction: str
+    reply_noise_enabled: bool
+    reply_noise_target: str
+    reply_noise_rounds: int
+    reply_noise_instruction: str
 
 
 class HiddenSettingsRepository:
@@ -159,9 +180,10 @@ class HiddenSettingsTool:
         rejection_feedback = ""
 
         for attempt in range(1, self.config.hidden_settings_max_attempts + 1):
+            generation_plan = self._sample_user_generation_plan()
             payload = self.client.complete_json(
                 model=self.config.user_agent_model,
-                messages=self._build_messages(scenario, rejection_feedback),
+                messages=self._build_messages(scenario, rejection_feedback, generation_plan),
                 temperature=0.95,
             )
             try:
@@ -173,6 +195,7 @@ class HiddenSettingsTool:
             except ValueError as error:
                 rejection_feedback = self._build_validation_feedback(attempt, str(error))
                 continue
+            self._attach_user_generation_plan(candidate, generation_plan)
             self._attach_second_round_reply_plan(scenario.scenario_id, candidate)
             self._attach_contact_plan(scenario.scenario_id, candidate)
             self._attach_address_plan(scenario.scenario_id, candidate)
@@ -225,9 +248,10 @@ class HiddenSettingsTool:
             async with self._history_lock:
                 history = self.repository.load()
 
+            generation_plan = self._sample_user_generation_plan()
             payload = await self._complete_json_async(
                 model=self.config.user_agent_model,
-                messages=self._build_messages(scenario, rejection_feedback),
+                messages=self._build_messages(scenario, rejection_feedback, generation_plan),
                 temperature=0.95,
             )
             try:
@@ -239,6 +263,7 @@ class HiddenSettingsTool:
             except ValueError as error:
                 rejection_feedback = self._build_validation_feedback(attempt, str(error))
                 continue
+            self._attach_user_generation_plan(candidate, generation_plan)
             self._attach_second_round_reply_plan(scenario.scenario_id, candidate)
             self._attach_contact_plan(scenario.scenario_id, candidate)
             self._attach_address_plan(scenario.scenario_id, candidate)
@@ -297,6 +322,7 @@ class HiddenSettingsTool:
         self,
         scenario: Scenario,
         rejection_feedback: str,
+        generation_plan: UserGenerationPlan,
     ) -> list[dict[str, str]]:
         product_name = str(scenario.product.category).strip() or "空气能热水器"
         system_prompt = f"""你是一个家电客服数据生成工具，负责给 user_agent 生成隐藏设定。
@@ -350,6 +376,7 @@ class HiddenSettingsTool:
 - 生成的内容必须适合中文客服通话
 - 用户信息必须完整，可直接用于后续对话
 - 地址必须是合理的中国地址
+- 当前地址形态要求: {generation_plan.address_instruction}
 - 电话必须是 11 位中国大陆手机号
 - `hidden_context.gender` 必须填写为“男”或“女”
 - 故障场景下，大多数 issue 只写 1 个具体故障点，只保留一个核心现象
@@ -357,6 +384,7 @@ class HiddenSettingsTool:
 - 安装场景与故障场景要区分明显
 - 用户画像与说话方式都要具体，且不要写成同一句的重复改写
 - 大多数用户应更像普通来电用户，不要总写成创业者、高管、专家或表达特别流畅的人
+- 本场景用户回复随机性要求: {generation_plan.reply_noise_instruction}
 - 如果收到“与历史样本相似度过高”的反馈，说明这次生成和历史记录太像，需要整体换一版内容
 
 {rejection_feedback}
@@ -410,6 +438,7 @@ class HiddenSettingsTool:
             normalized["request"]["request_type"],
             scenario_id=scenario_id,
         )
+        self._validate_address_completeness(normalized["customer"]["address"])
         for group_name, group in normalized.items():
             if any(not value for value in group.values()) and group_name != "hidden_context":
                 raise ValueError(f"Generated hidden settings missing required fields in {group_name}.")
@@ -447,6 +476,33 @@ class HiddenSettingsTool:
             raise ValueError("Generated hidden settings issue contains too many fault symptoms.")
         if not self._issue_allows_multi_fault(scenario_id, issue):
             raise ValueError("Generated hidden settings issue should usually describe only one fault symptom.")
+
+    @classmethod
+    def _validate_address_completeness(cls, address_text: str) -> None:
+        address = str(address_text or "").strip()
+        if not address:
+            raise ValueError("Generated hidden settings missing address.")
+
+        components = extract_address_components(address)
+        normalized = re.sub(r"\s+", "", address)
+        municipality_cities = {f"{value}市" for value in MUNICIPALITY_PREFIXES}
+        if not components.city:
+            raise ValueError("Generated hidden settings address must include city-level region.")
+        if components.city not in municipality_cities and not components.province:
+            raise ValueError("Generated hidden settings address must include province for non-municipality cities.")
+        if not components.district:
+            raise ValueError("Generated hidden settings address must include district/county-level region.")
+
+        has_locality = bool(components.town or components.road or components.community)
+        has_precise_detail = bool(components.building or components.unit or components.floor or components.room)
+        has_house_number = bool(re.search(r"\d+\s*号(?!楼)", normalized))
+        has_rural_detail = bool(re.search(r"(村|屯|组|队).*(\d+\s*号|[零一二三四五六七八九十两\d]+组)", normalized))
+        has_poi_locality = bool(re.search(r"(医院|学校|酒店|饭店|园区|门店|商场|广场)", normalized))
+
+        if not (has_locality or has_poi_locality):
+            raise ValueError("Generated hidden settings address must include locality detail.")
+        if not (has_precise_detail or has_house_number or has_rural_detail):
+            raise ValueError("Generated hidden settings address must include precise locating detail.")
 
     @classmethod
     def _count_fault_symptom_clauses(cls, issue_text: str) -> int:
@@ -487,8 +543,158 @@ class HiddenSettingsTool:
             f"- 第 {attempt} 次失败原因: {error_message}\n"
             "- 请重新生成完整 JSON。\n"
             "- 手机号必须是 11 位中国大陆手机号，只保留号码本体，不要附带备注、空格或分隔符。\n"
+            "- 地址必须足够完整，至少带省/市/区县和可定位到上门位置的细节；不要只写小区名、路名或片段地址。\n"
             "- 故障场景下，绝大多数 issue 只保留 1 个核心故障现象；只有极少数场景可写 2 个相关故障点。\n"
             "- 即使允许双故障点，也不要扩展到第 3 个问题，不要堆砌温度数据或过多后果描述。\n"
+        )
+
+    def _sample_user_generation_plan(self) -> UserGenerationPlan:
+        rng = random.Random()
+        address_style = self._sample_address_style(rng)
+        reply_noise_target = ""
+        reply_noise_rounds = 0
+        reply_noise_instruction = "整体正常配合客服，绝大多数轮次直接按问答题回答，不需要刻意答非所问。"
+        reply_noise_target = self._sample_probability_choice(
+            rng,
+            self._reply_noise_target_probabilities(),
+        )
+        reply_noise_enabled = bool(reply_noise_target)
+        if reply_noise_enabled:
+            reply_noise_rounds = self._sample_weighted_round_count(
+                rng,
+                self.config.user_reply_off_topic_rounds_weights,
+            )
+            reply_noise_rounds = self._cap_reply_noise_rounds_for_target(
+                reply_noise_target,
+                reply_noise_rounds,
+            )
+            if reply_noise_target:
+                reply_noise_instruction = self._reply_noise_instruction_for_target(
+                    reply_noise_target,
+                    reply_noise_rounds,
+                )
+            else:
+                reply_noise_enabled = False
+
+        return UserGenerationPlan(
+            address_style=address_style,
+            address_instruction=self._address_instruction_for_style(address_style),
+            reply_noise_enabled=reply_noise_enabled,
+            reply_noise_target=reply_noise_target,
+            reply_noise_rounds=reply_noise_rounds,
+            reply_noise_instruction=reply_noise_instruction,
+        )
+
+    @staticmethod
+    def _cap_reply_noise_rounds_for_target(target: str, rounds: int) -> int:
+        normalized_target = str(target or "").strip()
+        bounded_rounds = max(1, int(rounds))
+        if normalized_target.startswith("phone_") or normalized_target.startswith("address_"):
+            return bounded_rounds
+        return min(bounded_rounds, 2)
+
+    def _sample_address_style(self, rng: random.Random) -> str:
+        if rng.random() >= self.config.user_address_nonstandard_probability:
+            return "standard_residential"
+        styles = list(self.config.user_address_nonstandard_style_weights.keys())
+        weights = [max(0.0, float(self.config.user_address_nonstandard_style_weights[style])) for style in styles]
+        if not styles:
+            return "standard_residential"
+        if sum(weights) <= 0:
+            weights = [1.0] * len(styles)
+        return rng.choices(styles, weights=weights, k=1)[0]
+
+    @staticmethod
+    def _address_instruction_for_style(address_style: str) -> str:
+        instructions = {
+            "standard_residential": "生成标准小区/公寓住宅地址，通常包含小区、楼栋、单元、楼层或室号。",
+            "house_number_only": "生成可定位但不一定有栋单元室的地址，优先使用路名/街区/社区/园区/沿街商铺 + 明确门牌号，例如“幸福家园134号”“沿街商铺28号”。",
+            "rural_group_number": "生成乡镇/村/组/号这类乡村地址，不要硬写成标准小区楼栋单元室。",
+            "landmark_poi": "生成围绕医院、饭店、酒店、学校、产业园、门店等地标的地址，但仍要能定位，最好同时带路名、门牌号或楼层位置。",
+        }
+        return instructions.get(address_style, instructions["standard_residential"])
+
+    @staticmethod
+    def _sample_weighted_choice(
+        rng: random.Random,
+        weights_map: dict[str, float],
+    ) -> str:
+        choices = [str(key).strip() for key in weights_map if str(key).strip()]
+        if not choices:
+            return ""
+        weights = [max(0.0, float(weights_map.get(choice, 0.0))) for choice in choices]
+        if sum(weights) <= 0:
+            weights = [1.0] * len(choices)
+        return rng.choices(choices, weights=weights, k=1)[0]
+
+    @staticmethod
+    def _sample_probability_choice(
+        rng: random.Random,
+        probability_map: dict[str, float],
+    ) -> str:
+        threshold = rng.random()
+        cumulative = 0.0
+        for choice, probability in probability_map.items():
+            cumulative += max(0.0, float(probability))
+            if threshold < cumulative:
+                return choice
+        return ""
+
+    def _reply_noise_target_probabilities(self) -> dict[str, float]:
+        base_probability = max(0.0, min(1.0, float(self.config.user_reply_off_topic_probability)))
+        probabilities: dict[str, float] = {}
+        for target, coefficient in self.config.user_reply_off_topic_target_weights.items():
+            normalized_target = str(target).strip()
+            coefficient_value = max(0.0, float(coefficient))
+            if not normalized_target or coefficient_value <= 0.0:
+                continue
+            probabilities[normalized_target] = coefficient_value * base_probability
+        return probabilities
+
+    @staticmethod
+    def _sample_weighted_round_count(
+        rng: random.Random,
+        weights_map: dict[str, float],
+    ) -> int:
+        selected = HiddenSettingsTool._sample_weighted_choice(rng, weights_map)
+        try:
+            return max(1, int(selected))
+        except ValueError:
+            return 1
+
+    @staticmethod
+    def _reply_noise_instruction_for_target(target: str, rounds: int) -> str:
+        rounds = max(1, int(rounds))
+        round_scope = "第 1 次" if rounds == 1 else f"前 {rounds} 次"
+        instructions = {
+            "opening_confirmation": f"允许在{round_scope}回应开场确认时轻微答偏，例如先确认再顺带补一句背景，但不要连续复读同一诉求；超过配置轮数后恢复正常简短确认。",
+            "issue_description": f"允许在{round_scope}被问故障或安装诉求时先说得不完全到位，例如先说影响感受或场景，再补核心问题；超过配置轮数后要直接回答核心诉求。",
+            "surname_collection": f"允许在{round_scope}被问姓氏时先用更生活化的答法，比如报全名或“我姓王，叫王家俊”，但不要扯到无关内容；超过配置轮数后直接给姓氏。",
+            "phone_contact_confirmation": f"允许在{round_scope}被问当前号码是否能联系时先给生活化解释，但最终还是要明确能不能联系；超过配置轮数后直接回答能或不能。",
+            "phone_keypad_input": f"允许在{round_scope}被要求拨号盘输入号码时出现轻微不规范输入，但不能离题；超过配置轮数后严格只输出正确按键内容。",
+            "phone_confirmation": f"允许在{round_scope}核对号码时先口语化确认或否认，但不要重复扯回别的话题；超过配置轮数后只简短回答对或不对。",
+            "address_collection": f"允许在{round_scope}被问地址时先轻微答偏，例如只说到区域、先反问一句，或只补一部分地址；超过配置轮数后按地址计划正常补齐，不要反复复读同一句。",
+            "address_confirmation": f"允许在{round_scope}核对地址时先口语化否认或补一小段更正，但不要一直重复同一片段；超过配置轮数后直接明确确认或更正。",
+            "product_arrival_confirmation": f"允许在{round_scope}被问到货情况时先给轻微不完全对题的自然回答，例如只说物流进度或模糊时间；超过配置轮数后明确回答是否到货。",
+            "product_model_collection": f"允许在{round_scope}被问型号时先说购买渠道、外观或模糊记忆，但不能一直绕开；超过配置轮数后尽量直接给型号。",
+            "closing_acknowledgement": f"允许在{round_scope}收尾确认时先补一句感谢或催促，但不要重新展开旧信息；超过配置轮数后只简短确认。",
+        }
+        return instructions.get(
+            target,
+            "整体正常配合客服，绝大多数轮次直接按问答题回答，不需要刻意答非所问。",
+        )
+
+    @staticmethod
+    def _attach_user_generation_plan(candidate: dict[str, Any], generation_plan: UserGenerationPlan) -> None:
+        candidate["hidden_context"].update(
+            {
+                "user_address_style": generation_plan.address_style,
+                "user_address_style_instruction": generation_plan.address_instruction,
+                "user_reply_noise_enabled": generation_plan.reply_noise_enabled,
+                "user_reply_noise_target": generation_plan.reply_noise_target,
+                "user_reply_noise_rounds": generation_plan.reply_noise_rounds,
+                "user_reply_noise_instruction": generation_plan.reply_noise_instruction,
+            }
         )
 
     def _attach_second_round_reply_plan(self, scenario_id: str, candidate: dict[str, Any]) -> None:
@@ -525,7 +731,11 @@ class HiddenSettingsTool:
             k=1,
         )[0]
         backup_phone = self._generate_mobile_phone(rng, excluded={primary_phone})
-        if rng.random() < self.config.phone_collection_third_attempt_probability:
+        if self.config.phone_collection_third_attempt_probability >= 1.0:
+            attempts_required = 3
+        elif self.config.phone_collection_second_attempt_probability >= 1.0:
+            attempts_required = 2
+        elif rng.random() < self.config.phone_collection_third_attempt_probability:
             attempts_required = 3
         elif rng.random() < self.config.phone_collection_second_attempt_probability:
             attempts_required = 2
@@ -570,6 +780,8 @@ class HiddenSettingsTool:
         service_known_address_matches_actual = False
         address_confirmation_no_reply = "不对。"
         service_known_address_mismatch_start_level = ""
+        service_known_address_rewrite_levels: list[str] = []
+        service_known_address_rewrite_end_level = ""
         mismatch_correction_value = actual_address
 
         if service_knows_address:
@@ -583,6 +795,8 @@ class HiddenSettingsTool:
                     service_known_address_value,
                     service_known_address_mismatch_start_level,
                     mismatch_correction_value,
+                    service_known_address_rewrite_levels,
+                    service_known_address_rewrite_end_level,
                 ) = self._build_known_address_mismatch_plan(actual_address, rng)
             if not service_known_address_matches_actual:
                 if rng.random() < self.config.address_confirmation_direct_correction_probability:
@@ -609,7 +823,12 @@ class HiddenSettingsTool:
         if should_force_full_address_after_known_mismatch:
             address_rounds = [mismatch_correction_value]
         elif rng.random() < self.config.address_collection_followup_probability:
-            address_rounds = build_address_progressive_segments(actual_address, rng)
+            address_rounds = build_address_progressive_segments(
+                actual_address,
+                rng,
+                round_weights=self.config.address_segment_rounds_weights,
+                strategy_weights=self.config.address_segment_strategy_weights,
+            )
 
         compacted_address_rounds = [
             self._maybe_compact_address_input(round_text, rng)
@@ -633,6 +852,8 @@ class HiddenSettingsTool:
                 "service_known_address_value": service_known_address_value,
                 "service_known_address_matches_actual": service_known_address_matches_actual,
                 "service_known_address_mismatch_start_level": service_known_address_mismatch_start_level,
+                "service_known_address_rewrite_levels": service_known_address_rewrite_levels,
+                "service_known_address_rewrite_end_level": service_known_address_rewrite_end_level,
                 "service_known_address_correction_value": mismatch_correction_value,
                 "address_confirmation_no_reply": address_confirmation_no_reply,
                 "address_input_round_1": address_round_1,
@@ -938,19 +1159,46 @@ class HiddenSettingsTool:
         self,
         actual_address: str,
         rng: random.Random,
-    ) -> tuple[str, str, str]:
-        level = self._choose_address_mismatch_start_level(actual_address, rng)
-        stale_address = self._generate_stale_address_from_level(actual_address, level, rng)
-        correction_value = self._address_suffix_from_level(actual_address, level)
+    ) -> tuple[str, str, str, list[str], str]:
+        start_level = self._choose_address_mismatch_start_level(actual_address, rng)
+        rewrite_levels = self._choose_address_mismatch_rewrite_levels(
+            actual_address,
+            start_level,
+            rng,
+        )
+        stale_address = self._generate_stale_address_from_level(actual_address, start_level, rng)
+        correction_value = self._address_text_from_levels(actual_address, rewrite_levels)
         if stale_address == actual_address or not correction_value:
             fallback_stale = self._generate_stale_address(actual_address, rng)
-            fallback_correction = self._generate_address_correction(
-                actual_address=actual_address,
-                stale_address=fallback_stale,
-                rng=rng,
+            fallback_start_level = self._infer_mismatch_start_level(actual_address, fallback_stale)
+            fallback_rewrite_levels = self._infer_mismatch_rewrite_levels(
+                actual_address,
+                fallback_stale,
             )
-            return fallback_stale, self._infer_mismatch_start_level(actual_address, fallback_stale), fallback_correction
-        return stale_address, level, correction_value
+            fallback_correction = self._address_text_from_levels(
+                actual_address,
+                fallback_rewrite_levels,
+            )
+            if not fallback_correction:
+                fallback_correction = self._generate_address_correction(
+                    actual_address=actual_address,
+                    stale_address=fallback_stale,
+                    rng=rng,
+                )
+            return (
+                fallback_stale,
+                fallback_start_level,
+                fallback_correction,
+                fallback_rewrite_levels,
+                fallback_rewrite_levels[-1] if fallback_rewrite_levels else fallback_start_level,
+            )
+        return (
+            stale_address,
+            start_level,
+            correction_value,
+            rewrite_levels,
+            rewrite_levels[-1] if rewrite_levels else start_level,
+        )
 
     def _choose_address_mismatch_start_level(
         self,
@@ -970,6 +1218,40 @@ class HiddenSettingsTool:
         if sum(level_weights) <= 0:
             level_weights = [1.0] * len(available_levels)
         return rng.choices(available_levels, weights=level_weights, k=1)[0]
+
+    def _choose_address_mismatch_rewrite_levels(
+        self,
+        actual_address: str,
+        start_level: str,
+        rng: random.Random,
+    ) -> list[str]:
+        components = extract_address_components(actual_address)
+        try:
+            start_index = ADDRESS_LEVEL_ORDER.index(start_level)
+        except ValueError:
+            return [start_level]
+
+        available_levels = [
+            level
+            for level in ADDRESS_LEVEL_ORDER[start_index:]
+            if self._address_level_is_available(level, components)
+        ]
+        if not available_levels:
+            return [start_level]
+        if start_level in {"province", "city", "district"}:
+            return available_levels
+
+        weights = self.config.address_known_mismatch_rewrite_end_level_weights
+        end_level_weights = [max(0.0, float(weights.get(level, 0.0))) for level in available_levels]
+        if sum(end_level_weights) <= 0:
+            end_level_weights = [1.0] * len(available_levels)
+        end_level = rng.choices(available_levels, weights=end_level_weights, k=1)[0]
+        end_index = ADDRESS_LEVEL_ORDER.index(end_level)
+        return [
+            level
+            for level in ADDRESS_LEVEL_ORDER[start_index : end_index + 1]
+            if self._address_level_is_available(level, components)
+        ] or [start_level]
 
     @staticmethod
     def _address_level_is_available(level: str, components: Any) -> bool:
@@ -992,9 +1274,9 @@ class HiddenSettingsTool:
         return False
 
     @classmethod
-    def _address_suffix_from_level(cls, address: str, level: str) -> str:
+    def _address_level_values(cls, address: str) -> dict[str, str]:
         components = extract_address_components(address)
-        level_values = {
+        return {
             "province": components.province,
             "city": components.city,
             "district": components.district,
@@ -1004,13 +1286,19 @@ class HiddenSettingsTool:
             "floor": components.floor,
             "room": components.room,
         }
-        ordered_levels = ("province", "city", "district", "locality", "building", "unit", "floor", "room")
-        try:
-            start_index = ordered_levels.index(level)
-        except ValueError:
+
+    @classmethod
+    def _address_text_from_levels(cls, address: str, levels: list[str]) -> str:
+        if not levels:
             return address
-        suffix = "".join(level_values[name] for name in ordered_levels[start_index:] if level_values[name])
-        return suffix or address
+        level_values = cls._address_level_values(address)
+        selected_levels = set(levels)
+        text = "".join(
+            level_values[level]
+            for level in ADDRESS_LEVEL_ORDER
+            if level in selected_levels and level_values[level]
+        )
+        return text or address
 
     def _generate_stale_address_from_level(
         self,
@@ -1098,29 +1386,25 @@ class HiddenSettingsTool:
     @classmethod
     def _generate_locality_stale_address(cls, actual_address: str, rng: random.Random) -> str:
         stale = actual_address
-        community_match = re.search(
-            r"([A-Za-z0-9\u4e00-\u9fa5]+?(?:小区|花园|公寓|苑|府|里|村|大厦|中心|广场|城|家园|新村|碧桂园))",
-            stale,
-        )
-        if community_match:
+        components = extract_address_components(actual_address)
+        if components.community:
             pool = ["幸福花园", "阳光花园", "金色家园", "滨江花园", "锦绣苑", "星辰花园"]
-            alternatives = [value for value in pool if value != community_match.group(1)]
+            alternatives = [value for value in pool if value != components.community]
             if alternatives:
-                return stale.replace(community_match.group(1), rng.choice(alternatives), 1)
+                return stale.replace(components.community, rng.choice(alternatives), 1)
 
-        road_number_match = re.search(r"([^\d]{1,20}(?:路|街|大道|巷|弄|胡同))(\d+)号", stale)
-        if road_number_match:
+        road_number_match = re.search(r"([^\d]{1,20}(?:路|街|大道|巷|弄|胡同))(\d+)号", components.road)
+        if road_number_match and components.road:
             prefix = road_number_match.group(1)
             number = int(road_number_match.group(2))
             replacement = f"{prefix}{number + rng.choice([2, 4, 6])}号"
-            return stale.replace(road_number_match.group(0), replacement, 1)
+            return stale.replace(components.road, replacement, 1)
 
-        town_match = re.search(r"([^\d]{1,12}(?:街道|镇|乡))", stale)
-        if town_match:
+        if components.town:
             pool = ["东城街道", "五常街道", "安宜镇", "大良街道", "观音桥街道"]
-            alternatives = [value for value in pool if value != town_match.group(1)]
+            alternatives = [value for value in pool if value != components.town]
             if alternatives:
-                return stale.replace(town_match.group(1), rng.choice(alternatives), 1)
+                return stale.replace(components.town, rng.choice(alternatives), 1)
         return actual_address
 
     @classmethod
@@ -1151,26 +1435,35 @@ class HiddenSettingsTool:
 
     @classmethod
     def _infer_mismatch_start_level(cls, actual_address: str, stale_address: str) -> str:
-        actual = extract_address_components(actual_address)
-        stale = extract_address_components(stale_address)
-        checks = (
-            ("province", actual.province, stale.province),
-            ("city", actual.city, stale.city),
-            ("district", actual.district, stale.district),
-            (
-                "locality",
-                "".join(part for part in (actual.town, actual.road, actual.community) if part),
-                "".join(part for part in (stale.town, stale.road, stale.community) if part),
-            ),
-            ("building", actual.building, stale.building),
-            ("unit", actual.unit, stale.unit),
-            ("floor", actual.floor, stale.floor),
-            ("room", actual.room, stale.room),
-        )
-        for level, actual_value, stale_value in checks:
+        actual_levels = cls._address_level_values(actual_address)
+        stale_levels = cls._address_level_values(stale_address)
+        for level in ADDRESS_LEVEL_ORDER:
+            actual_value = actual_levels.get(level, "")
+            stale_value = stale_levels.get(level, "")
             if actual_value and stale_value and actual_value != stale_value:
                 return level
         return "province"
+
+    @classmethod
+    def _infer_mismatch_rewrite_levels(cls, actual_address: str, stale_address: str) -> list[str]:
+        actual_levels = cls._address_level_values(actual_address)
+        stale_levels = cls._address_level_values(stale_address)
+        changed_levels = [
+            level
+            for level in ADDRESS_LEVEL_ORDER
+            if actual_levels.get(level, "")
+            and stale_levels.get(level, "")
+            and actual_levels[level] != stale_levels[level]
+        ]
+        if not changed_levels:
+            return []
+        start_index = ADDRESS_LEVEL_ORDER.index(changed_levels[0])
+        end_index = ADDRESS_LEVEL_ORDER.index(changed_levels[-1])
+        return [
+            level
+            for level in ADDRESS_LEVEL_ORDER[start_index : end_index + 1]
+            if actual_levels.get(level, "")
+        ]
 
     @staticmethod
     def _generate_region_stale_address(address: str, rng: random.Random) -> str:

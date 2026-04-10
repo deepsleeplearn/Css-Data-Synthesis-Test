@@ -14,8 +14,10 @@ except ImportError:  # pragma: no cover
 ROOT_DIR = Path(__file__).resolve().parent.parent
 ENV_PATH = ROOT_DIR / ".env"
 
-if load_dotenv:
-    load_dotenv(ENV_PATH, override=False)
+
+def _refresh_env_from_file() -> None:
+    if load_dotenv:
+        load_dotenv(ENV_PATH, override=True)
 
 LLMS = {
     "gpt-4o": {
@@ -62,6 +64,39 @@ DEFAULT_ADDRESS_KNOWN_MISMATCH_START_LEVEL_WEIGHTS = {
     "floor": 0.05,
     "room": 0.15,
 }
+DEFAULT_ADDRESS_KNOWN_MISMATCH_REWRITE_END_LEVEL_WEIGHTS = {
+    "province": 0.05,
+    "city": 0.08,
+    "district": 0.10,
+    "locality": 0.14,
+    "building": 0.16,
+    "unit": 0.16,
+    "floor": 0.11,
+    "room": 0.20,
+}
+DEFAULT_USER_ADDRESS_NONSTANDARD_STYLE_WEIGHTS = {
+    "house_number_only": 0.45,
+    "rural_group_number": 0.25,
+    "landmark_poi": 0.30,
+}
+DEFAULT_USER_REPLY_OFF_TOPIC_TARGET_WEIGHTS = {
+    "opening_confirmation": 0.08,
+    "issue_description": 0.12,
+    "surname_collection": 0.10,
+    "phone_contact_confirmation": 0.08,
+    "phone_keypad_input": 0.04,
+    "phone_confirmation": 0.04,
+    "address_collection": 0.30,
+    "address_confirmation": 0.08,
+    "product_arrival_confirmation": 0.08,
+    "product_model_collection": 0.05,
+    "closing_acknowledgement": 0.03,
+}
+DEFAULT_USER_REPLY_OFF_TOPIC_ROUNDS_WEIGHTS = {
+    "1": 0.85,
+    "2": 0.12,
+    "3": 0.03,
+}
 
 
 @dataclass(frozen=True)
@@ -101,8 +136,18 @@ class AppConfig:
     address_segment_strategy_weights: dict[str, float]
     address_input_omit_province_city_suffix_probability: float
     address_confirmation_direct_correction_probability: float
+    user_reply_off_topic_probability: float
+    user_reply_off_topic_target_weights: dict[str, float]
+    user_reply_off_topic_rounds_weights: dict[str, float]
+    user_address_nonstandard_probability: float
+    user_address_nonstandard_style_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_USER_ADDRESS_NONSTANDARD_STYLE_WEIGHTS)
+    )
     address_known_mismatch_start_level_weights: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_ADDRESS_KNOWN_MISMATCH_START_LEVEL_WEIGHTS)
+    )
+    address_known_mismatch_rewrite_end_level_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_ADDRESS_KNOWN_MISMATCH_REWRITE_END_LEVEL_WEIGHTS)
     )
 
 
@@ -156,6 +201,7 @@ def _load_weight_map(
 
 
 def load_config() -> AppConfig:
+    _refresh_env_from_file()
     default_model = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
     model_defaults = LLMS.get(default_model, {})
     api_key = os.getenv("OPENAI_API_KEY", model_defaults.get("api_key", "")).strip()
@@ -249,8 +295,30 @@ def load_config() -> AppConfig:
         address_confirmation_direct_correction_probability=float(
             os.getenv("ADDRESS_CONFIRMATION_DIRECT_CORRECTION_PROBABILITY", "0.5")
         ),
+        user_reply_off_topic_probability=float(
+            os.getenv("USER_REPLY_OFF_TOPIC_PROBABILITY", "0.18")
+        ),
+        user_reply_off_topic_target_weights=_load_weight_map(
+            "USER_REPLY_OFF_TOPIC_TARGET_WEIGHTS",
+            DEFAULT_USER_REPLY_OFF_TOPIC_TARGET_WEIGHTS,
+        ),
+        user_reply_off_topic_rounds_weights=_load_weight_map(
+            "USER_REPLY_OFF_TOPIC_ROUNDS_WEIGHTS",
+            DEFAULT_USER_REPLY_OFF_TOPIC_ROUNDS_WEIGHTS,
+        ),
+        user_address_nonstandard_probability=float(
+            os.getenv("USER_ADDRESS_NONSTANDARD_PROBABILITY", "0.28")
+        ),
+        user_address_nonstandard_style_weights=_load_weight_map(
+            "USER_ADDRESS_NONSTANDARD_STYLE_WEIGHTS",
+            DEFAULT_USER_ADDRESS_NONSTANDARD_STYLE_WEIGHTS,
+        ),
         address_known_mismatch_start_level_weights=_load_weight_map(
             "ADDRESS_KNOWN_MISMATCH_START_LEVEL_WEIGHTS",
             DEFAULT_ADDRESS_KNOWN_MISMATCH_START_LEVEL_WEIGHTS,
+        ),
+        address_known_mismatch_rewrite_end_level_weights=_load_weight_map(
+            "ADDRESS_KNOWN_MISMATCH_REWRITE_END_LEVEL_WEIGHTS",
+            DEFAULT_ADDRESS_KNOWN_MISMATCH_REWRITE_END_LEVEL_WEIGHTS,
         ),
     )

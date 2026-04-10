@@ -40,6 +40,26 @@ def _classify_yes_no(text: str) -> str | None:
     return ServiceDialoguePolicy._classify_yes_no(text)
 
 
+def _contains_surname_answer(text: str) -> bool:
+    return bool(ServiceDialoguePolicy._extract_freeform_surname(text))
+
+
+def _contains_product_arrival_answer(text: str) -> bool:
+    return _classify_yes_no(text) in {"yes", "no"}
+
+
+def _contains_product_model_answer(text: str) -> bool:
+    normalized = (text or "").strip()
+    if not normalized:
+        return False
+    if _classify_yes_no(normalized) in {"yes", "no"}:
+        return False
+    if _contains_issue_detail(normalized) or _contains_address_detail(normalized) or _contains_phone_number(normalized):
+        return False
+    compact = re.sub(r"[，。！？、,.!\s]", "", normalized)
+    return len(compact) >= 2
+
+
 def _validate_topic_regression(sample: DialogueSample) -> list[str]:
     issues: list[str] = []
     transcript = sample.transcript
@@ -71,6 +91,62 @@ def _validate_topic_regression(sample: DialogueSample) -> list[str]:
                 issues.append(
                     f"user repeated prior details during closing acknowledgement at round {current_turn.round_index}"
                 )
+    return issues
+
+
+def _validate_repeated_slot_collection(sample: DialogueSample) -> list[str]:
+    issues: list[str] = []
+    transcript = sample.transcript
+    prompt_counts = {
+        "surname": 0,
+        "product_arrival": 0,
+        "product_model": 0,
+    }
+    previous_off_topic_reply = {
+        "surname": "",
+        "product_arrival": "",
+        "product_model": "",
+    }
+    prompt_specs = (
+        ("surname", ServiceDialoguePolicy.is_surname_prompt, _contains_surname_answer),
+        ("product_arrival", ServiceDialoguePolicy.is_product_arrival_prompt, _contains_product_arrival_answer),
+        ("product_model", ServiceDialoguePolicy.is_product_model_prompt, _contains_product_model_answer),
+    )
+
+    for index in range(1, len(transcript)):
+        previous_turn = transcript[index - 1]
+        current_turn = transcript[index]
+        if (
+            normalize_speaker(previous_turn.speaker) != SERVICE_SPEAKER
+            or normalize_speaker(current_turn.speaker) != USER_SPEAKER
+        ):
+            continue
+
+        normalized_user = re.sub(r"\s+", "", current_turn.text or "")
+        for slot_name, prompt_matcher, answer_matcher in prompt_specs:
+            if not prompt_matcher(previous_turn.text):
+                continue
+
+            prompt_counts[slot_name] += 1
+            if answer_matcher(current_turn.text):
+                previous_off_topic_reply[slot_name] = ""
+                break
+
+            if prompt_counts[slot_name] >= 3:
+                issues.append(
+                    f"user still did not answer {slot_name} after {prompt_counts[slot_name]} prompts at round {current_turn.round_index}"
+                )
+            if (
+                previous_off_topic_reply[slot_name]
+                and normalized_user
+                and normalized_user == previous_off_topic_reply[slot_name]
+            ):
+                issues.append(
+                    f"user repeated the same off-topic reply during {slot_name} collection at round {current_turn.round_index}"
+                )
+            previous_off_topic_reply[slot_name] = normalized_user
+            break
+
     return issues
 
 
@@ -107,6 +183,7 @@ def validate_dialogue(sample: DialogueSample) -> dict:
     if missing_required and sample.status == "completed":
         issues.append("status marked completed but required slots are still missing")
     issues.extend(_validate_topic_regression(sample))
+    issues.extend(_validate_repeated_slot_collection(sample))
 
     return {
         "passed": not issues,

@@ -28,7 +28,14 @@ PROVINCE_PREFIXES = (
     "陕西",
     "甘肃",
     "青海",
+    "内蒙古",
+    "广西",
+    "西藏",
+    "宁夏",
+    "新疆",
     "台湾",
+    "香港",
+    "澳门",
 )
 MUNICIPALITY_PREFIXES = ("北京", "上海", "天津", "重庆")
 COMMUNITY_SUFFIXES = (
@@ -196,7 +203,7 @@ def extract_address_components(text: str) -> AddressComponents:
             remainder = remainder[city_match.end() :]
 
     district = ""
-    district_match = re.match(r"^[\u4e00-\u9fa5]{1,12}(?:区|县|旗)", remainder)
+    district_match = re.match(r"^[\u4e00-\u9fa5]{1,12}(?:(?<!小)区|县|旗)", remainder)
     if district_match:
         district = district_match.group(0)
         remainder = remainder[district_match.end() :]
@@ -211,15 +218,16 @@ def extract_address_components(text: str) -> AddressComponents:
     road_match = re.search(r"([^\d]{1,20}(?:路|街|大道|巷|弄|胡同)\d+号?)", remainder)
     if road_match:
         road = road_match.group(1)
+    community_search_text = remainder[road_match.end() :] if road_match else remainder
 
     community = ""
     community_patterns = [
-        rf"([A-Za-z0-9\u4e00-\u9fa5]*?(?:{suffix}))"
+        rf"([A-Za-z0-9\u4e00-\u9fa5]*?(?:{suffix})(?:[零一二三四五六七八九十两\d]+期)?)"
         for suffix in COMMUNITY_SUFFIXES
     ]
     community_matches: list[str] = []
     for pattern in community_patterns:
-        community_matches.extend(match.group(1) for match in re.finditer(pattern, remainder))
+        community_matches.extend(match.group(1) for match in re.finditer(pattern, community_search_text))
     if community_matches:
         community = sorted(community_matches, key=len)[-1]
 

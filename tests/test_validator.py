@@ -106,6 +106,31 @@ class ValidatorTests(unittest.TestCase):
         self.assertFalse(validation["passed"])
         self.assertIn("user repeated prior details during closing acknowledgement at round 9", validation["issues"])
 
+    def test_rejects_repeated_off_topic_surname_collection(self):
+        sample = DialogueSample(
+            scenario_id="case_005",
+            status="completed",
+            rounds_used=8,
+            transcript=[
+                DialogueTurn(speaker="service", text="好的，请问您贵姓", round_index=3),
+                DialogueTurn(speaker="user", text="对，到货了，但是还没安装。", round_index=3),
+                DialogueTurn(speaker="service", text="好的，请问您贵姓", round_index=4),
+                DialogueTurn(speaker="user", text="对，到货了，但是还没安装。", round_index=4),
+                DialogueTurn(speaker="service", text="好的，请问您贵姓", round_index=5),
+                DialogueTurn(speaker="user", text="啊，对，就是我这边买了一个美的空气能热水机，还没装。", round_index=5),
+            ],
+            collected_slots={},
+            missing_slots=["surname"],
+            scenario={},
+            validation={},
+        )
+
+        validation = validate_dialogue(sample)
+
+        self.assertFalse(validation["passed"])
+        self.assertIn("user repeated the same off-topic reply during surname collection at round 4", validation["issues"])
+        self.assertIn("user still did not answer surname after 3 prompts at round 5", validation["issues"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

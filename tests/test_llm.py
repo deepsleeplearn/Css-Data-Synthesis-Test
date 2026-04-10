@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 from multi_agent_data_synthesis.config import AppConfig
 from multi_agent_data_synthesis.llm import OpenAIChatClient
 
@@ -54,6 +56,47 @@ def build_config() -> AppConfig:
         },
         address_input_omit_province_city_suffix_probability=0.0,
         address_confirmation_direct_correction_probability=0.5,
+        user_reply_off_topic_probability=0.18,
+        user_reply_off_topic_target_weights={
+            "opening_confirmation": 0.08,
+            "issue_description": 0.12,
+            "surname_collection": 0.10,
+            "phone_contact_confirmation": 0.08,
+            "phone_keypad_input": 0.04,
+            "phone_confirmation": 0.04,
+            "address_collection": 0.30,
+            "address_confirmation": 0.08,
+            "product_arrival_confirmation": 0.08,
+            "product_model_collection": 0.05,
+            "closing_acknowledgement": 0.03,
+        },
+        user_reply_off_topic_rounds_weights={"1": 0.85, "2": 0.12, "3": 0.03},
+        user_address_nonstandard_probability=0.28,
+        user_address_nonstandard_style_weights={
+            "house_number_only": 0.45,
+            "rural_group_number": 0.25,
+            "landmark_poi": 0.30,
+        },
+        address_known_mismatch_start_level_weights={
+            "province": 0.05,
+            "city": 0.10,
+            "district": 0.15,
+            "locality": 0.25,
+            "building": 0.15,
+            "unit": 0.10,
+            "floor": 0.05,
+            "room": 0.15,
+        },
+        address_known_mismatch_rewrite_end_level_weights={
+            "province": 0.05,
+            "city": 0.08,
+            "district": 0.10,
+            "locality": 0.14,
+            "building": 0.16,
+            "unit": 0.16,
+            "floor": 0.11,
+            "room": 0.20,
+        },
     )
 
 
@@ -77,6 +120,51 @@ class RecordingChatClient(OpenAIChatClient):
 
 
 class OpenAIChatClientTests(unittest.TestCase):
+    def test_parse_response_accepts_event_stream_chunks(self):
+        client = OpenAIChatClient(build_config())
+        response = httpx.Response(
+            200,
+            text=(
+                'data: {"id":"evt-1","object":"chat.completion.chunk","created":1,'
+                '"model":"qwen3-32b","choices":[{"index":0,"delta":{"role":"assistant","content":"你"},'
+                '"logprobs":null,"finish_reason":null,"matched_stop":null}],"usage":null}\n\n'
+                'data: {"id":"evt-1","object":"chat.completion.chunk","created":1,'
+                '"model":"qwen3-32b","choices":[{"index":0,"delta":{"content":"好"},'
+                '"logprobs":null,"finish_reason":"stop","matched_stop":151645}],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}\n\n'
+                "data: [DONE]\n"
+            ),
+            headers={"content-type": "text/event-stream; charset=utf-8"},
+        )
+
+        payload = client._parse_response(response)
+
+        self.assertEqual(payload["object"], "chat.completion")
+        self.assertEqual(payload["choices"][0]["message"]["content"], "你好")
+        self.assertEqual(payload["choices"][0]["finish_reason"], "stop")
+        self.assertEqual(payload["usage"]["total_tokens"], 3)
+
+    def test_parse_response_raises_clear_error_for_non_json_success_body(self):
+        client = OpenAIChatClient(build_config())
+        response = httpx.Response(
+            200,
+            text="",
+            headers={"content-type": "text/plain; charset=utf-8"},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Model response was not valid JSON"):
+            client._parse_response(response)
+
+    def test_parse_response_raises_clear_error_for_non_object_json(self):
+        client = OpenAIChatClient(build_config())
+        response = httpx.Response(
+            200,
+            json=[{"content": "not-an-object-root"}],
+            headers={"content-type": "application/json"},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "JSON root must be an object"):
+            client._parse_response(response)
+
     def test_complete_builds_aimp_headers_and_payload(self):
         client = RecordingChatClient(
             [
@@ -114,6 +202,42 @@ class OpenAIChatClientTests(unittest.TestCase):
                 "temperature": 0.4,
                 "max_tokens": 256,
                 "enable_thinking": True,
+            },
+        )
+
+    def test_qwen3_complete_builds_non_stream_payload(self):
+        client = RecordingChatClient(
+            [
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "模型输出",
+                            }
+                        }
+                    ]
+                }
+            ]
+        )
+
+        client.complete(
+            model="qwen3-32b",
+            messages=[{"role": "user", "content": "你好"}],
+            temperature=0.4,
+            max_tokens=256,
+            enable_thinking=True,
+        )
+
+        request = client.sent_requests[0]
+        self.assertEqual(
+            request["payload"],
+            {
+                "model": "/model/qwen3-32b",
+                "messages": [{"role": "user", "content": "你好"}],
+                "temperature": 0.4,
+                "max_tokens": 256,
+                "chat_template_kwargs": {"enable_thinking": True},
+                "stream": False,
             },
         )
 
