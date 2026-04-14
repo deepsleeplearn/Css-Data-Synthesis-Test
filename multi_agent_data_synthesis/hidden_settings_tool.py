@@ -623,10 +623,13 @@ class UserGenerationPlan:
 
 
 class HiddenSettingsRepository:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path | None):
         self.path = path
+        self._records: list[HiddenSettingsRecord] = []
 
     def load(self) -> list[HiddenSettingsRecord]:
+        if self.path is None:
+            return list(self._records)
         if not self.path.exists():
             return []
 
@@ -639,6 +642,9 @@ class HiddenSettingsRepository:
         return records
 
     def append(self, record: HiddenSettingsRecord) -> None:
+        if self.path is None:
+            self._records.append(record)
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")

@@ -4,6 +4,7 @@ import asyncio
 import argparse
 import json
 import random
+from dataclasses import replace
 from pathlib import Path
 
 from multi_agent_data_synthesis.config import load_config
@@ -22,6 +23,12 @@ from multi_agent_data_synthesis.scenario_factory import ScenarioFactory
 from multi_agent_data_synthesis.schemas import CustomerProfile, ServiceRequest
 
 
+DEFAULT_SCENARIO_FILE = Path("data/seed_scenarios.json")
+DEFAULT_JSONL_OUTPUT = Path("outputs/dialogues.jsonl")
+DEFAULT_JSON_OUTPUT = Path("outputs/dialogues.json")
+DEFAULT_HIDDEN_SETTINGS_OUTPUT = Path("outputs/generated_hidden_scenarios.json")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="多智能体家电客服对话数据生成器")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -30,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument(
         "--scenario-file",
         type=Path,
-        default=Path("data/seed_scenarios.json"),
+        default=DEFAULT_SCENARIO_FILE,
         help="场景配置 JSON 文件路径",
     )
     generate_parser.add_argument(
@@ -42,14 +49,19 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument(
         "--jsonl-output",
         type=Path,
-        default=Path("outputs/dialogues.jsonl"),
+        default=DEFAULT_JSONL_OUTPUT,
         help="JSONL 输出路径",
     )
     generate_parser.add_argument(
         "--json-output",
         type=Path,
-        default=Path("outputs/dialogues.json"),
+        default=DEFAULT_JSON_OUTPUT,
         help="JSON 输出路径",
+    )
+    generate_parser.add_argument(
+        "--write-output",
+        action="store_true",
+        help="显式启用文件输出；默认只在终端打印结果，不写入 outputs/ 或 data/",
     )
     generate_parser.add_argument(
         "--auto-hidden-settings",
@@ -77,7 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
     hidden_parser.add_argument(
         "--scenario-file",
         type=Path,
-        default=Path("data/seed_scenarios.json"),
+        default=DEFAULT_SCENARIO_FILE,
         help="场景配置 JSON 文件路径",
     )
     hidden_parser.add_argument(
@@ -89,8 +101,13 @@ def build_parser() -> argparse.ArgumentParser:
     hidden_parser.add_argument(
         "--output",
         type=Path,
-        default=Path("outputs/generated_hidden_scenarios.json"),
+        default=DEFAULT_HIDDEN_SETTINGS_OUTPUT,
         help="带隐藏设定的场景输出路径",
+    )
+    hidden_parser.add_argument(
+        "--write-output",
+        action="store_true",
+        help="显式启用文件输出；默认只在终端打印结果，不写入 outputs/ 或 data/",
     )
     hidden_parser.add_argument(
         "--concurrency",
@@ -106,7 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     interactive_parser.add_argument(
         "--scenario-file",
         type=Path,
-        default=Path("data/seed_scenarios.json"),
+        default=DEFAULT_SCENARIO_FILE,
         help="场景配置 JSON 文件路径",
     )
     interactive_parser.add_argument(
@@ -125,7 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=None,
-        help="测试结果 JSON 输出路径，默认写入 outputs/manual_tests/",
+        help="测试结果 JSON 输出路径；需配合 --write-output 使用",
     )
     interactive_parser.add_argument(
         "--max-rounds",
@@ -138,6 +155,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="先调用隐藏设定生成 TOOL，再进入手工交互测试",
     )
+    interactive_parser.add_argument(
+        "--write-output",
+        action="store_true",
+        help="显式启用文件输出；默认只在终端打印结果，不写入 outputs/ 或 data/",
+    )
 
     return parser
 
@@ -147,7 +169,7 @@ def run_generate(args: argparse.Namespace) -> None:
 
 
 async def run_generate_async(args: argparse.Namespace) -> None:
-    config = load_config()
+    config = _load_cli_config(write_output=args.write_output)
     factory = ScenarioFactory(
         installation_request_probability=config.installation_request_probability,
     )
@@ -163,14 +185,18 @@ async def run_generate_async(args: argparse.Namespace) -> None:
     concurrency = max(1, args.concurrency or config.max_concurrency)
     samples = await orchestrator.generate_dialogues_async(scenarios, concurrency=concurrency)
 
-    write_jsonl(samples, args.jsonl_output)
-    write_json(samples, args.json_output)
+    if args.write_output:
+        write_jsonl(samples, args.jsonl_output)
+        write_json(samples, args.json_output)
 
     completed = sum(1 for sample in samples if sample.status == "completed")
     print(f"Generated {len(samples)} dialogues.")
     print(f"Completed dialogues: {completed}")
-    print(f"JSONL output: {args.jsonl_output}")
-    print(f"JSON output: {args.json_output}")
+    if args.write_output:
+        print(f"JSONL output: {args.jsonl_output}")
+        print(f"JSON output: {args.json_output}")
+    else:
+        print("File output disabled. Use --write-output to persist JSONL/JSON files.")
 
 
 def run_generate_hidden_settings(args: argparse.Namespace) -> None:
@@ -178,7 +204,7 @@ def run_generate_hidden_settings(args: argparse.Namespace) -> None:
 
 
 async def run_generate_hidden_settings_async(args: argparse.Namespace) -> None:
-    config = load_config()
+    config = _load_cli_config(write_output=args.write_output)
     factory = ScenarioFactory(
         installation_request_probability=config.installation_request_probability,
     )
@@ -196,18 +222,22 @@ async def run_generate_hidden_settings_async(args: argparse.Namespace) -> None:
 
     hydrated = list(await asyncio.gather(*(generate_single(scenario) for scenario in scenarios)))
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        json.dumps(hydrated, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    if args.write_output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(
+            json.dumps(hydrated, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     print(f"Generated hidden settings for {len(hydrated)} scenarios.")
-    print(f"Output: {args.output}")
-    print(f"History store: {config.hidden_settings_store}")
+    if args.write_output:
+        print(f"Output: {args.output}")
+        print(f"History store: {config.hidden_settings_store}")
+    else:
+        print("File output disabled. Use --write-output to persist generated scenarios or history.")
 
 
 def run_interactive_test(args: argparse.Namespace) -> None:
-    config = load_config()
+    config = _load_cli_config(write_output=args.write_output)
     scenario = load_manual_test_scenario(
         args.scenario_file,
         scenario_id=args.scenario_id,
@@ -234,7 +264,9 @@ def run_interactive_test(args: argparse.Namespace) -> None:
         product_routing_apply_probability=config.product_routing_apply_probability,
     )
 
-    output_path = args.output or default_manual_test_output_path(scenario.scenario_id)
+    output_path = None
+    if args.write_output:
+        output_path = args.output or default_manual_test_output_path(scenario.scenario_id)
     run_manual_test_session(
         scenario,
         output_path=output_path,
@@ -242,6 +274,26 @@ def run_interactive_test(args: argparse.Namespace) -> None:
         ok_prefix_probability=config.service_ok_prefix_probability,
         policy=service_agent.policy,
     )
+
+
+def _load_cli_config(*, write_output: bool):
+    config = load_config()
+    if write_output:
+        return config
+    return replace(config, hidden_settings_store=None)
+
+
+def _validate_output_flags(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if getattr(args, "write_output", False):
+        return
+    if args.command == "generate":
+        if args.jsonl_output != DEFAULT_JSONL_OUTPUT or args.json_output != DEFAULT_JSON_OUTPUT:
+            parser.error("--jsonl-output/--json-output 需要配合 --write-output 使用。")
+    elif args.command == "generate-hidden-settings":
+        if args.output != DEFAULT_HIDDEN_SETTINGS_OUTPUT:
+            parser.error("--output 需要配合 --write-output 使用。")
+    elif args.command == "interactive-test" and args.output is not None:
+        parser.error("--output 需要配合 --write-output 使用。")
 
 
 def _manual_test_requires_generated_hidden_settings(scenario) -> bool:
@@ -361,6 +413,7 @@ def _hydrate_manual_test_scenario_locally(scenario):
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    _validate_output_flags(parser, args)
 
     if args.command == "generate":
         run_generate(args)

@@ -55,7 +55,7 @@ def default_manual_test_output_path(scenario_id: str) -> Path:
 def run_manual_test_session(
     scenario: Scenario,
     *,
-    output_path: Path,
+    output_path: Path | None,
     max_rounds: int | None = None,
     ok_prefix_probability: float = 0.7,
     policy: ServiceDialoguePolicy | None = None,
@@ -211,9 +211,12 @@ def run_manual_test_session(
         "service_trace": trace,
         "validation": sample.validation,
     }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print_func(f"测试结果已写入: {output_path}")
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        print_func(f"测试结果已写入: {output_path}")
+    else:
+        print_func("测试结果未写入文件；如需落盘请传入输出路径。")
     return payload
 
 
@@ -236,11 +239,14 @@ def _all_required_slots_filled(
 
 def _print_session_header(
     scenario: Scenario,
-    output_path: Path,
+    output_path: Path | None,
     print_func: PrintFunc,
 ) -> None:
     print_func(f"场景: {scenario.scenario_id}")
     print_func(f"产品: {scenario.product.brand} {scenario.product.category} {scenario.product.model}")
     print_func(f"诉求: {scenario.request.request_type}")
-    print_func(f"输出文件: {output_path}")
+    if output_path is not None:
+        print_func(f"输出文件: {output_path}")
+    else:
+        print_func("输出文件: 未启用")
     print_func("可用命令: /help, /slots, /state, /quit")

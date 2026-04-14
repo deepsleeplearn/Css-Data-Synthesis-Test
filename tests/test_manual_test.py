@@ -149,6 +149,26 @@ class ManualTestModuleTests(unittest.TestCase):
             self.assertTrue(payload["service_trace"][0]["used_model_intent_inference"])
             self.assertTrue(any("[1*] 客服:" in line for line in outputs))
 
+    def test_run_manual_test_session_can_skip_file_write(self):
+        scenario = Scenario.from_dict(build_scenario_payload("manual_case_003"))
+        outputs: list[str] = []
+        replies = iter(["美的空气能热水器需要维修", "/quit"])
+
+        def fake_input(prompt: str) -> str:
+            return next(replies)
+
+        payload = run_manual_test_session(
+            scenario,
+            output_path=None,
+            max_rounds=4,
+            input_func=fake_input,
+            print_func=outputs.append,
+        )
+
+        self.assertEqual(payload["status"], "aborted")
+        self.assertTrue(any("输出文件: 未启用" in line for line in outputs))
+        self.assertTrue(any("测试结果未写入文件" in line for line in outputs))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

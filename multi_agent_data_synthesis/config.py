@@ -130,7 +130,7 @@ class AppConfig:
     request_timeout: float
     data_dir: Path
     output_dir: Path
-    hidden_settings_store: Path
+    hidden_settings_store: Path | None
     product_routing_enabled: bool
     product_routing_apply_probability: float
     hidden_settings_similarity_threshold: float

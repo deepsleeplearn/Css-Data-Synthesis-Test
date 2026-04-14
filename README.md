@@ -2,7 +2,7 @@
 
 面向中文家电售后场景的任务型对话生成项目。当前聚焦电话客服场景，围绕维修与安装两类诉求，生成可训练、可回放、可校验的结构化对话样本。
 
-项目通过 `user_agent`、`service_agent`、`DialogueOrchestrator` 协同推进对话；支持自动生成用户隐藏设定，并将结果导出为 `JSONL` 和 `JSON`。
+项目通过 `user_agent`、`service_agent`、`DialogueOrchestrator` 协同推进对话；支持自动生成用户隐藏设定，并可按需导出为 `JSONL` 和 `JSON`。
 
 ## 适用场景
 
@@ -113,7 +113,7 @@
 
 1. `ScenarioFactory` 读取场景文件，并在需要时扩样到指定 `count`
 2. 若场景缺少 `call_start_time`，自动补一个随机通话开始时间
-3. 若启用 `--auto-hidden-settings`，`HiddenSettingsTool` 先生成用户隐藏设定并写入历史库
+3. 若启用 `--auto-hidden-settings`，`HiddenSettingsTool` 先生成用户隐藏设定；仅在显式开启输出时写入历史库
 4. `service_agent` 先构造“用户首句”，再给出首轮客服回复
 5. `user_agent` 与 `service_agent` 按轮次推进，对话中持续补采槽位
 6. `DialogueOrchestrator` 汇总 transcript、槽位、状态和校验结果
@@ -189,13 +189,14 @@ PRODUCT_ROUTING_APPLY_PROBABILITY=1.0
 ```bash
 python -m multi_agent_data_synthesis.cli generate \
   --count 10 \
+  --write-output \
   --auto-hidden-settings \
   --show-dialogue \
   --show-persona \
   --concurrency 5
 ```
 
-默认输出：
+启用 `--write-output` 后默认输出：
 
 - `outputs/dialogues.jsonl`
 - `outputs/dialogues.json`
@@ -205,10 +206,11 @@ python -m multi_agent_data_synthesis.cli generate \
 ```bash
 python -m multi_agent_data_synthesis.cli generate-hidden-settings \
   --count 10 \
+  --write-output \
   --concurrency 5
 ```
 
-默认输出：
+启用 `--write-output` 后默认输出：
 
 - `outputs/generated_hidden_scenarios.json`
 
@@ -226,8 +228,9 @@ python -m multi_agent_data_synthesis.cli generate [options]
 
 - `--scenario-file`：场景文件路径，默认 `data/seed_scenarios.json`
 - `--count`：生成样本数；不传时使用场景文件中的全部场景
-- `--jsonl-output`：JSONL 输出路径，默认 `outputs/dialogues.jsonl`
-- `--json-output`：JSON 输出路径，默认 `outputs/dialogues.json`
+- `--jsonl-output`：JSONL 输出路径，默认 `outputs/dialogues.jsonl`，需配合 `--write-output`
+- `--json-output`：JSON 输出路径，默认 `outputs/dialogues.json`，需配合 `--write-output`
+- `--write-output`：显式启用输出文件与隐藏设定历史落盘；默认不写 `outputs/` 或 `data/`
 - `--auto-hidden-settings`：生成前自动补齐隐藏设定
 - `--show-dialogue`：在终端打印逐轮对话
 - `--show-persona`：配合 `--show-dialogue` 使用，额外打印初始用户画像与说话方式
@@ -245,7 +248,8 @@ python -m multi_agent_data_synthesis.cli generate-hidden-settings [options]
 
 - `--scenario-file`：场景文件路径，默认 `data/seed_scenarios.json`
 - `--count`：生成场景数；不传时使用场景文件中的全部场景
-- `--output`：输出路径，默认 `outputs/generated_hidden_scenarios.json`
+- `--output`：输出路径，默认 `outputs/generated_hidden_scenarios.json`，需配合 `--write-output`
+- `--write-output`：显式启用输出文件与隐藏设定历史落盘；默认不写 `outputs/` 或 `data/`
 - `--concurrency`：覆盖默认并发数
 
 ## 场景文件格式
@@ -343,6 +347,7 @@ python -m multi_agent_data_synthesis.cli generate-hidden-settings [options]
 
 导出行为：
 
+- 默认不落盘；CLI 仅在显式传入 `--write-output` 时写文件
 - `write_jsonl` 采用追加模式；重复执行会继续向文件末尾追加
 - `write_json` 采用覆盖模式；每次执行都会覆盖目标文件
 
@@ -369,7 +374,7 @@ pytest -q tests/test_validator.py
 - 错误地址的重塑与多轮补采
 - 乡村地址与非标准地址
 - 地址确认后的重复信息校验
-- 隐藏设定历史默认写入 `data/hidden_settings_history.jsonl`
+- 传入 `--write-output` 时，隐藏设定历史会写入 `data/hidden_settings_history.jsonl`
 
 ## 配置项
 
