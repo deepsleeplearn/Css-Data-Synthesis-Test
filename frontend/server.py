@@ -6,12 +6,16 @@ import sys
 import threading
 import traceback
 import uuid
-from datetime import datetime, timezone
+import hashlib
+import os
+import secrets
+from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Response, status
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -55,6 +59,9 @@ except ImportError as exc:  # pragma: no cover
     sys.exit(1)
 
 app = FastAPI(title="Multi-Agent Data Synthesis Frontend")
+AUTH_SESSION_COOKIE = "frontend_auth_session"
+AUTH_SESSION_TTL = timedelta(hours=12)
+DEFAULT_REGISTERED_ACCOUNTS_FILE = PROJECT_ROOT / "frontend" / "registered_accounts.local.json"
 
 try:
     config = replace(load_config(), hidden_settings_store=None)
@@ -67,6 +74,7 @@ except Exception as exc:  # pragma: no cover
     traceback.print_exc()
 
 sessions: dict[str, dict[str, Any]] = {}
+auth_sessions: dict[str, dict[str, Any]] = {}
 SESSION_REVIEW_DB_PATH = PROJECT_ROOT / "outputs" / "frontend_manual_test.sqlite3"
 SESSION_REVIEW_DB_LOCK = threading.Lock()
 FLOW_REVIEW_OPTIONS = [
@@ -99,6 +107,11 @@ class RespondRequest(BaseModel):
     text: str
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
 class ReviewSessionRequest(BaseModel):
     session_id: str
     is_correct: bool
@@ -111,8 +124,123 @@ def _scenario_file() -> Path:
     return config.data_dir / "seed_scenarios.json"
 
 
+def _registered_accounts_file() -> Path:
+    configured = os.getenv("FRONTEND_REGISTERED_ACCOUNTS_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return DEFAULT_REGISTERED_ACCOUNTS_FILE
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _load_registered_accounts() -> dict[str, dict[str, Any]]:
+    accounts_file = _registered_accounts_file()
+    if not accounts_file.exists():
+        return {}
+
+    payload = json.loads(accounts_file.read_text(encoding="utf-8"))
+    entries = payload.get("accounts", []) if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        raise ValueError("备案账号文件格式错误，必须是数组或包含 accounts 数组。")
+
+    accounts: dict[str, dict[str, Any]] = {}
+    for item in entries:
+        if not isinstance(item, dict):
+            raise ValueError("备案账号文件格式错误，账号项必须是对象。")
+        username = str(item.get("username", "")).strip()
+        if not username:
+            raise ValueError("备案账号文件存在空用户名。")
+        if username in accounts:
+            raise ValueError(f"备案账号重复: {username}")
+
+        password = str(item.get("password", ""))
+        password_sha256 = str(item.get("password_sha256", "")).strip().lower()
+        if not password and not password_sha256:
+            raise ValueError(f"备案账号 {username} 缺少 password 或 password_sha256。")
+
+        accounts[username] = {
+            "username": username,
+            "display_name": str(item.get("display_name") or item.get("name") or username).strip() or username,
+            "password": password,
+            "password_sha256": password_sha256,
+            "enabled": bool(item.get("enabled", True)),
+        }
+    return accounts
+
+
+def _verify_registered_account(account: dict[str, Any], password: str) -> bool:
+    if not account.get("enabled", True):
+        return False
+
+    password_sha256 = str(account.get("password_sha256", "")).strip().lower()
+    if password_sha256:
+        computed = hashlib.sha256(password.encode("utf-8")).hexdigest()
+        return secrets.compare_digest(computed, password_sha256)
+
+    stored_password = str(account.get("password", ""))
+    return bool(stored_password) and secrets.compare_digest(password, stored_password)
+
+
+def _prune_auth_sessions(now: datetime | None = None) -> None:
+    current_time = now or datetime.now(timezone.utc)
+    expired_tokens = [
+        token
+        for token, session in auth_sessions.items()
+        if session.get("expires_at") is None or session["expires_at"] <= current_time
+    ]
+    for token in expired_tokens:
+        auth_sessions.pop(token, None)
+
+
+def _set_auth_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=AUTH_SESSION_COOKIE,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=int(AUTH_SESSION_TTL.total_seconds()),
+    )
+
+
+def _delete_auth_cookie(response: Response) -> None:
+    response.delete_cookie(key=AUTH_SESSION_COOKIE, httponly=True, samesite="lax")
+
+
+def _create_auth_session(account: dict[str, Any]) -> str:
+    _prune_auth_sessions()
+    token = secrets.token_urlsafe(32)
+    auth_sessions[token] = {
+        "username": account["username"],
+        "display_name": account["display_name"],
+        "expires_at": datetime.now(timezone.utc) + AUTH_SESSION_TTL,
+    }
+    return token
+
+
+def _require_authenticated_user(
+    auth_token: str | None = Cookie(default=None, alias=AUTH_SESSION_COOKIE),
+) -> dict[str, str]:
+    _prune_auth_sessions()
+    if not auth_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="请先登录后再访问测试台。",
+        )
+
+    session = auth_sessions.get(auth_token)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="登录状态已失效，请重新登录。",
+        )
+
+    session["expires_at"] = datetime.now(timezone.utc) + AUTH_SESSION_TTL
+    return {
+        "username": str(session["username"]),
+        "display_name": str(session["display_name"]),
+    }
 
 
 def _load_scenarios() -> list[Scenario]:
@@ -409,8 +537,60 @@ def _persist_review_result(
             conn.commit()
 
 
+@app.get("/api/auth/me")
+def auth_me(current_user: dict[str, str] = Depends(_require_authenticated_user)):
+    return {
+        "authenticated": True,
+        "user": current_user,
+    }
+
+
+@app.post("/api/auth/login")
+def auth_login(req: LoginRequest, response: Response):
+    username = req.username.strip()
+    password = req.password
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="请输入账号和密码。")
+
+    try:
+        accounts = _load_registered_accounts()
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if not accounts:
+        raise HTTPException(
+            status_code=503,
+            detail=f"未配置备案账号，请先维护文件: {_registered_accounts_file()}",
+        )
+
+    account = accounts.get(username)
+    if account is None or not _verify_registered_account(account, password):
+        raise HTTPException(status_code=401, detail="账号或密码错误，或账号未备案。")
+
+    token = _create_auth_session(account)
+    _set_auth_cookie(response, token)
+    return {
+        "ok": True,
+        "user": {
+            "username": account["username"],
+            "display_name": account["display_name"],
+        },
+    }
+
+
+@app.post("/api/auth/logout")
+def auth_logout(
+    response: Response,
+    auth_token: str | None = Cookie(default=None, alias=AUTH_SESSION_COOKIE),
+):
+    if auth_token:
+        auth_sessions.pop(auth_token, None)
+    _delete_auth_cookie(response)
+    return {"ok": True}
+
+
 @app.get("/api/scenarios")
-def list_scenarios():
+def list_scenarios(current_user: dict[str, str] = Depends(_require_authenticated_user)):
     try:
         scenarios = _load_scenarios()
         return [
@@ -430,7 +610,10 @@ def list_scenarios():
 
 
 @app.post("/api/session/start")
-def start_session(req: StartSessionRequest):
+def start_session(
+    req: StartSessionRequest,
+    current_user: dict[str, str] = Depends(_require_authenticated_user),
+):
     try:
         scenario, known_address_notice, rounds_limit = _prepare_manual_test_scenario(req)
         required_slots, collected_slots = _build_collected_slots(scenario)
@@ -492,7 +675,10 @@ def start_session(req: StartSessionRequest):
 
 
 @app.post("/api/session/respond")
-def respond(req: RespondRequest):
+def respond(
+    req: RespondRequest,
+    current_user: dict[str, str] = Depends(_require_authenticated_user),
+):
     session = _session_state(req.session_id)
     if session["status"] != "active":
         raise HTTPException(status_code=409, detail="当前会话已结束，请重新开始。")
@@ -643,7 +829,10 @@ def respond(req: RespondRequest):
 
 
 @app.post("/api/session/review")
-def review_session(req: ReviewSessionRequest):
+def review_session(
+    req: ReviewSessionRequest,
+    current_user: dict[str, str] = Depends(_require_authenticated_user),
+):
     session = _session_state(req.session_id)
     if session["status"] == "active":
         raise HTTPException(status_code=409, detail="当前会话尚未结束，不能提交评审。")
@@ -684,7 +873,11 @@ def review_session(req: ReviewSessionRequest):
 
 static_dir = PROJECT_ROOT / "frontend" / "static"
 if static_dir.exists():
-    app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+    @app.get("/")
+    def serve_frontend_index():
+        return FileResponse(static_dir / "index.html")
+
+    app.mount("/static", StaticFiles(directory=str(static_dir), html=False), name="static")
 else:  # pragma: no cover
     print(f"Warning: Static directory not found at {static_dir}")
 

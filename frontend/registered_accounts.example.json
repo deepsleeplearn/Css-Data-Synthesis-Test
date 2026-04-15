@@ -1,0 +1,10 @@
+{
+  "accounts": [
+    {
+      "username": "wc",
+      "display_name": "测试员",
+      "password": "xxxxx",
+      "enabled": true
+    }
+  ]
+}

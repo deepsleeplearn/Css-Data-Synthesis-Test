@@ -196,6 +196,20 @@ docker compose up -d --build
 
 因此前端测试时写入的 SQLite 数据库、输出文件和本地数据会保留在宿主机目录中，不会随着容器重建丢失。
 
+### 5. 前端访问控制
+
+前端测试服务已增加账号门禁。打开页面 URL 时会先显示登录界面，只有出现在备案账号文件里的 `username/password` 才能进入测试台。
+
+默认账号文件路径：
+
+- `frontend/registered_accounts.local.json`
+
+可先基于模板创建：
+
+```bash
+cp frontend/registered_accounts.example.json frontend/registered_accounts.local.json
+```
+
 ## 快速开始
 
 ### 1. 准备环境变量

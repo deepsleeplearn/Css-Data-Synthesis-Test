@@ -25,6 +25,34 @@
 3. 打开浏览器
    访问 [http://localhost:8000](http://localhost:8000)
 
+## 账号登录
+
+服务现在默认要求先登录，只有备案账号才能进入测试台。
+
+1. 在本地创建账号文件
+   ```bash
+   cp frontend/registered_accounts.example.json frontend/registered_accounts.local.json
+   ```
+
+2. 按 `username` 和 `password` 维护备案账号
+   ```json
+   {
+     "accounts": [
+       {
+         "username": "qa-admin",
+         "display_name": "测试管理员",
+         "password": "ChangeMe123!",
+         "enabled": true
+       }
+     ]
+   }
+   ```
+
+3. 启动服务后访问页面
+   输入 URL 会先看到登录界面，只有账号命中备案名单才能进入测试页面。
+
+如需改账号文件位置，可设置环境变量 `FRONTEND_REGISTERED_ACCOUNTS_FILE`。
+
 ## Docker 运行
 
 仓库根目录已经提供：

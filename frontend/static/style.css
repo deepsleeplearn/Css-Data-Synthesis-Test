@@ -22,9 +22,14 @@
     box-sizing: border-box;
 }
 
+html,
+body {
+    height: 100%;
+}
+
 body {
     margin: 0;
-    height: 100vh;
+    height: 100dvh;
     overflow: hidden;
     font-family: "SFMono-Regular", "JetBrains Mono", "Fira Code", Consolas, monospace;
     font-size: 17px;
@@ -36,12 +41,53 @@ body {
 
 button,
 input,
-textarea {
+textarea,
+select {
     font: inherit;
 }
 
+.auth-gate {
+    min-height: 100dvh;
+    height: 100dvh;
+    display: grid;
+    place-items: center;
+    padding: 1.5rem;
+    overflow: auto;
+}
+
+.auth-card {
+    width: min(100%, 28rem);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 28px;
+    box-shadow: 0 28px 72px rgba(29, 20, 10, 0.14);
+    padding: 1.4rem;
+}
+
+.auth-form {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    margin-top: 1rem;
+}
+
+.auth-submit {
+    width: 100%;
+    margin-top: 0.35rem;
+}
+
+.auth-error {
+    margin: 0 0 0.75rem;
+    padding: 0.75rem 0.9rem;
+    border-radius: 14px;
+    border: 1px solid rgba(185, 28, 28, 0.2);
+    background: rgba(254, 242, 242, 0.88);
+    color: var(--danger);
+    line-height: 1.6;
+}
+
 .app-shell {
-    height: 100vh;
+    height: 100dvh;
     display: grid;
     grid-template-columns: 320px minmax(0, 1fr) 340px;
     gap: 1.25rem;
@@ -131,7 +177,9 @@ h2 {
 
 textarea,
 input[type="number"],
-input[type="text"] {
+input[type="text"],
+input[type="password"],
+select {
     width: 100%;
     border: 1px solid var(--border);
     border-radius: 14px;
@@ -142,7 +190,8 @@ input[type="text"] {
 }
 
 textarea:focus,
-input:focus {
+input:focus,
+select:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
 }
@@ -173,7 +222,9 @@ input:focus {
     box-shadow: 0 12px 26px rgba(15, 118, 110, 0.25);
 }
 
-.primary-btn:disabled {
+.primary-btn:disabled,
+.ghost-btn:disabled,
+.secondary-btn:disabled {
     cursor: not-allowed;
     opacity: 0.55;
 }
@@ -197,9 +248,32 @@ input:focus {
     border-color: rgba(252, 211, 77, 0.4);
 }
 
-.secondary-btn:disabled {
-    cursor: not-allowed;
-    opacity: 0.45;
+.ghost-btn {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.72rem 0.95rem;
+    background: rgba(255, 255, 255, 0.72);
+    color: var(--text);
+    cursor: pointer;
+    transition: transform 0.16s ease, border-color 0.16s ease;
+}
+
+.ghost-btn:hover:not(:disabled) {
+    transform: translateY(-1px);
+    border-color: rgba(15, 118, 110, 0.32);
+}
+
+.account-card-inline {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.account-name {
+    font-size: 1rem;
+    color: var(--text);
+    margin-bottom: 0.18rem;
 }
 
 .scenario-list,
@@ -250,6 +324,7 @@ input:focus {
     display: grid;
     grid-template-rows: auto 1fr auto;
     height: 100%;
+    min-height: 0;
     background: var(--terminal);
     color: var(--terminal-text);
     border-radius: 28px;
@@ -422,21 +497,6 @@ input:focus {
     word-break: break-word;
 }
 
-select {
-    width: 100%;
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 0.8rem 0.9rem;
-    background: var(--panel-strong);
-    color: var(--text);
-    outline: none;
-}
-
-select:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
-}
-
 .data-value.filled {
     color: var(--accent);
 }
@@ -513,9 +573,7 @@ select:focus {
 
 @media (max-width: 1200px) {
     .app-shell {
-        height: auto;
-        min-height: 100vh;
-        overflow: visible;
+        height: 100dvh;
         grid-template-columns: 300px 1fr;
     }
 
@@ -529,23 +587,26 @@ select:focus {
 @media (max-width: 860px) {
     body {
         height: auto;
+        min-height: 100dvh;
         overflow: auto;
     }
 
     .app-shell {
         height: auto;
-        grid-template-columns: 1fr;
+        min-height: 100dvh;
         overflow: visible;
+        grid-template-columns: 1fr;
     }
 
     .right-panel {
         grid-template-columns: 1fr;
     }
 
+    .account-card-inline,
     .terminal-header,
     .command-input-wrap {
-        grid-template-columns: 1fr;
         display: grid;
+        grid-template-columns: 1fr;
     }
 
     .command-prompt {

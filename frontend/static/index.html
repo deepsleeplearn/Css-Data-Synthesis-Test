@@ -4,10 +4,32 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Multi-Agent Data Synthesis - CLI 手工对话测试</title>
-    <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-    <div class="app-shell">
+    <section id="auth-gate" class="auth-gate">
+        <div class="auth-card">
+            <div class="section-heading">
+                <p class="eyebrow">Access Control</p>
+                <h1>测试台登录</h1>
+            </div>
+            <p class="section-copy">输入备案账号后才能进入手工测试页面。直接访问 URL 时会先停留在此登录界面。</p>
+            <form id="login-form" class="auth-form">
+                <label class="field">
+                    <span>账号</span>
+                    <input id="login-username" type="text" autocomplete="username" placeholder="请输入备案账号">
+                </label>
+                <label class="field">
+                    <span>密码</span>
+                    <input id="login-password" type="password" autocomplete="current-password" placeholder="请输入账号密码">
+                </label>
+                <p id="auth-error" class="auth-error hidden" role="alert"></p>
+                <button id="login-btn" type="submit" class="primary-btn auth-submit">登录进入测试台</button>
+            </form>
+        </div>
+    </section>
+
+    <div id="app-shell" class="app-shell hidden">
         <aside class="left-panel">
             <section class="panel-section">
                 <div class="section-heading">
@@ -15,6 +37,20 @@
                     <h1>CLI 手工对话测试台</h1>
                 </div>
                 <p class="section-copy">仅保留与 `interactive-test` 一致的手工输入模式，支持 `/help`、`/slots`、`/state`、`/quit`。</p>
+            </section>
+
+            <section class="panel-section">
+                <div class="section-heading compact">
+                    <p class="eyebrow">Account</p>
+                    <h2>当前账号</h2>
+                </div>
+                <div class="account-card-inline">
+                    <div>
+                        <div id="auth-user-name" class="account-name">未登录</div>
+                        <p id="auth-user-meta" class="section-copy">只有备案账号可访问测试台。</p>
+                    </div>
+                    <button id="logout-btn" class="ghost-btn" type="button">退出登录</button>
+                </div>
             </section>
 
             <section class="panel-section">
@@ -44,7 +80,7 @@
                     <h2>场景列表</h2>
                 </div>
                     <div id="scenario-list" class="scenario-list">
-                        <div class="terminal-hint">加载中...</div>
+                        <div class="terminal-hint">登录后显示场景列表</div>
                     </div>
             </section>
 
@@ -68,7 +104,7 @@
 
             <section id="terminal-output" class="terminal-output">
                 <div class="terminal-empty">
-                    <p>启动会话后，这里会按 CLI 方式逐行输出会话内容。</p>
+                    <p>登录并启动会话后，这里会按 CLI 方式逐行输出会话内容。</p>
                     <p>第一轮由你先输入用户话术，客服不会预先发开场白。</p>
                 </div>
             </section>
@@ -147,6 +183,6 @@
             </div>
         </section>
     </div>
-    <script src="app.js"></script>
+    <script src="/static/app.js"></script>
 </body>
 </html>

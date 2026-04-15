@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -19,12 +20,31 @@ class FrontendServerTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         scenario_file = Path(self.temp_dir.name) / "seed_scenarios.json"
         self.db_path = Path(self.temp_dir.name) / "manual_test_reviews.sqlite3"
+        self.accounts_file = Path(self.temp_dir.name) / "registered_accounts.local.json"
         scenario_file.write_text(
             json.dumps([build_scenario_payload("frontend_case")], ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        self.accounts_file.write_text(
+            json.dumps(
+                {
+                    "accounts": [
+                        {
+                            "username": "tester",
+                            "display_name": "前端测试账号",
+                            "password": "pass123",
+                            "enabled": True,
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
 
         frontend_server.sessions.clear()
+        frontend_server.auth_sessions.clear()
         frontend_server.SESSION_REVIEW_DB_PATH = self.db_path
         frontend_server.config = SimpleNamespace(
             data_dir=Path(self.temp_dir.name),
@@ -38,13 +58,43 @@ class FrontendServerTests(unittest.TestCase):
             installation_request_probability=0.5,
         )
         frontend_server.factory = ScenarioFactory()
+        self.previous_accounts_file = os.environ.get("FRONTEND_REGISTERED_ACCOUNTS_FILE")
+        os.environ["FRONTEND_REGISTERED_ACCOUNTS_FILE"] = str(self.accounts_file)
         self.client = TestClient(frontend_server.app)
 
     def tearDown(self):
         frontend_server.sessions.clear()
+        frontend_server.auth_sessions.clear()
+        if self.previous_accounts_file is None:
+            os.environ.pop("FRONTEND_REGISTERED_ACCOUNTS_FILE", None)
+        else:
+            os.environ["FRONTEND_REGISTERED_ACCOUNTS_FILE"] = self.previous_accounts_file
         self.temp_dir.cleanup()
 
+    def _login(self):
+        response = self.client.post(
+            "/api/auth/login",
+            json={"username": "tester", "password": "pass123"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["user"]["username"], "tester")
+        return payload
+
+    def test_protected_api_requires_login(self):
+        response = self.client.get("/api/scenarios")
+        self.assertEqual(response.status_code, 401)
+
+    def test_login_rejects_unregistered_account(self):
+        response = self.client.post(
+            "/api/auth/login",
+            json={"username": "tester", "password": "wrong-password"},
+        )
+
+        self.assertEqual(response.status_code, 401)
+
     def test_start_session_returns_cli_style_header(self):
+        self._login()
         response = self.client.post(
             "/api/session/start",
             json={"scenario_id": "frontend_case", "known_address": ""},
@@ -60,6 +110,7 @@ class FrontendServerTests(unittest.TestCase):
         self.assertFalse(payload["persist_to_db_default"])
 
     def test_commands_do_not_consume_round_and_quit_closes_session(self):
+        self._login()
         start_payload = self.client.post(
             "/api/session/start",
             json={"scenario_id": "frontend_case"},
@@ -105,6 +156,7 @@ class FrontendServerTests(unittest.TestCase):
         self.assertEqual(closed_response.status_code, 409)
 
     def test_known_address_and_round_limit_follow_manual_mode(self):
+        self._login()
         start_response = self.client.post(
             "/api/session/start",
             json={
@@ -136,6 +188,7 @@ class FrontendServerTests(unittest.TestCase):
         self.assertTrue(reply_payload["review_required"])
 
     def test_review_endpoint_persists_session_to_sqlite_when_enabled(self):
+        self._login()
         start_payload = self.client.post(
             "/api/session/start",
             json={"scenario_id": "frontend_case", "persist_to_db": True},
@@ -183,6 +236,7 @@ class FrontendServerTests(unittest.TestCase):
         self.assertEqual(saved_payload["review"]["notes"], "地址追问层级不对")
 
     def test_review_endpoint_requires_failed_stage_when_marked_incorrect(self):
+        self._login()
         start_payload = self.client.post(
             "/api/session/start",
             json={"scenario_id": "frontend_case"},
