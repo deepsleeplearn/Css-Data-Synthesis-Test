@@ -422,6 +422,7 @@ def _session_snapshot(session_id: str, session: dict[str, Any]) -> dict[str, Any
     return {
         "session_id": session_id,
         "scenario_id": scenario.scenario_id,
+        "session_owner_username": str(session.get("username", "")).strip(),
         "scenario": scenario.to_dict(),
         "status": session["status"],
         "aborted_reason": session.get("aborted_reason", ""),
@@ -437,6 +438,11 @@ def _session_snapshot(session_id: str, session: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _review_table_columns(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("PRAGMA table_info(manual_test_reviews)").fetchall()
+    return {str(row[1]).strip() for row in rows}
+
+
 def _ensure_review_database() -> None:
     SESSION_REVIEW_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with SESSION_REVIEW_DB_LOCK:
@@ -449,6 +455,7 @@ def _ensure_review_database() -> None:
                 CREATE TABLE IF NOT EXISTS manual_test_reviews (
                     session_id TEXT PRIMARY KEY,
                     scenario_id TEXT NOT NULL,
+                    username TEXT,
                     status TEXT NOT NULL,
                     aborted_reason TEXT NOT NULL,
                     is_correct INTEGER NOT NULL,
@@ -462,6 +469,8 @@ def _ensure_review_database() -> None:
                 )
                 """
             )
+            if "username" not in _review_table_columns(conn):
+                conn.execute("ALTER TABLE manual_test_reviews ADD COLUMN username TEXT")
             conn.commit()
 
 
@@ -469,6 +478,7 @@ def _persist_review_result(
     *,
     session_id: str,
     session: dict[str, Any],
+    username: str,
     is_correct: bool,
     failed_flow_stage: str,
     notes: str,
@@ -477,7 +487,9 @@ def _persist_review_result(
     _ensure_review_database()
     review_payload = {
         **_session_snapshot(session_id, session),
+        "username": username,
         "review": {
+            "username": username,
             "is_correct": is_correct,
             "failed_flow_stage": failed_flow_stage,
             "notes": notes,
@@ -495,6 +507,7 @@ def _persist_review_result(
                 INSERT INTO manual_test_reviews (
                     session_id,
                     scenario_id,
+                    username,
                     status,
                     aborted_reason,
                     is_correct,
@@ -505,9 +518,10 @@ def _persist_review_result(
                     ended_at,
                     reviewed_at,
                     review_payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id) DO UPDATE SET
                     scenario_id=excluded.scenario_id,
+                    username=excluded.username,
                     status=excluded.status,
                     aborted_reason=excluded.aborted_reason,
                     is_correct=excluded.is_correct,
@@ -522,6 +536,7 @@ def _persist_review_result(
                 (
                     session_id,
                     review_payload["scenario_id"],
+                    username,
                     review_payload["status"],
                     review_payload["aborted_reason"],
                     1 if is_correct else 0,
@@ -628,6 +643,7 @@ def start_session(
 
         session_id = str(uuid.uuid4())
         sessions[session_id] = {
+            "username": current_user["username"],
             "scenario": scenario,
             "policy": service_agent.policy,
             "runtime_state": ServiceRuntimeState(),
@@ -790,6 +806,7 @@ def respond(
         text=service_result.reply,
         round_index=round_index,
         model_intent_inference_used=used_model_intent_inference,
+        previous_user_intent_model_inference_used=used_model_intent_inference,
     )
     transcript.append(service_turn)
 
@@ -799,6 +816,7 @@ def respond(
             "user_text": sanitized,
             "service_reply": service_result.reply,
             "used_model_intent_inference": used_model_intent_inference,
+            "previous_user_intent_model_inference_used": used_model_intent_inference,
             "slot_updates": dict(service_result.slot_updates),
             "collected_slots_snapshot": dict(collected_slots),
             "runtime_state_snapshot": asdict(runtime_state),
@@ -846,6 +864,7 @@ def review_session(
             _persist_review_result(
                 session_id=req.session_id,
                 session=session,
+                username=current_user["username"],
                 is_correct=bool(req.is_correct),
                 failed_flow_stage=failed_flow_stage,
                 notes=notes,
@@ -857,6 +876,7 @@ def review_session(
 
     session["review_submitted"] = True
     session["review"] = {
+        "username": current_user["username"],
         "is_correct": bool(req.is_correct),
         "failed_flow_stage": failed_flow_stage,
         "notes": notes,
@@ -865,6 +885,8 @@ def review_session(
     }
     return {
         "ok": True,
+        "session_id": req.session_id,
+        "username": current_user["username"],
         "persisted_to_db": bool(req.persist_to_db),
         "db_path": str(SESSION_REVIEW_DB_PATH) if req.persist_to_db else "",
         "review_required": False,

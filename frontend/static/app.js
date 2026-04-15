@@ -56,6 +56,10 @@ function setNextRound(roundIndex) {
     document.getElementById('command-prompt').textContent = `[${nextRoundIndex}] 用户:`;
 }
 
+function setSessionIdIndicator(sessionId) {
+    document.getElementById('session-id-indicator').textContent = `Session ID: ${sessionId || '-'}`;
+}
+
 function updateInputAvailability(enabled) {
     const input = document.getElementById('user-input');
     const button = document.getElementById('send-btn');
@@ -94,8 +98,8 @@ function openReviewModal(data) {
     if (!data.review_required || !currentSessionId) return;
     reviewPending = true;
     reviewSummary.textContent = data.status === 'completed'
-        ? '会话已正常结束。请标记当前测试流程是否正确。'
-        : '会话已结束。请标记当前测试流程是否正确，并在有问题时指出出错流程。';
+        ? `会话已正常结束。Session ID: ${currentSessionId}。请标记当前测试流程是否正确。`
+        : `会话已结束。Session ID: ${currentSessionId}。请标记当前测试流程是否正确，并在有问题时指出出错流程。`;
     failedFlowStageSelect.innerHTML = '<option value="">请选择出错流程</option>';
     (data.review_options || []).forEach((option) => {
         const element = document.createElement('option');
@@ -175,6 +179,7 @@ function resetWorkspace() {
     updateScenarioHeader(null);
     updateInspector({}, {});
     setSessionStatus('idle');
+    setSessionIdIndicator('');
     setNextRound(1);
     updateInputAvailability(false);
     document.getElementById('scenario-list').innerHTML = '<div class="terminal-hint">登录后显示场景列表</div>';
@@ -342,8 +347,8 @@ async function submitReview() {
 
         appendTerminalLine(
             data.persisted_to_db
-                ? `[系统] 评审已提交，数据已写入 SQLite：${data.db_path}`
-                : '[系统] 评审已提交，本次数据未写入 SQLite。',
+                ? `[系统] 评审已提交，session_id=${data.session_id}，username=${data.username}，数据已写入 SQLite：${data.db_path}`
+                : `[系统] 评审已提交，session_id=${data.session_id}，username=${data.username}，本次数据未写入 SQLite。`,
             'system',
         );
         resetReviewState();
@@ -394,7 +399,9 @@ async function startSession() {
 
         output.innerHTML = '';
         data.initial_lines.forEach((line) => appendTerminalLine(line, 'system'));
+        appendTerminalLine(`[系统] 当前会话 session_id: ${data.session_id}`, 'system');
         setSessionStatus(data.status);
+        setSessionIdIndicator(data.session_id);
         setNextRound(data.next_round_index);
         updateScenarioHeader(data.scenario);
         updateInspector(data.collected_slots, data.runtime_state);
@@ -405,6 +412,7 @@ async function startSession() {
         sessionClosed = true;
         resetReviewState();
         setSessionStatus('error');
+        setSessionIdIndicator('');
         setNextRound(1);
         updateInspector({}, {});
         appendTerminalLine(`[系统错误] ${error.message}`, 'error');
@@ -488,6 +496,7 @@ document.getElementById('user-input').addEventListener('keydown', (event) => {
 });
 
 setSessionStatus('idle');
+setSessionIdIndicator('');
 setNextRound(1);
 resetReviewState();
 checkAuth();

@@ -146,20 +146,34 @@ class DialogueTurn:
     text: str
     round_index: int
     model_intent_inference_used: bool = False
+    previous_user_intent_model_inference_used: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    @property
+    def effective_model_intent_inference_used(self) -> bool:
+        if (
+            normalize_speaker(self.speaker) == SERVICE_SPEAKER
+            and self.previous_user_intent_model_inference_used is not None
+        ):
+            return bool(self.previous_user_intent_model_inference_used)
+        return bool(self.model_intent_inference_used)
+
     def to_display_dict(self) -> dict[str, Any]:
         round_label = str(self.round_index)
-        if normalize_speaker(self.speaker) == SERVICE_SPEAKER and self.model_intent_inference_used:
+        effective_used = self.effective_model_intent_inference_used
+        if normalize_speaker(self.speaker) == SERVICE_SPEAKER and effective_used:
             round_label = f"{round_label}*"
         return {
             "speaker": display_speaker(self.speaker),
             "text": self.text,
             "round_index": self.round_index,
             "round_label": round_label,
-            "model_intent_inference_used": self.model_intent_inference_used,
+            "model_intent_inference_used": effective_used,
+            "previous_user_intent_model_inference_used": (
+                effective_used if normalize_speaker(self.speaker) == SERVICE_SPEAKER else None
+            ),
         }
 
 

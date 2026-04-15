@@ -195,6 +195,12 @@ class FrontendServerTests(unittest.TestCase):
         ).json()
         session_id = start_payload["session_id"]
 
+        reply_payload = self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "美的空气能热水器需要维修"},
+        ).json()
+        self.assertEqual(reply_payload["mode"], "reply")
+
         quit_payload = self.client.post(
             "/api/session/respond",
             json={"session_id": session_id, "text": "/quit"},
@@ -216,24 +222,131 @@ class FrontendServerTests(unittest.TestCase):
         self.assertEqual(review_response.status_code, 200)
         review_payload = review_response.json()
         self.assertTrue(review_payload["persisted_to_db"])
+        self.assertEqual(review_payload["session_id"], session_id)
+        self.assertEqual(review_payload["username"], "tester")
         self.assertTrue(self.db_path.exists())
 
         with sqlite3.connect(self.db_path) as conn:
             row = conn.execute(
-                "SELECT scenario_id, status, is_correct, failed_flow_stage, reviewer_notes, review_payload_json "
+                "SELECT scenario_id, username, status, is_correct, failed_flow_stage, reviewer_notes, review_payload_json "
                 "FROM manual_test_reviews WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
 
         self.assertIsNotNone(row)
         self.assertEqual(row[0], "frontend_case")
-        self.assertEqual(row[1], "aborted")
-        self.assertEqual(row[2], 0)
-        self.assertEqual(row[3], "address_collection")
-        self.assertEqual(row[4], "地址追问层级不对")
-        saved_payload = json.loads(row[5])
+        self.assertEqual(row[1], "tester")
+        self.assertEqual(row[2], "aborted")
+        self.assertEqual(row[3], 0)
+        self.assertEqual(row[4], "address_collection")
+        self.assertEqual(row[5], "地址追问层级不对")
+        saved_payload = json.loads(row[6])
+        self.assertEqual(saved_payload["username"], "tester")
         self.assertEqual(saved_payload["review"]["failed_flow_stage"], "address_collection")
+        self.assertEqual(saved_payload["review"]["username"], "tester")
         self.assertEqual(saved_payload["review"]["notes"], "地址追问层级不对")
+        self.assertIn("previous_user_intent_model_inference_used", saved_payload["transcript"][1])
+        self.assertEqual(
+            saved_payload["transcript"][1]["previous_user_intent_model_inference_used"],
+            saved_payload["transcript"][1]["model_intent_inference_used"],
+        )
+        self.assertEqual(
+            saved_payload["trace"][0]["previous_user_intent_model_inference_used"],
+            saved_payload["trace"][0]["used_model_intent_inference"],
+        )
+
+    def test_review_endpoint_migrates_existing_database_without_losing_rows(self):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """
+                CREATE TABLE manual_test_reviews (
+                    session_id TEXT PRIMARY KEY,
+                    scenario_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    aborted_reason TEXT NOT NULL,
+                    is_correct INTEGER NOT NULL,
+                    failed_flow_stage TEXT NOT NULL,
+                    reviewer_notes TEXT NOT NULL,
+                    persist_to_db INTEGER NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT NOT NULL,
+                    reviewed_at TEXT NOT NULL,
+                    review_payload_json TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO manual_test_reviews (
+                    session_id,
+                    scenario_id,
+                    status,
+                    aborted_reason,
+                    is_correct,
+                    failed_flow_stage,
+                    reviewer_notes,
+                    persist_to_db,
+                    started_at,
+                    ended_at,
+                    reviewed_at,
+                    review_payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "legacy-session",
+                    "legacy-scenario",
+                    "completed",
+                    "",
+                    1,
+                    "",
+                    "",
+                    1,
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:01:00+00:00",
+                    "2026-01-01T00:02:00+00:00",
+                    json.dumps({"session_id": "legacy-session"}, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+
+        self._login()
+        start_payload = self.client.post(
+            "/api/session/start",
+            json={"scenario_id": "frontend_case", "persist_to_db": True},
+        ).json()
+        session_id = start_payload["session_id"]
+        self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "/quit"},
+        )
+        review_response = self.client.post(
+            "/api/session/review",
+            json={
+                "session_id": session_id,
+                "is_correct": True,
+                "failed_flow_stage": "",
+                "notes": "",
+                "persist_to_db": True,
+            },
+        )
+
+        self.assertEqual(review_response.status_code, 200)
+        with sqlite3.connect(self.db_path) as conn:
+            columns = [row[1] for row in conn.execute("PRAGMA table_info(manual_test_reviews)").fetchall()]
+            count = conn.execute("SELECT COUNT(*) FROM manual_test_reviews").fetchone()[0]
+            legacy_row = conn.execute(
+                "SELECT session_id, username FROM manual_test_reviews WHERE session_id = ?",
+                ("legacy-session",),
+            ).fetchone()
+            new_row = conn.execute(
+                "SELECT session_id, username FROM manual_test_reviews WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+
+        self.assertIn("username", columns)
+        self.assertEqual(count, 2)
+        self.assertEqual(legacy_row, ("legacy-session", None))
+        self.assertEqual(new_row, (session_id, "tester"))
 
     def test_review_endpoint_requires_failed_stage_when_marked_incorrect(self):
         self._login()

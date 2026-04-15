@@ -400,6 +400,13 @@ select:focus {
     color: var(--terminal-muted);
 }
 
+#session-id-indicator {
+    max-width: 24rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .terminal-output {
     min-height: 0;
     padding: 1.1rem 1.25rem 1.35rem;
