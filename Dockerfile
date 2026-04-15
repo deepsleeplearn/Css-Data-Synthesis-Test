@@ -2,14 +2,16 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_ROOT_USER_ACTION=ignore
 
 WORKDIR /app
 
-COPY requirements.txt frontend/requirements.txt ./
+COPY requirements.txt /app/requirements.txt
+COPY frontend/requirements.txt /app/frontend-requirements.txt
 
 RUN pip install --upgrade pip \
-    && pip install -r requirements.txt -r frontend/requirements.txt
+    && pip install -r /app/requirements.txt -r /app/frontend-requirements.txt
 
 COPY . .
 
