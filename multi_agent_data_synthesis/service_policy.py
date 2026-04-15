@@ -1309,7 +1309,13 @@ class ServiceDialoguePolicy:
             r"打另外一个",
             r"打别的",
             r"换另一个",
+            r"换一个号码",
+            r"换一个(?:吧|啊|呗)?",
             r"换个号码",
+            r"换个别的",
+            r"换另外一个",
+            r"换别的",
+            r"换其他",
             r"留一个",
             r"留个",
             r"记一个",
@@ -1329,14 +1335,50 @@ class ServiceDialoguePolicy:
             return True
         return False
 
-    def _classify_contactable_intent(self, text: str, *, user_round_index: int = 0) -> str | None:
+    @classmethod
+    def _should_verify_contactable_intent_with_model(
+        cls,
+        text: str,
+        *,
+        heuristic: str | None,
+    ) -> bool:
         normalized = re.sub(r"\s+", "", text or "")
-        if self._is_alternate_contact_request(normalized):
-            return "no"
-        heuristic = self._classify_yes_no(normalized)
-        if heuristic in {"yes", "no"}:
-            return heuristic
+        if not normalized or heuristic == "no":
+            return False
+        if heuristic not in {"yes", "no"}:
+            return True
 
+        contrast_markers = ("但是", "不过", "可是", "只是", "但")
+        switch_patterns = (
+            r"换一个",
+            r"换个",
+            r"另外",
+            r"另一个",
+            r"别的",
+            r"其他",
+            r"备用号码",
+            r"备用电话",
+            r"留个",
+            r"留一个",
+            r"记个",
+            r"记一个",
+            r"登记个",
+            r"登记一个",
+            r"写个",
+            r"写一个",
+        )
+        if cls._extract_contact_phone_owner_from_text(normalized):
+            return True
+        if any(marker in normalized for marker in contrast_markers):
+            return True
+        return any(re.search(pattern, normalized) for pattern in switch_patterns)
+
+    def _classify_contactable_intent_with_model(
+        self,
+        text: str,
+        *,
+        user_round_index: int = 0,
+    ) -> str | None:
         if self.contact_intent_inference_callback is None:
             return None
         try:
@@ -1354,6 +1396,28 @@ class ServiceDialoguePolicy:
             self.last_used_model_intent_inference = True
             return intent
         return None
+
+    def _classify_contactable_intent(self, text: str, *, user_round_index: int = 0) -> str | None:
+        normalized = re.sub(r"\s+", "", text or "")
+        if self._is_alternate_contact_request(normalized):
+            return "no"
+        heuristic = self._classify_yes_no(normalized)
+        model_intent: str | None = None
+        if self._should_verify_contactable_intent_with_model(normalized, heuristic=heuristic):
+            model_intent = self._classify_contactable_intent_with_model(
+                text,
+                user_round_index=user_round_index,
+            )
+            if heuristic in {"yes", "no"} and model_intent in {"yes", "no"} and model_intent != heuristic:
+                return model_intent
+        if heuristic in {"yes", "no"}:
+            return heuristic
+        if model_intent in {"yes", "no"}:
+            return model_intent
+        return self._classify_contactable_intent_with_model(
+            text,
+            user_round_index=user_round_index,
+        )
 
     def _classify_confirmation_intent(
         self,
@@ -1907,7 +1971,11 @@ class ServiceDialoguePolicy:
             )
 
         has_region_context = bool(components.has_admin_region or components.town)
-        has_door_level_detail = bool(cls._extract_house_number_token(candidate) or components.room)
+        has_door_level_detail = bool(
+            cls._extract_house_number_token(candidate)
+            or components.room
+            or cls._has_landmark_delivery_detail(candidate)
+        )
         return has_region_context and has_door_level_detail
 
     @classmethod
@@ -1981,6 +2049,29 @@ class ServiceDialoguePolicy:
         new_has_nonstandard_detail = cls._has_nonstandard_address_detail(prepared_new)
         existing_admin_prefix = cls._address_admin_region_prefix(prepared_existing)
         existing_has_nonstandard_detail = cls._has_nonstandard_address_detail(prepared_existing)
+        existing_region_town_prefix = "".join(
+            value
+            for value in (
+                existing_components.province,
+                existing_components.city,
+                existing_components.district,
+                existing_components.town,
+            )
+            if value
+        )
+
+        if (
+            existing_has_admin_region
+            and cls._has_landmark_delivery_detail(prepared_new)
+            and not new_components.province
+            and not new_components.city
+            and not new_components.town
+            and not new_components.road
+            and not new_components.community
+        ):
+            merged_with_region = f"{existing_region_town_prefix or existing_admin_prefix}{prepared_new}"
+            if cls._normalize_address_text(merged_with_region):
+                return merged_with_region
 
         if (
             existing_components.has_locality
@@ -2062,6 +2153,15 @@ class ServiceDialoguePolicy:
         existing_components: AddressComponents,
         new_components: AddressComponents,
     ) -> str:
+        if (
+            cls._has_landmark_delivery_detail(new)
+            and not new_components.province
+            and not new_components.city
+            and not new_components.town
+            and not new_components.road
+            and not new_components.community
+        ):
+            return ""
         conflict_level = cls._address_prefix_conflict_level(existing_components, new_components)
         if not conflict_level:
             return ""
@@ -2159,6 +2259,12 @@ class ServiceDialoguePolicy:
         )
         if not candidate:
             return ""
+        if self._is_model_address_overreach(
+            user_text=user_text,
+            partial_address_candidate=partial_address_candidate,
+            candidate=candidate,
+        ):
+            return ""
 
         components = extract_address_components(candidate)
         granularity = str(payload.get("granularity", "")).strip().lower()
@@ -2184,7 +2290,9 @@ class ServiceDialoguePolicy:
     def _address_user_accepts_current_candidate(cls, text: str) -> bool:
         patterns = (
             r"^(直接)?这(?:个|里|地方)(就)?行了?$",
+            r"^(直接)?那(?:个|里|地方)(就)?行了?$",
             r"^(就|按)(这(?:个|里|地方)|刚才那个)(地址|地方)?(就)?行了?$",
+            r"^(就|按)那(?:个|里|地方)(地址|地方)?(就)?行了?$",
             r"^(就写)?前面(?:说的|那个)(地址|地方)?(就)?行了?$",
             r"^(直接)?按前面(?:那个|说的)(地址|地方)?(就)?行了?$",
             r"^(就这个地址|就这里|就这个地方)$",
@@ -2197,8 +2305,11 @@ class ServiceDialoguePolicy:
             r"^(?:啥|怎么)?(?:我)?已经(?:提供|说)了(?:啊|呀|哈)?$",
             r"^(前面|刚才)不是说了(?:吗|嘛)?$",
             r"^(就)?到这(?:里)?(?:就)?行了?$",
+            r"^(就)?到那(?:里)?(?:就)?行了?$",
             r"^(我)?只能(?:提供|说)到这(?:里)?了?$",
+            r"^(我)?只能(?:提供|说)到那(?:里)?了?$",
             r"^(就)?只能到这(?:里)?了?$",
+            r"^(就)?只能到那(?:里)?了?$",
         )
         clauses = [
             cls._normalize_address_text(clause)
@@ -2246,7 +2357,7 @@ class ServiceDialoguePolicy:
         components = extract_address_components(address)
         return "".join(
             value
-            for value in (components.province, components.city, components.district)
+            for value in (components.province, components.city, components.district, components.town)
             if value
         )
 
@@ -2297,8 +2408,23 @@ class ServiceDialoguePolicy:
         return ""
 
     @classmethod
+    def _has_landmark_delivery_detail(cls, address: str) -> bool:
+        normalized = cls._normalize_address_text(address)
+        if not normalized:
+            return False
+        patterns = (
+            r"[A-Za-z]?\d+(?:号|栋|座|区)?(?:外卖柜|快递柜|取餐柜)",
+            r"(?:外卖柜|快递柜|取餐柜|驿站|代收点|前台|服务台|门岗|保安亭|岗亭|收发室)",
+        )
+        return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns)
+
+    @classmethod
     def _has_nonstandard_address_detail(cls, address: str) -> bool:
-        return bool(cls._extract_village_group_token(address) or cls._extract_house_number_token(address))
+        return bool(
+            cls._extract_village_group_token(address)
+            or cls._extract_house_number_token(address)
+            or cls._has_landmark_delivery_detail(address)
+        )
 
     @classmethod
     def _is_confirmable_address_candidate(cls, candidate: str) -> bool:
@@ -2337,7 +2463,47 @@ class ServiceDialoguePolicy:
         has_house_number = bool(cls._extract_house_number_token(candidate))
         has_room = bool(components.room)
         has_building_anchor = bool(components.building and (components.community or components.road))
-        return has_region_context and (has_house_number or has_room or has_building_anchor)
+        has_nonstandard_detail = bool(cls._has_nonstandard_address_detail(candidate))
+        return has_region_context and (
+            has_house_number or has_room or has_building_anchor or has_nonstandard_detail
+        )
+
+    @classmethod
+    def _is_model_address_overreach(
+        cls,
+        *,
+        user_text: str,
+        partial_address_candidate: str,
+        candidate: str,
+    ) -> bool:
+        observed_candidate = cls._merge_address_candidate(
+            partial_address_candidate,
+            cls._prepare_address_for_confirmation(user_text),
+        )
+        if not observed_candidate:
+            return False
+
+        observed_components = extract_address_components(observed_candidate)
+        candidate_components = extract_address_components(candidate)
+        observed_has_site_locality = bool(observed_components.road or observed_components.community)
+        observed_has_detail = bool(
+            observed_components.has_precise_detail or cls._has_nonstandard_address_detail(observed_candidate)
+        )
+        candidate_has_site_locality = bool(candidate_components.road or candidate_components.community)
+        candidate_has_detail = bool(
+            candidate_components.has_precise_detail or cls._has_nonstandard_address_detail(candidate)
+        )
+
+        if (
+            (observed_components.has_admin_region or observed_components.town)
+            and not observed_has_site_locality
+            and not observed_has_detail
+            and (candidate_has_site_locality or candidate_has_detail)
+        ):
+            return True
+        if observed_has_site_locality and not observed_has_detail and candidate_has_detail:
+            return True
+        return False
 
     @classmethod
     def _should_prefer_address_candidate(cls, *, current: str, candidate: str) -> bool:

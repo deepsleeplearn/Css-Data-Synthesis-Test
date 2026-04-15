@@ -696,6 +696,39 @@ class ServicePolicyTests(unittest.TestCase):
         self.assertEqual(result.slot_updates["phone_contact_owner"], "另一个号码")
         self.assertTrue(state.awaiting_phone_keypad_input)
 
+    def test_cli_freeform_contactable_change_one_phrase_counts_as_no(self):
+        policy = ServiceDialoguePolicy(ok_prefix_probability=0.0)
+        state = ServiceRuntimeState(expected_contactable_confirmation=True)
+        scenario = build_freeform_cli_scenario()
+        scenario.hidden_context["contact_phone_owner"] = "另一个号码"
+        transcript = [
+            DialogueTurn(speaker="service", text="请问您当前这个来电号码能联系到您吗？", round_index=4),
+            DialogueTurn(speaker="user", text="换一个吧", round_index=4),
+        ]
+        collected_slots = {
+            "issue_description": "需要安装空气能热水机。",
+            "surname": "王",
+            "phone": "",
+            "address": "",
+            "request_type": "installation",
+            "phone_contactable": "",
+            "phone_contact_owner": "",
+            "phone_collection_attempts": "",
+            "product_arrived": "yes",
+        }
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots=collected_slots,
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "请您在拨号盘上输入您的联系方式，并以#号键结束。")
+        self.assertEqual(result.slot_updates["phone_contactable"], "no")
+        self.assertEqual(result.slot_updates["phone_contact_owner"], "另一个号码")
+        self.assertTrue(state.awaiting_phone_keypad_input)
+
     def test_cli_freeform_contactable_family_member_contact_counts_as_no(self):
         policy = ServiceDialoguePolicy(ok_prefix_probability=0.0)
         state = ServiceRuntimeState(expected_contactable_confirmation=True)
@@ -1723,6 +1756,46 @@ class ServicePolicyTests(unittest.TestCase):
 
         self.assertEqual(result.slot_updates["address"], "上海市浦东新区锦绣路1888弄6号1202室")
         self.assertFalse(state.expected_address_confirmation)
+
+    def test_contactable_uses_model_fallback_when_positive_prefix_is_overridden_by_later_switch_request(self):
+        def fake_contact_inference(*, user_text: str, user_round_index: int):
+            self.assertEqual(user_text, "可以，不过还是打备用号码吧")
+            self.assertEqual(user_round_index, 4)
+            return {"intent": "no"}
+
+        policy = ServiceDialoguePolicy(
+            ok_prefix_probability=0.0,
+            contact_intent_inference_callback=fake_contact_inference,
+        )
+        state = ServiceRuntimeState(expected_contactable_confirmation=True)
+        scenario = build_freeform_cli_scenario()
+        scenario.hidden_context["contact_phone_owner"] = "另一个号码"
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(speaker="service", text="请问您当前这个来电号码能联系到您吗？", round_index=4),
+                DialogueTurn(speaker="user", text="可以，不过还是打备用号码吧", round_index=4),
+            ],
+            collected_slots={
+                "issue_description": "需要安装空气能热水机。",
+                "surname": "王",
+                "phone": "",
+                "address": "",
+                "request_type": "installation",
+                "phone_contactable": "",
+                "phone_contact_owner": "",
+                "phone_collection_attempts": "",
+                "product_arrived": "yes",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "请您在拨号盘上输入您的联系方式，并以#号键结束。")
+        self.assertEqual(result.slot_updates["phone_contactable"], "no")
+        self.assertEqual(result.slot_updates["phone_contact_owner"], "另一个号码")
+        self.assertTrue(state.awaiting_phone_keypad_input)
+        self.assertTrue(policy.last_used_model_intent_inference)
 
     def test_fault_issue_followup_response_adds_apology_before_next_collection(self):
         policy = ServiceDialoguePolicy()
@@ -3400,6 +3473,139 @@ class ServicePolicyTests(unittest.TestCase):
         )
         self.assertTrue(policy.last_used_model_intent_inference)
         self.assertEqual(len(callback_calls), 1)
+
+    def test_address_collection_model_fallback_does_not_jump_from_town_only_to_locality(self):
+        def fake_address_inference(**kwargs):
+            self.assertEqual(kwargs["user_text"], "上海市青浦区徐泾镇")
+            return {
+                "address_candidate": "上海市青浦区徐泾镇西郊一区",
+                "merged_address_candidate": "上海市青浦区徐泾镇西郊一区",
+                "granularity": "locality",
+            }
+
+        policy = ServiceDialoguePolicy(address_inference_callback=fake_address_inference)
+        state = ServiceRuntimeState(awaiting_full_address=True)
+        scenario_data = build_scenario().to_dict()
+        scenario_data["customer"]["address"] = "上海市青浦区徐泾镇西郊一区1785弄41号楼"
+        scenario = Scenario.from_dict(scenario_data)
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(
+                    speaker="service",
+                    text="需要登记下您的地址，麻烦您完整的说下省、市、区、乡镇，精确到门牌号。",
+                    round_index=10,
+                ),
+                DialogueTurn(speaker="user", text="上海市青浦区徐泾镇", round_index=10),
+            ],
+            collected_slots={
+                "issue_description": "热水器温度不稳。",
+                "surname": "郑",
+                "phone": "13773341553",
+                "address": "",
+                "product_model": "",
+                "request_type": "fault",
+                "availability": "",
+                "phone_contactable": "yes",
+                "phone_contact_owner": "本人当前来电",
+                "phone_collection_attempts": "0",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "好的，请您继续说一下小区、楼栋和门牌号。")
+        self.assertEqual(state.partial_address_candidate, "上海市青浦区徐泾镇")
+        self.assertFalse(policy.last_used_model_intent_inference)
+
+    def test_address_collection_nonstandard_delivery_point_can_confirm_directly(self):
+        policy = ServiceDialoguePolicy()
+        state = ServiceRuntimeState(
+            awaiting_full_address=True,
+            partial_address_candidate="上海市青浦区徐泾镇",
+            last_address_followup_prompt="好的，请您继续说一下小区、楼栋和门牌号。",
+        )
+        scenario_data = build_scenario().to_dict()
+        scenario_data["customer"]["address"] = "上海市青浦区徐泾镇美的创新园区A8外卖柜"
+        scenario = Scenario.from_dict(scenario_data)
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(
+                    speaker="service",
+                    text="好的，请您继续说一下小区、楼栋和门牌号。",
+                    round_index=11,
+                ),
+                DialogueTurn(speaker="user", text="美的创新园区A8外卖柜", round_index=11),
+            ],
+            collected_slots={
+                "issue_description": "热水器温度不稳。",
+                "surname": "郑",
+                "phone": "13773341553",
+                "address": "",
+                "product_model": "",
+                "request_type": "fault",
+                "availability": "",
+                "phone_contactable": "yes",
+                "phone_contact_owner": "本人当前来电",
+                "phone_collection_attempts": "0",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(
+            result.reply,
+            "好的，跟您确认一下，地址是上海市青浦区徐泾镇美的创新园区A8外卖柜，对吗？",
+        )
+        self.assertTrue(state.expected_address_confirmation)
+        self.assertEqual(
+            state.pending_address_confirmation,
+            "上海市青浦区徐泾镇美的创新园区A8外卖柜",
+        )
+
+    def test_address_collection_accepts_nonstandard_delivery_point_when_user_says_thats_enough(self):
+        policy = ServiceDialoguePolicy()
+        state = ServiceRuntimeState(
+            awaiting_full_address=True,
+            address_input_attempts=2,
+            partial_address_candidate="上海市青浦区徐泾镇美的创新园区A8外卖柜",
+            last_address_followup_prompt="好的，请您继续说一下小区、楼栋和门牌号。",
+        )
+        scenario_data = build_scenario().to_dict()
+        scenario_data["customer"]["address"] = "上海市青浦区徐泾镇美的创新园区A8外卖柜"
+        scenario = Scenario.from_dict(scenario_data)
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(
+                    speaker="service",
+                    text="好的，请您继续说一下小区、楼栋和门牌号。",
+                    round_index=12,
+                ),
+                DialogueTurn(speaker="user", text="已经说了啊，到那就行", round_index=12),
+            ],
+            collected_slots={
+                "issue_description": "热水器温度不稳。",
+                "surname": "郑",
+                "phone": "13773341553",
+                "address": "",
+                "product_model": "",
+                "request_type": "fault",
+                "availability": "",
+                "phone_contactable": "yes",
+                "phone_contact_owner": "本人当前来电",
+                "phone_collection_attempts": "0",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(
+            result.reply,
+            "好的，跟您确认一下，地址是上海市青浦区徐泾镇美的创新园区A8外卖柜，对吗？",
+        )
+        self.assertTrue(state.expected_address_confirmation)
 
     def test_canonical_confirmation_address_prefers_most_complete_matching_version(self):
         self.assertEqual(

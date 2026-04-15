@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Agent Data Synthesis - CLI 手工对话测试</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="left-panel">
+            <section class="panel-section">
+                <div class="section-heading">
+                    <p class="eyebrow">Manual Mode</p>
+                    <h1>CLI 手工对话测试台</h1>
+                </div>
+                <p class="section-copy">仅保留与 `interactive-test` 一致的手工输入模式，支持 `/help`、`/slots`、`/state`、`/quit`。</p>
+            </section>
+
+            <section class="panel-section">
+                <div class="section-heading compact">
+                    <h2>会话配置</h2>
+                </div>
+                <label class="field">
+                    <span>已知地址</span>
+                    <textarea id="known-address" rows="3" placeholder="可选。填写后，客服会优先走地址核对流程。"></textarea>
+                </label>
+                <label class="field inline-field">
+                    <span>最大轮次</span>
+                    <input id="max-rounds" type="number" min="1" placeholder="留空则沿用后端默认值">
+                </label>
+                <label class="toggle">
+                    <input id="auto-hidden-settings" type="checkbox">
+                    <span>启动时自动生成隐藏设定</span>
+                </label>
+                <label class="toggle">
+                    <input id="persist-to-db" type="checkbox">
+                    <span>结束后持久化到 SQLite</span>
+                </label>
+            </section>
+
+            <section class="panel-section grow">
+                <div class="section-heading compact">
+                    <h2>场景列表</h2>
+                </div>
+                    <div id="scenario-list" class="scenario-list">
+                        <div class="terminal-hint">加载中...</div>
+                    </div>
+            </section>
+
+            <section class="panel-section action-dock">
+                <button id="start-session-btn" class="primary-btn dock-btn">启动测试会话</button>
+            </section>
+        </aside>
+
+        <main class="terminal-panel">
+            <header class="terminal-header">
+                <div>
+                    <p class="eyebrow">Session</p>
+                    <h2 id="current-scenario-title">请选择场景并启动会话</h2>
+                </div>
+                <div class="status-group">
+                    <span id="session-status" class="status-badge idle">未开始</span>
+                    <span id="round-indicator" class="round-indicator">下一轮: -</span>
+                    <button id="end-session-btn" class="secondary-btn" disabled>强制结束会话</button>
+                </div>
+            </header>
+
+            <section id="terminal-output" class="terminal-output">
+                <div class="terminal-empty">
+                    <p>启动会话后，这里会按 CLI 方式逐行输出会话内容。</p>
+                    <p>第一轮由你先输入用户话术，客服不会预先发开场白。</p>
+                </div>
+            </section>
+
+            <footer class="command-bar">
+                <label class="command-label" for="user-input">输入</label>
+                <div class="command-input-wrap">
+                    <span id="command-prompt" class="command-prompt">[1] 用户:</span>
+                    <input id="user-input" type="text" placeholder="输入用户话术或命令，例如 /help" disabled>
+                    <button id="send-btn" class="primary-btn" disabled>发送</button>
+                </div>
+            </footer>
+        </main>
+
+        <aside class="right-panel">
+            <section class="panel-section">
+                <div class="section-heading compact">
+                    <h2>已收集槽位</h2>
+                </div>
+                <div id="slots-container" class="data-list">
+                    <p class="terminal-hint">会话开始后显示</p>
+                </div>
+            </section>
+
+            <section class="panel-section grow">
+                <div class="section-heading compact">
+                    <h2>运行时状态</h2>
+                </div>
+                <div id="state-container" class="data-list">
+                    <p class="terminal-hint">会话开始后显示</p>
+                </div>
+            </section>
+        </aside>
+    </div>
+
+    <div id="review-modal" class="modal-shell hidden" aria-hidden="true">
+        <div class="modal-backdrop"></div>
+        <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="review-title">
+            <div class="section-heading compact">
+                <p class="eyebrow">Review</p>
+                <h2 id="review-title">本次测试评审</h2>
+            </div>
+            <p id="review-summary" class="section-copy">请标记当前测试流程是否正确。</p>
+
+            <div class="review-choice-group">
+                <label class="choice-chip">
+                    <input type="radio" name="review-correctness" value="correct">
+                    <span>流程正确</span>
+                </label>
+                <label class="choice-chip">
+                    <input type="radio" name="review-correctness" value="incorrect">
+                    <span>流程错误</span>
+                </label>
+            </div>
+
+            <div id="review-error-fields" class="review-error-fields hidden">
+                <label class="field">
+                    <span>出错流程</span>
+                    <select id="failed-flow-stage">
+                        <option value="">请选择出错流程</option>
+                    </select>
+                </label>
+                <label class="field">
+                    <span>错误描述</span>
+                    <textarea id="review-notes" rows="4" placeholder="补充说明错误点、预期行为或复现现象。"></textarea>
+                </label>
+            </div>
+
+            <label class="toggle">
+                <input id="review-persist-to-db" type="checkbox">
+                <span>将本次测试记录写入 SQLite</span>
+            </label>
+
+            <div class="modal-actions">
+                <button id="review-submit-btn" class="primary-btn">提交评审</button>
+            </div>
+        </section>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
