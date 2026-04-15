@@ -935,6 +935,54 @@ class ServicePolicyTests(unittest.TestCase):
         self.assertEqual(result.slot_updates["request_type"], "fault")
         self.assertEqual(result.reply, "非常抱歉，给您添麻烦了，我这就安排是否上门维修，请问您贵姓？")
 
+    def test_fault_opening_with_issue_description_uses_model_summary_even_when_rule_matches(self):
+        def fake_issue_extraction(*, user_text: str, user_round_index: int):
+            self.assertEqual(
+                user_text,
+                "哎对，是的。我家这个热水器最近水压不太稳定，洗澡的时候花洒出水会变小，想让师傅上门看看。",
+            )
+            self.assertEqual(user_round_index, 1)
+            return {"issue_description": "热水器水压不稳定，洗澡时花洒出水变小"}
+
+        policy = ServiceDialoguePolicy(
+            issue_description_extraction_callback=fake_issue_extraction,
+        )
+        state = ServiceRuntimeState()
+        scenario = build_scenario()
+        transcript = [
+            DialogueTurn(speaker="service", text="您好，很高兴为您服务，请问是美的空气能热水器需要维修吗？", round_index=1),
+            DialogueTurn(
+                speaker="user",
+                text="哎对，是的。我家这个热水器最近水压不太稳定，洗澡的时候花洒出水会变小，想让师傅上门看看。",
+                round_index=1,
+            ),
+        ]
+        collected_slots = {
+            "issue_description": "",
+            "surname": "",
+            "phone": "",
+            "address": "",
+            "product_model": "",
+            "request_type": "",
+            "availability": "",
+            "phone_contactable": "",
+            "phone_contact_owner": "",
+            "phone_collection_attempts": "",
+        }
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots=collected_slots,
+            runtime_state=state,
+        )
+
+        self.assertEqual(
+            result.slot_updates["issue_description"],
+            "热水器水压不稳定，洗澡时花洒出水变小",
+        )
+        self.assertTrue(policy.last_used_model_intent_inference)
+
     def test_fault_opening_without_issue_description_asks_fixed_followup(self):
         policy = ServiceDialoguePolicy()
         state = ServiceRuntimeState()
@@ -1129,6 +1177,115 @@ class ServicePolicyTests(unittest.TestCase):
         )
         self.assertEqual(result.slot_updates["issue_description"], "是的，热水器不加热，想报修。")
         self.assertTrue(state.expected_product_routing_response)
+
+    def test_cli_freeform_fault_issue_detail_uses_model_extraction_for_clean_description(self):
+        def fake_opening_inference(*, user_text: str, user_round_index: int):
+            self.assertEqual(user_text, "是滴是滴，出水太少，洗的不爽")
+            self.assertEqual(user_round_index, 2)
+            return {"intent": "issue_detail"}
+
+        def fake_issue_extraction(*, user_text: str, user_round_index: int):
+            self.assertEqual(user_text, "是滴是滴，出水太少，洗的不爽")
+            self.assertEqual(user_round_index, 2)
+            return {"issue_description": "出水太少，洗澡体验差"}
+
+        policy = ServiceDialoguePolicy(
+            ok_prefix_probability=0.0,
+            opening_intent_inference_callback=fake_opening_inference,
+            issue_description_extraction_callback=fake_issue_extraction,
+        )
+        state = ServiceRuntimeState()
+        scenario = build_freeform_cli_scenario(request_type="fault")
+        scenario.hidden_context["product_routing_plan"] = {
+            "enabled": True,
+            "result": "楼宇 + 可直接确认机型",
+            "trace": ["entry.unknown"],
+            "summary": "entry.unknown -> 楼宇 + 可直接确认机型",
+            "steps": [
+                {
+                    "prompt_key": "brand_or_series",
+                    "prompt": "请问您的空气能是什么品牌或系列呢？",
+                    "answer_key": "entry.unknown",
+                    "answer_value": "不知道品牌或系列",
+                    "answer_instruction": "自然表达自己不知道品牌或系列。",
+                }
+            ],
+        }
+        transcript = [
+            DialogueTurn(
+                speaker="service",
+                text="您好，很高兴为您服务，请问是美的空气能热水机需要维修吗？",
+                round_index=1,
+            ),
+            DialogueTurn(speaker="user", text="是滴是滴，出水太少，洗的不爽", round_index=2),
+        ]
+        collected_slots = {
+            "issue_description": "",
+            "surname": "",
+            "phone": "",
+            "address": "",
+            "request_type": "",
+            "phone_contactable": "",
+            "phone_contact_owner": "",
+            "phone_collection_attempts": "",
+            "product_arrived": "",
+        }
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots=collected_slots,
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.slot_updates["issue_description"], "出水太少，洗澡体验差")
+        self.assertEqual(
+            result.reply,
+            "非常抱歉，给您添麻烦了，我这就安排是否上门维修，请问您的空气能是什么品牌或系列呢？",
+        )
+
+    def test_cli_freeform_fault_issue_detail_falls_back_to_raw_text_when_extraction_is_empty(self):
+        def fake_opening_inference(*, user_text: str, user_round_index: int):
+            return {"intent": "issue_detail"}
+
+        def fake_issue_extraction(*, user_text: str, user_round_index: int):
+            return {"issue_description": ""}
+
+        policy = ServiceDialoguePolicy(
+            ok_prefix_probability=0.0,
+            opening_intent_inference_callback=fake_opening_inference,
+            issue_description_extraction_callback=fake_issue_extraction,
+        )
+        state = ServiceRuntimeState()
+        scenario = build_freeform_cli_scenario(request_type="fault")
+        transcript = [
+            DialogueTurn(
+                speaker="service",
+                text="您好，很高兴为您服务，请问是美的空气能热水机需要维修吗？",
+                round_index=1,
+            ),
+            DialogueTurn(speaker="user", text="出水太少，洗的不爽", round_index=2),
+        ]
+        collected_slots = {
+            "issue_description": "",
+            "surname": "",
+            "phone": "",
+            "address": "",
+            "request_type": "",
+            "phone_contactable": "",
+            "phone_contact_owner": "",
+            "phone_collection_attempts": "",
+            "product_arrived": "",
+        }
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots=collected_slots,
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.slot_updates["issue_description"], "出水太少，洗的不爽")
 
     def test_cli_freeform_fault_opening_forces_model_judgement_before_routing(self):
         callback_calls: list[tuple[str, int]] = []
@@ -1597,6 +1754,43 @@ class ServicePolicyTests(unittest.TestCase):
 
         self.assertEqual(result.slot_updates["issue_description"], "就是最近加热特别慢，洗澡的时候水还忽冷忽热。")
         self.assertEqual(result.reply, "非常抱歉，给您添麻烦了，我这就安排是否上门维修，请问您贵姓？")
+
+    def test_fault_issue_followup_response_uses_model_extraction(self):
+        def fake_issue_extraction(*, user_text: str, user_round_index: int):
+            self.assertEqual(user_text, "是滴是滴，出水太少，洗的不爽")
+            self.assertEqual(user_round_index, 2)
+            return {"issue_description": "出水太少，洗澡体验差"}
+
+        policy = ServiceDialoguePolicy(
+            issue_description_extraction_callback=fake_issue_extraction,
+        )
+        state = ServiceRuntimeState()
+        scenario = build_freeform_cli_scenario(request_type="fault")
+        transcript = [
+            DialogueTurn(speaker="service", text="好的，请问空气能热水机现在是出现了什么问题？", round_index=2),
+            DialogueTurn(speaker="user", text="是滴是滴，出水太少，洗的不爽", round_index=2),
+        ]
+        collected_slots = {
+            "issue_description": "",
+            "surname": "",
+            "phone": "",
+            "address": "",
+            "request_type": "fault",
+            "phone_contactable": "",
+            "phone_contact_owner": "",
+            "phone_collection_attempts": "",
+            "product_arrived": "",
+        }
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots=collected_slots,
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.slot_updates["issue_description"], "出水太少，洗澡体验差")
+        self.assertTrue(policy.last_used_model_intent_inference)
 
     def test_surname_answer_after_apology_prefixed_prompt_is_not_asked_again(self):
         policy = ServiceDialoguePolicy()

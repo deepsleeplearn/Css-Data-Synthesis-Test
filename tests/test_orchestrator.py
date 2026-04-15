@@ -195,9 +195,9 @@ class DialogueOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         sample = await orchestrator.generate_dialogue_async(build_scenario())
         exported = sample.to_dict()
 
-        self.assertEqual(exported["transcript"][2]["round_label"], "2*")
-        self.assertTrue(exported["transcript"][2]["model_intent_inference_used"])
-        self.assertIn("[2*] 用户:", exported["dialogue_text"])
+        self.assertEqual(exported["transcript"][3]["round_label"], "2*")
+        self.assertTrue(exported["transcript"][3]["model_intent_inference_used"])
+        self.assertIn("[2*] 客服:", exported["dialogue_text"])
 
 
 if __name__ == "__main__":

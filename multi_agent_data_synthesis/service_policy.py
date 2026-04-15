@@ -125,6 +125,7 @@ class ServiceDialoguePolicy:
         contact_intent_inference_callback: Callable[..., dict[str, Any] | None] | None = None,
         confirmation_intent_inference_callback: Callable[..., dict[str, Any] | None] | None = None,
         opening_intent_inference_callback: Callable[..., dict[str, Any] | None] | None = None,
+        issue_description_extraction_callback: Callable[..., dict[str, Any] | None] | None = None,
         product_routing_intent_inference_callback: Callable[..., dict[str, Any] | None] | None = None,
         product_routing_enabled: bool = True,
     ):
@@ -134,6 +135,7 @@ class ServiceDialoguePolicy:
         self.contact_intent_inference_callback = contact_intent_inference_callback
         self.confirmation_intent_inference_callback = confirmation_intent_inference_callback
         self.opening_intent_inference_callback = opening_intent_inference_callback
+        self.issue_description_extraction_callback = issue_description_extraction_callback
         self.product_routing_intent_inference_callback = product_routing_intent_inference_callback
         self.product_routing_enabled = product_routing_enabled
         self.last_used_model_intent_inference = False
@@ -1013,7 +1015,11 @@ class ServiceDialoguePolicy:
                     force_model=force_model,
                 )
                 if opening_intent == "issue_detail":
-                    slot_updates["issue_description"] = user_text.strip()
+                    slot_updates["issue_description"] = self._resolve_issue_description(
+                        user_text,
+                        user_round_index=user_round_index,
+                        use_model=(scenario.request.request_type == "fault"),
+                    )
                 elif (
                     scenario.request.request_type == "installation"
                     and opening_intent == "yes"
@@ -1023,7 +1029,11 @@ class ServiceDialoguePolicy:
                 previous_service_signature,
                 self._format_prompt_config(self.FAULT_ISSUE_PROMPT, product=self._product_name(scenario)),
             ):
-                slot_updates["issue_description"] = user_text.strip()
+                slot_updates["issue_description"] = self._resolve_issue_description(
+                    user_text,
+                    user_round_index=user_round_index,
+                    use_model=(scenario.request.request_type == "fault"),
+                )
 
         if (
             "request_type" in collected_slots
@@ -1463,6 +1473,48 @@ class ServiceDialoguePolicy:
             self.last_used_model_intent_inference = True
             return intent
         return ""
+
+    def _extract_issue_description_with_model(
+        self,
+        text: str,
+        *,
+        user_round_index: int = 0,
+    ) -> str:
+        if self.issue_description_extraction_callback is None:
+            return ""
+        try:
+            payload = self._invoke_inference_callback(
+                self.issue_description_extraction_callback,
+                user_text=text,
+                user_round_index=user_round_index,
+            )
+        except Exception:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        issue_description = str(payload.get("issue_description", "")).strip()
+        if issue_description:
+            self.last_used_model_intent_inference = True
+        return issue_description
+
+    def _resolve_issue_description(
+        self,
+        text: str,
+        *,
+        user_round_index: int = 0,
+        use_model: bool = False,
+    ) -> str:
+        issue_description = str(text or "").strip()
+        if not issue_description:
+            return ""
+        if use_model:
+            extracted_issue_description = self._extract_issue_description_with_model(
+                issue_description,
+                user_round_index=user_round_index,
+            )
+            if extracted_issue_description:
+                return extracted_issue_description
+        return issue_description
 
     @staticmethod
     def _invoke_inference_callback(

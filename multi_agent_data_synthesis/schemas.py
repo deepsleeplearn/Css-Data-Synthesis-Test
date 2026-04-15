@@ -152,7 +152,7 @@ class DialogueTurn:
 
     def to_display_dict(self) -> dict[str, Any]:
         round_label = str(self.round_index)
-        if self.model_intent_inference_used:
+        if normalize_speaker(self.speaker) == SERVICE_SPEAKER and self.model_intent_inference_used:
             round_label = f"{round_label}*"
         return {
             "speaker": display_speaker(self.speaker),

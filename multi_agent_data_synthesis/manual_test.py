@@ -180,11 +180,10 @@ def run_manual_test_session(
         used_model_intent_inference = bool(
             getattr(resolved_policy, "last_used_model_intent_inference", False)
         )
-        user_round_label = f"{round_index}{'*' if used_model_intent_inference else ''}"
-        service_round_label = str(round_index)
+        user_round_label = str(round_index)
+        service_round_label = f"{round_index}{'*' if used_model_intent_inference else ''}"
         if used_model_intent_inference:
-            transcript[-2].model_intent_inference_used = True
-            print_func(f"[{user_round_label}] {display_speaker(USER_SPEAKER)}: {user_text}")
+            transcript[-1].model_intent_inference_used = True
         print_func(f"[{service_round_label}] {display_speaker(SERVICE_SPEAKER)}: {service_result.reply}")
         if show_address_state and _should_print_address_state(
             runtime_state=runtime_state,

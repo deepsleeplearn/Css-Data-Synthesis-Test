@@ -155,12 +155,11 @@ class ManualTestModuleTests(unittest.TestCase):
                 print_func=outputs.append,
             )
 
-            self.assertEqual(payload["service_trace"][0]["user_round_label"], "1*")
-            self.assertEqual(payload["service_trace"][0]["service_round_label"], "1")
+            self.assertEqual(payload["service_trace"][0]["user_round_label"], "1")
+            self.assertEqual(payload["service_trace"][0]["service_round_label"], "1*")
             self.assertTrue(payload["service_trace"][0]["used_model_intent_inference"])
-            self.assertEqual(payload["transcript"][0]["round_label"], "1*")
-            self.assertTrue(any("[1*] 用户:" in line for line in outputs))
-            self.assertTrue(any("[1] 客服:" in line for line in outputs))
+            self.assertEqual(payload["transcript"][1]["round_label"], "1*")
+            self.assertTrue(any("[1*] 客服:" in line for line in outputs))
 
     def test_run_manual_test_session_can_skip_file_write(self):
         scenario = Scenario.from_dict(build_scenario_payload("manual_case_003"))

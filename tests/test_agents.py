@@ -662,7 +662,7 @@ class ServiceAgentTests(unittest.TestCase):
             runtime_state=state,
         )
 
-        self.assertEqual(result["reply"], "请问您的空气能是什么品牌或系列呢？")
+        self.assertEqual(result["reply"], "请问您的空气能是什么具体品牌或系列呢？")
         self.assertTrue(result["used_model_intent_inference"])
         self.assertEqual(len(client.calls), 1)
 

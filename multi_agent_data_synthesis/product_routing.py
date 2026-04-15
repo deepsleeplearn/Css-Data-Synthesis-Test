@@ -188,6 +188,7 @@ SELF_BUY_TOKENS = (
     "自己买",
     "自己购买",
     "我买的",
+    "买的",
     "单买的",
     "单独买的",
     "后来买的",
@@ -214,6 +215,34 @@ EXTERNAL_GIFT_SOURCE_TOKENS = (
     "老板",
     "邻居",
     "同事",
+)
+ROUTING_SCENE_YES_TOKENS = (
+    "是",
+    "是的",
+    "是啊",
+    "是呀",
+    "对",
+    "对的",
+    "对啊",
+    "对滴",
+    "嗯",
+    "嗯嗯",
+    "嗯呐",
+    "没错",
+    "算是",
+    "属于",
+)
+ROUTING_SCENE_NO_TOKENS = (
+    "不是",
+    "不是的",
+    "不是啊",
+    "不对",
+    "不算",
+    "不属于",
+    "都不是",
+    "不在这几种",
+    "不属于这个",
+    "不属于这种",
 )
 
 
@@ -705,6 +734,10 @@ def infer_product_routing_answer_key(prompt_key: str, user_text: str) -> str:
         if prompt_key == "usage_scene":
             if _contains_unknown_intent(compact):
                 return "scene.unknown"
+            if compact in ROUTING_SCENE_NO_TOKENS:
+                return "scene.no"
+            if compact in ROUTING_SCENE_YES_TOKENS:
+                return "scene.yes"
             if any(token in compact for token in ("不是家庭", "不是家用", "不是别墅", "不是公寓", "不是理发店", "工程", "商用", "学校", "工厂")):
                 return "scene.no"
             if any(token in compact for token in ("家庭", "家里", "家用", "别墅", "公寓", "理发店")):

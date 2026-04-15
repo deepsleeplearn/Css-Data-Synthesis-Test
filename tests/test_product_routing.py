@@ -125,6 +125,16 @@ class ProductRoutingPlanTests(unittest.TestCase):
 
         self.assertEqual(answer_key, "purpose.water")
 
+    def test_infer_product_routing_answer_key_maps_bare_scene_negative_to_no_branch(self):
+        answer_key = infer_product_routing_answer_key("usage_scene", "不是")
+
+        self.assertEqual(answer_key, "scene.no")
+
+    def test_infer_product_routing_answer_key_maps_bare_scene_affirmative_to_yes_branch(self):
+        answer_key = infer_product_routing_answer_key("usage_scene", "是的")
+
+        self.assertEqual(answer_key, "scene.yes")
+
     def test_infer_product_routing_answer_key_maps_chinese_capacity_range_below_threshold(self):
         answer_key = infer_product_routing_answer_key("capacity_or_hp", "五六百升吧好像")
 
@@ -144,6 +154,11 @@ class ProductRoutingPlanTests(unittest.TestCase):
         answer_key = infer_product_routing_answer_key("purchase_or_property", "当时买房送的吧")
 
         self.assertEqual(answer_key, "purchase.property_bundle")
+
+    def test_infer_product_routing_answer_key_maps_short_purchase_reply_to_self_buy(self):
+        answer_key = infer_product_routing_answer_key("purchase_or_property", "买的")
+
+        self.assertEqual(answer_key, "purchase.self_buy")
 
     def test_infer_product_routing_answer_key_maps_short_gift_reply_to_property_bundle(self):
         answer_key = infer_product_routing_answer_key("purchase_or_property", "送的")
@@ -396,6 +411,58 @@ class ProductRoutingServicePolicyTests(unittest.TestCase):
             scenario.hidden_context["product_routing_trace"],
             ["entry.unknown", "purpose.unknown"],
         )
+
+    def test_service_policy_stops_at_building_when_unknown_purpose_then_bare_scene_negative(self):
+        plan = {
+            "enabled": True,
+            "result": ROUTING_RESULT_BUILDING,
+            "trace": ["entry.unknown", "purpose.unknown", "scene.no"],
+            "summary": "entry.unknown -> purpose.unknown -> scene.no -> 楼宇 + 可直接确认机型",
+            "steps": [
+                {
+                    "prompt_key": "usage_scene",
+                    "prompt": PROMPT_USAGE_SCENE,
+                    "answer_key": "scene.no",
+                    "answer_value": "不是家庭/别墅/公寓/理发店使用",
+                    "answer_instruction": "自然表达这不是用户本人居住或单体经营空间内的使用场景，不算这里的“公寓”。不要为了回答问题刻意复述提示语里的分类解释。",
+                }
+            ],
+        }
+        scenario = build_scenario_with_routing(plan)
+        policy = ServiceDialoguePolicy(ok_prefix_probability=0.0, rng=random.Random(0))
+        state = ServiceRuntimeState(
+            expected_product_routing_response=True,
+            product_routing_step_index=0,
+            product_routing_observed_trace=["entry.unknown", "purpose.unknown"],
+        )
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(speaker="service", text=PROMPT_USAGE_SCENE, round_index=5),
+                DialogueTurn(speaker="user", text="不是", round_index=6),
+            ],
+            collected_slots={
+                "issue_description": "",
+                "surname": "",
+                "phone": "",
+                "address": "",
+                "request_type": "",
+                "phone_contactable": "",
+                "phone_contact_owner": "",
+                "phone_collection_attempts": "",
+                "product_arrived": "",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "请问空气能热水器现在是出现了什么问题？")
+        self.assertEqual(result.slot_updates["product_routing_result"], ROUTING_RESULT_BUILDING)
+        self.assertEqual(
+            state.product_routing_observed_trace,
+            ["entry.unknown", "purpose.unknown", "scene.no"],
+        )
+        self.assertTrue(state.product_routing_completed)
 
     def test_user_prompt_disambiguates_apartment_from_building_public_area(self):
         plan = {

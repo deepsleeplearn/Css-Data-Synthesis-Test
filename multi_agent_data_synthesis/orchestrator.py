@@ -92,6 +92,9 @@ class DialogueOrchestrator:
                 speaker=SERVICE_SPEAKER,
                 text=opening_action["reply"],
                 round_index=1,
+                model_intent_inference_used=bool(
+                    opening_action.get("used_model_intent_inference", False)
+                ),
             )
         )
         if self.show_dialogue_progress:
@@ -99,9 +102,10 @@ class DialogueOrchestrator:
                 SERVICE_SPEAKER,
                 1,
                 opening_action["reply"],
+                used_model_intent_inference=bool(
+                    opening_action.get("used_model_intent_inference", False)
+                ),
             )
-        if opening_action.get("used_model_intent_inference", False):
-            transcript[-2].model_intent_inference_used = True
 
         self._merge_slots(collected_slots, opening_action["slot_updates"], required_slots)
         self._merge_slots(
@@ -145,15 +149,19 @@ class DialogueOrchestrator:
                         speaker=SERVICE_SPEAKER,
                         text=service_action["reply"],
                         round_index=round_index,
+                        model_intent_inference_used=bool(
+                            service_action.get("used_model_intent_inference", False)
+                        ),
                     )
                 )
-                if service_action.get("used_model_intent_inference", False):
-                    transcript[-2].model_intent_inference_used = True
                 if self.show_dialogue_progress and service_action["reply"]:
                     await self._print_turn_async(
                         SERVICE_SPEAKER,
                         round_index,
                         service_action["reply"],
+                        used_model_intent_inference=bool(
+                            service_action.get("used_model_intent_inference", False)
+                        ),
                     )
 
                 ready_to_close = service_action["is_ready_to_close"]

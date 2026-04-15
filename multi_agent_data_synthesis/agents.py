@@ -403,6 +403,7 @@ class ServiceAgent:
             contact_intent_inference_callback=self._infer_contactable_intent_with_model,
             confirmation_intent_inference_callback=self._infer_confirmation_intent_with_model,
             opening_intent_inference_callback=self._infer_opening_intent_with_model,
+            issue_description_extraction_callback=self._extract_issue_description_with_model,
             product_routing_intent_inference_callback=self._infer_product_routing_intent_with_model,
             product_routing_enabled=product_routing_enabled,
         )
@@ -573,6 +574,38 @@ class ServiceAgent:
             temperature=0.0,
         )
         return {"intent": str(payload.get("intent", "")).strip()}
+
+    def _extract_issue_description_with_model(
+        self,
+        *,
+        user_text: str,
+        user_round_index: int = 0,
+    ) -> dict[str, Any]:
+        system_prompt = """你是家电客服对话里的故障/诉求描述总结助手。
+
+任务：
+1. 从用户原话里总结真正的故障现象、报错信息、使用异常，或安装诉求细节。
+2. 去掉“是的、是滴、对的、嗯嗯、侬好、麻烦了”这类确认、寒暄、语气词和无关评价。
+3. 保留和客服登记相关的核心问题描述，尽量短而完整。
+4. 如果用户原话里没有可提取的有效故障/诉求描述，就返回空字符串。
+
+输出 JSON：
+{
+  "issue_description": "总结后的核心故障/诉求描述，没有就返回空字符串"
+}
+"""
+        payload = self.client.complete_json(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": f"[{user_round_index}]用户: {user_text}\n只返回 JSON。",
+                },
+            ],
+            temperature=0.0,
+        )
+        return {"issue_description": str(payload.get("issue_description", "")).strip()}
 
     def _infer_product_routing_intent_with_model(
         self,
