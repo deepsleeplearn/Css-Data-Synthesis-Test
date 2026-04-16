@@ -663,6 +663,40 @@ class ServicePolicyTests(unittest.TestCase):
         self.assertEqual(result.reply, "好的，需要登记下您的地址，麻烦您完整的说下省、市、区、乡镇，精确到门牌号。")
         self.assertFalse(state.awaiting_phone_keypad_input)
 
+    def test_cli_freeform_contactable_bare_neng_uses_mock_current_call_phone(self):
+        policy = ServiceDialoguePolicy()
+        state = ServiceRuntimeState(expected_contactable_confirmation=True)
+        scenario = build_freeform_cli_scenario(request_type="fault")
+        scenario.hidden_context["contact_phone"] = "13912345678"
+        scenario.hidden_context["contact_phone_owner"] = "本人当前来电"
+        transcript = [
+            DialogueTurn(speaker="service", text="请问您当前这个来电号码能联系到您吗？", round_index=4),
+            DialogueTurn(speaker="user", text="能", round_index=4),
+        ]
+        collected_slots = {
+            "issue_description": "热水器不加热，想报修。",
+            "surname": "王",
+            "phone": "",
+            "address": "",
+            "request_type": "fault",
+            "phone_contactable": "",
+            "phone_contact_owner": "",
+            "phone_collection_attempts": "",
+            "product_arrived": "",
+        }
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots=collected_slots,
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.slot_updates["phone"], "13912345678")
+        self.assertEqual(result.slot_updates["phone_contactable"], "yes")
+        self.assertEqual(result.reply, "好的，需要登记下您的地址，麻烦您完整的说下省、市、区、乡镇，精确到门牌号。")
+        self.assertFalse(state.awaiting_phone_keypad_input)
+
     def test_cli_freeform_contactable_switch_to_another_number_counts_as_no(self):
         policy = ServiceDialoguePolicy(ok_prefix_probability=0.0)
         state = ServiceRuntimeState(expected_contactable_confirmation=True)
@@ -1915,7 +1949,7 @@ class ServicePolicyTests(unittest.TestCase):
         self.assertTrue(state.expected_product_routing_response)
         self.assertFalse(policy.last_used_model_intent_inference)
 
-    def test_product_routing_reasks_when_prompt_has_no_unknown_branch_and_model_returns_empty(self):
+    def test_product_routing_routes_to_building_when_property_year_is_unknown(self):
         def fake_routing_inference(*, prompt_key: str, user_text: str):
             self.assertEqual(prompt_key, "property_year")
             self.assertEqual(user_text, "这个我真说不好")
@@ -1970,12 +2004,13 @@ class ServicePolicyTests(unittest.TestCase):
             runtime_state=state,
         )
 
-        self.assertEqual(result.reply, "请问是21年之前的楼盘，还是之后的呢？")
+        self.assertEqual(result.reply, "请问空气能热水机现在是出现了什么问题？")
+        self.assertEqual(result.slot_updates["product_routing_result"], "楼宇 + 可直接确认机型")
         self.assertEqual(
             state.product_routing_observed_trace,
-            ["entry.unknown", "purpose.unknown", "scene.yes", "purchase.property_bundle"],
+            ["entry.unknown", "purpose.unknown", "scene.yes", "purchase.property_bundle", "property_year.unknown"],
         )
-        self.assertTrue(state.expected_product_routing_response)
+        self.assertTrue(state.product_routing_completed)
         self.assertFalse(policy.last_used_model_intent_inference)
 
     def test_address_confirmation_uses_model_fallback_when_rule_cannot_classify(self):

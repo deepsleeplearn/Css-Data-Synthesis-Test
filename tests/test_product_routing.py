@@ -195,6 +195,11 @@ class ProductRoutingPlanTests(unittest.TestCase):
 
         self.assertEqual(answer_key, "property_year.after_2021")
 
+    def test_infer_product_routing_answer_key_maps_unknown_property_year(self):
+        answer_key = infer_product_routing_answer_key("property_year", "这个时间太久了，我有点忘记了")
+
+        self.assertEqual(answer_key, "property_year.unknown")
+
 
 class ProductRoutingServicePolicyTests(unittest.TestCase):
     def test_service_policy_inserts_routing_between_opening_and_fault_question(self):
@@ -461,6 +466,58 @@ class ProductRoutingServicePolicyTests(unittest.TestCase):
         self.assertEqual(
             state.product_routing_observed_trace,
             ["entry.unknown", "purpose.unknown", "scene.no"],
+        )
+        self.assertTrue(state.product_routing_completed)
+
+    def test_service_policy_stops_at_building_when_property_year_is_unknown(self):
+        plan = {
+            "enabled": True,
+            "result": ROUTING_RESULT_BUILDING,
+            "trace": ["property_year.unknown"],
+            "summary": "property_year.unknown -> 楼宇 + 可直接确认机型",
+            "steps": [
+                {
+                    "prompt_key": "property_year",
+                    "prompt": "请问是21年之前的楼盘，还是之后的呢？",
+                    "answer_key": "property_year.unknown",
+                    "answer_value": "不清楚楼盘年份",
+                    "answer_instruction": "自然表达自己不清楚楼盘属于 2021 年之前还是之后，也没有提供可辅助判断的大概时间点。",
+                }
+            ],
+        }
+        scenario = build_scenario_with_routing(plan)
+        policy = ServiceDialoguePolicy(ok_prefix_probability=0.0, rng=random.Random(0))
+        state = ServiceRuntimeState(
+            expected_product_routing_response=True,
+            product_routing_step_index=0,
+            product_routing_observed_trace=["entry.unknown", "purpose.unknown", "scene.yes", "purchase.property_bundle"],
+        )
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(speaker="service", text="请问是21年之前的楼盘，还是之后的呢？", round_index=6),
+                DialogueTurn(speaker="user", text="忘记了", round_index=7),
+            ],
+            collected_slots={
+                "issue_description": "",
+                "surname": "",
+                "phone": "",
+                "address": "",
+                "request_type": "",
+                "phone_contactable": "",
+                "phone_contact_owner": "",
+                "phone_collection_attempts": "",
+                "product_arrived": "",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "请问空气能热水器现在是出现了什么问题？")
+        self.assertEqual(result.slot_updates["product_routing_result"], ROUTING_RESULT_BUILDING)
+        self.assertEqual(
+            state.product_routing_observed_trace,
+            ["entry.unknown", "purpose.unknown", "scene.yes", "purchase.property_bundle", "property_year.unknown"],
         )
         self.assertTrue(state.product_routing_completed)
 

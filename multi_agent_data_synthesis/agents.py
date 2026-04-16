@@ -641,6 +641,10 @@ class ServiceAgent:
    - 明确在 750 升以下或 3 匹以下，判为 capacity.below_threshold，例如“五六百升”“四五百升”“两匹多”
    - 明确在 750 升以上或 3 匹及以上，判为 capacity.above_threshold，例如“八百升”“三匹”“3匹以上”
    - 如果口语范围跨过阈值，统一判为 capacity.unknown，例如“七八百升”“两三匹”“三四匹”
+8. 对 property_year 节点要特别注意：
+   - “21年前 / 2020年 / 19年的楼盘 / 2018年交付” 判为 property_year.before_2021
+   - “21年后 / 2022年 / 22年的楼盘” 判为 property_year.after_2021
+   - “忘了 / 记不清 / 太久了不记得 / 说不好 / 不清楚”，且用户没提供可辅助判断的大概年份时，判为 property_year.unknown
 
 可选 prompt_key / answer_key：
 - brand_or_series: brand_series.colmo | brand_series.cooling_or_little_swan | brand_series.home_series | brand_series.lieyan | entry.model | entry.unknown
@@ -648,7 +652,7 @@ class ServiceAgent:
 - usage_scene: scene.yes | scene.no | scene.unknown
 - capacity_or_hp: capacity.above_threshold | capacity.below_threshold | capacity.unknown
 - purchase_or_property: purchase.self_buy | purchase.unknown | purchase.property_bundle
-- property_year: property_year.before_2021 | property_year.after_2021
+- property_year: property_year.before_2021 | property_year.after_2021 | property_year.unknown
 
 输出 JSON：
 {

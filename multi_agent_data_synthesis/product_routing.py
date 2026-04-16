@@ -50,6 +50,7 @@ PRODUCT_ROUTING_ALLOWED_ANSWER_KEYS = {
     "property_year": {
         "property_year.before_2021",
         "property_year.after_2021",
+        "property_year.unknown",
     },
 }
 
@@ -123,6 +124,9 @@ UNKNOWN_TEXT_PATTERNS = (
     "不知道",
     "不清楚",
     "不太清楚",
+    "忘了",
+    "忘记了",
+    "记不得",
     "记不清",
     "说不上来",
     "不确定",
@@ -306,6 +310,8 @@ def _answer_value(rng: random.Random, answer_key: str, *, model_hint: str = "") 
         return "21年之前的楼盘"
     if answer_key == "property_year.after_2021":
         return "21年之后的楼盘"
+    if answer_key == "property_year.unknown":
+        return "不清楚楼盘年份"
     if answer_key == "capacity.above_threshold":
         return rng.choice(("750升以上", "3匹及以上"))
     if answer_key == "capacity.below_threshold":
@@ -335,6 +341,7 @@ def _answer_instruction(answer_key: str, *, answer_value: str) -> str:
         "purchase.property_bundle": "自然表达机器是楼盘配套赠送的。",
         "property_year.before_2021": "自然表达楼盘属于 2021 年之前。",
         "property_year.after_2021": "自然表达楼盘属于 2021 年之后。",
+        "property_year.unknown": "自然表达自己不清楚楼盘属于 2021 年之前还是之后，也没有提供可辅助判断的大概时间点。",
         "capacity.above_threshold": "自然表达机器容量较大。更像真实用户时，通常只说自己更确定的一个维度，优先只说升数或匹数其中一个。",
         "capacity.below_threshold": "自然表达机器容量较小。更像真实用户时，通常只说自己更确定的一个维度，优先只说升数或匹数其中一个。",
         "capacity.unknown": "自然表达自己不清楚容量或匹数。",
@@ -375,6 +382,7 @@ def default_unknown_product_routing_answer_key(prompt_key: str) -> str:
         "usage_scene": "scene.unknown",
         "capacity_or_hp": "capacity.unknown",
         "purchase_or_property": "purchase.unknown",
+        "property_year": "property_year.unknown",
     }
     return str(unknown_mapping.get(str(prompt_key or "").strip(), "")).strip()
 
@@ -765,6 +773,8 @@ def infer_product_routing_answer_key(prompt_key: str, user_text: str) -> str:
             continue
 
         if prompt_key == "property_year":
+            if _contains_unknown_intent(compact):
+                return "property_year.unknown"
             if "之前" in compact or "以前" in compact:
                 return "property_year.before_2021"
             if "之后" in compact or "以后" in compact:
@@ -896,7 +906,7 @@ def next_product_routing_steps_from_observed_trace(
 
     if current_answer_key == "property_year.before_2021":
         return [], ROUTING_RESULT_HOME
-    if current_answer_key == "property_year.after_2021":
+    if current_answer_key in {"property_year.after_2021", "property_year.unknown"}:
         return [], ROUTING_RESULT_BUILDING
 
     return [], ""
