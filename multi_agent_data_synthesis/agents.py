@@ -411,6 +411,7 @@ class ServiceAgent:
         self.policy = ServiceDialoguePolicy(
             ok_prefix_probability=ok_prefix_probability,
             address_inference_callback=self._infer_address_candidate_with_model,
+            address_collection_acceptance_inference_callback=self._infer_address_collection_acceptance_with_model,
             surname_inference_callback=self._infer_surname_with_model,
             contact_intent_inference_callback=self._infer_contactable_intent_with_model,
             confirmation_intent_inference_callback=self._infer_confirmation_intent_with_model,
@@ -491,6 +492,53 @@ class ServiceAgent:
             "merged_address_candidate": str(payload.get("merged_address_candidate", "")).strip(),
             "granularity": str(payload.get("granularity", "")).strip(),
         }
+
+    def _infer_address_collection_acceptance_with_model(
+        self,
+        *,
+        user_text: str,
+        partial_address_candidate: str,
+        last_address_followup_prompt: str,
+        dialogue_history: str = "",
+    ) -> dict[str, Any]:
+        system_prompt = """你是家电客服对话里的地址收集意图识别助手。
+
+任务：
+1. 判断用户这句话是不是在表达“就按当前已经提供的地址先登记/确认，不再继续补充更详细地址”。
+2. 只输出 yes、no 或 unknown。
+3. 像“就到这儿吧”“就这些了”“按前面那个就行”“后面电话联系吧”“先这样登记”“只能提供到这了”“我说完了”，如果语义是在停止继续补充地址，判为 yes。
+4. 如果用户仍在继续补充地址内容，或者是在纠正地址细节，而不是表示停止补充，判为 no。
+5. 如果无法判断，输出 unknown。
+
+输出 JSON：
+{
+  "intent": "yes|no|unknown"
+}
+"""
+        user_prompt = f"""请基于下面信息判断用户是否在表示“按当前已提供地址处理，不再继续补充”。
+
+上一轮客服话术：
+{last_address_followup_prompt or '无'}
+
+当前已积累的地址片段：
+{partial_address_candidate or '无'}
+
+最近对话历史：
+{dialogue_history or '无'}
+
+用户本轮原话：
+{user_text}
+
+只返回 JSON。"""
+        payload = self.client.complete_json(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.0,
+        )
+        return {"intent": str(payload.get("intent", "")).strip()}
 
     def _infer_contactable_intent_with_model(
         self,
@@ -622,6 +670,7 @@ class ServiceAgent:
 5. “维修”“报修”“需要修”“坏了”“有问题”这类泛泛表达，本身不算 issue_detail。
 5. 仅有品牌、系列、型号、容量、匹数、楼宇/家用等产品信息，不算 issue_detail。
 6. “东西坏了”“热水器坏了”“有问题”这类泛泛表述，不算 issue_detail；必须有具体故障现象才算。
+7. 如果用户明确说了产品部位或零件哪里坏了，例如“面板坏了”“显示屏坏了”“压缩机坏了”“主板坏了”，算 issue_detail。
 
 输出 JSON：
 {
@@ -657,6 +706,7 @@ class ServiceAgent:
 5. 像“东西坏了”“热水器坏了”“有问题”这类泛泛故障表述不算有效故障描述，返回空字符串。
 6. 只有品牌、系列、型号、容量、匹数等产品信息时，也返回空字符串。
 7. 如果用户明确说了具体现象，比如“不加热”“出水不热”“开到 80 度烧两小时才 40 度”“忽冷忽热”“漏水”“噪音大”，要提炼出核心故障描述，不要返回空字符串。
+8. 如果用户明确说了产品部位或零件哪里坏了，例如“面板坏了”“显示屏坏了”“压缩机坏了”“主板坏了”，这也算有效故障描述，直接提炼核心部位故障。
 
 输出 JSON：
 {

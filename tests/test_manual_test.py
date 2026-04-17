@@ -189,9 +189,9 @@ class ManualTestModuleTests(unittest.TestCase):
             def respond(self, *, scenario, transcript, collected_slots, runtime_state):
                 runtime_state.awaiting_full_address = True
                 runtime_state.partial_address_candidate = "江苏省扬州市宝应县安宜镇"
-                runtime_state.last_address_followup_prompt = "好的，请您继续说一下小区、楼栋和门牌号。"
+                runtime_state.last_address_followup_prompt = "请问具体是在哪个小区或村呢？尽量详细到门牌号。"
                 return ServicePolicyResult(
-                    reply="好的，请您继续说一下小区、楼栋和门牌号。",
+                    reply="请问具体是在哪个小区或村呢？尽量详细到门牌号。",
                     slot_updates={},
                     is_ready_to_close=False,
                 )

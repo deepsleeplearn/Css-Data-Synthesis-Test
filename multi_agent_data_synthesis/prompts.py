@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from multi_agent_data_synthesis.address_utils import compact_address_text, normalize_address_text
+from multi_agent_data_synthesis.address_utils import (
+    compact_address_text,
+    extract_address_components,
+    normalize_address_text,
+)
 from multi_agent_data_synthesis.dialogue_plans import (
     SECOND_ROUND_REPLY_CONFIRM_ONLY,
     SECOND_ROUND_REPLY_CONFIRM_WITH_ISSUE,
@@ -128,6 +132,150 @@ def _consumed_address_plan_steps(scenario: Scenario, transcript: list[DialogueTu
     return consumed_steps
 
 
+def _last_address_collection_prompt_text(transcript: list[DialogueTurn]) -> str:
+    if not transcript:
+        return ""
+    last_turn = transcript[-1]
+    if (
+        normalize_speaker(last_turn.speaker) == SERVICE_SPEAKER
+        and ServiceDialoguePolicy.is_address_collection_prompt(last_turn.text)
+    ):
+        return last_turn.text
+    return ""
+
+
+def _address_region_street_value(
+    address: str,
+    *,
+    include_province: bool = True,
+    include_city: bool = True,
+    include_district: bool = True,
+) -> str:
+    components = extract_address_components(address)
+    parts: list[str] = []
+    if include_province and components.province:
+        parts.append(components.province)
+    if include_city and components.city:
+        parts.append(components.city)
+    if include_district and components.district:
+        parts.append(components.district)
+    locality = components.town or components.road
+    if locality:
+        parts.append(locality)
+    return "".join(parts) or str(address or "").strip()
+
+
+def _address_precise_detail_value(address: str) -> str:
+    components = extract_address_components(address)
+    detail = "".join(
+        part
+        for part in (components.building, components.unit, components.floor, components.room)
+        if part
+    )
+    if detail:
+        return detail
+    group_token = ServiceDialoguePolicy._extract_village_group_token(address)
+    house_token = ServiceDialoguePolicy._extract_house_number_token(address)
+    return f"{group_token}{house_token}" if group_token or house_token else str(address or "").strip()
+
+
+def _address_locality_detail_value(address: str) -> str:
+    components = extract_address_components(address)
+    parts: list[str] = []
+    if ServiceDialoguePolicy._is_rural_address_candidate(address):
+        parts.extend(part for part in (components.town, components.road, components.community) if part)
+        group_token = ServiceDialoguePolicy._extract_village_group_token(address)
+        house_token = ServiceDialoguePolicy._extract_house_number_token(address)
+        if group_token:
+            parts.append(group_token)
+        if house_token:
+            parts.append(house_token)
+        return "".join(parts) or str(address or "").strip()
+
+    if components.community:
+        parts.append(components.community)
+    elif components.road:
+        parts.append(components.road)
+    elif components.town:
+        parts.append(components.town)
+
+    detail = _address_precise_detail_value(address)
+    if detail and detail not in "".join(parts):
+        parts.append(detail)
+    return "".join(parts) or str(address or "").strip()
+
+
+def _plan_value_is_too_fine_for_full_prompt(value: str) -> bool:
+    components = extract_address_components(value)
+    return (
+        not components.has_admin_region
+        and (
+            components.has_locality
+            or components.has_precise_detail
+            or ServiceDialoguePolicy._has_nonstandard_address_detail(value)
+        )
+    )
+
+
+def _prompt_shaped_address_value(
+    scenario: Scenario,
+    transcript: list[DialogueTurn],
+    planned_values: list[str],
+    consumed_steps: int,
+) -> str:
+    actual_address = str(scenario.customer.address or "").strip()
+    planned_value = planned_values[consumed_steps] if consumed_steps < len(planned_values) else actual_address
+    last_service_text = _last_address_collection_prompt_text(transcript)
+    if not last_service_text:
+        return planned_value or actual_address
+
+    normalized_prompt = ServiceDialoguePolicy._normalize_prompt_text(last_service_text)
+    if ServiceDialoguePolicy._signature_matches_prompt(
+        last_service_text,
+        ServiceDialoguePolicy.ADDRESS_REGION_STREET_FOLLOWUP_PROMPT,
+    ):
+        return _address_region_street_value(actual_address)
+    if (
+        ServiceDialoguePolicy._signature_matches_prompt(
+            last_service_text,
+            ServiceDialoguePolicy.ADDRESS_DISTRICT_STREET_FOLLOWUP_PROMPT,
+        )
+        or normalized_prompt.startswith("您是在")
+    ):
+        return _address_region_street_value(
+            actual_address,
+            include_province=False,
+            include_city=False,
+        )
+    if ServiceDialoguePolicy._signature_matches_prompt(
+        last_service_text,
+        ServiceDialoguePolicy.ADDRESS_LOCALITY_FOLLOWUP_PROMPT,
+    ):
+        return _address_locality_detail_value(actual_address)
+    if ServiceDialoguePolicy._signature_matches_prompt(
+        last_service_text,
+        ServiceDialoguePolicy.ADDRESS_BUILDING_FOLLOWUP_PROMPT,
+    ):
+        return _address_precise_detail_value(actual_address)
+    if ServiceDialoguePolicy._signature_matches_prompt(
+        last_service_text,
+        ServiceDialoguePolicy.ADDRESS_HOUSE_NUMBER_FOLLOWUP_PROMPT,
+    ) or ServiceDialoguePolicy._signature_matches_prompt(
+        last_service_text,
+        ServiceDialoguePolicy.ADDRESS_RURAL_DETAIL_FOLLOWUP_PROMPT,
+    ):
+        return _address_locality_detail_value(actual_address)
+    if (
+        ServiceDialoguePolicy._signature_matches_prompt(
+            last_service_text,
+            ServiceDialoguePolicy.ADDRESS_PROMPT,
+        )
+        and _plan_value_is_too_fine_for_full_prompt(planned_value)
+    ):
+        return _address_region_street_value(actual_address)
+    return planned_value or actual_address
+
+
 def next_address_input_value(scenario: Scenario, transcript: list[DialogueTurn]) -> str:
     if count_address_collection_prompts(transcript) <= 0:
         return "无"
@@ -138,7 +286,7 @@ def next_address_input_value(scenario: Scenario, transcript: list[DialogueTurn])
 
     consumed_steps = _consumed_address_plan_steps(scenario, transcript)
     if consumed_steps < len(planned_values):
-        return planned_values[consumed_steps]
+        return _prompt_shaped_address_value(scenario, transcript, planned_values, consumed_steps)
     return str(scenario.customer.address or "").strip() or planned_values[-1]
 
 
@@ -233,6 +381,38 @@ def build_topic_guardrail_note(transcript: list[DialogueTurn]) -> str:
             "不要在这一轮再重复故障、电话、型号或其他旧信息。"
         )
     if ServiceDialoguePolicy.is_address_collection_prompt(last_service_text):
+        if ServiceDialoguePolicy._signature_matches_prompt(
+            last_service_text,
+            ServiceDialoguePolicy.ADDRESS_PROMPT,
+        ):
+            return (
+                "当前客服是在要求你完整说明地址。你不要只回答室号、楼层、单元或楼栋尾巴；"
+                "优先从省、市、区开始说，至少先说到区县，比较自然的答法通常会继续到镇/街道这一层。"
+            )
+        if ServiceDialoguePolicy._signature_matches_prompt(
+            last_service_text,
+            ServiceDialoguePolicy.ADDRESS_REGION_STREET_FOLLOWUP_PROMPT,
+        ):
+            return (
+                "当前客服只在追问省、市、区和街道。你这一轮优先只补行政区和镇/街道，"
+                "不要顺手把小区、楼栋、单元、室号一口气全说完。"
+            )
+        if ServiceDialoguePolicy._signature_matches_prompt(
+            last_service_text,
+            ServiceDialoguePolicy.ADDRESS_DISTRICT_STREET_FOLLOWUP_PROMPT,
+        ) or ServiceDialoguePolicy._normalize_prompt_text(last_service_text).startswith("您是在"):
+            return (
+                "当前客服只在追问区和街道。你这一轮优先补区县和镇/街道，"
+                "不要继续往下说到小区、楼栋、单元、室号。"
+            )
+        if ServiceDialoguePolicy._signature_matches_prompt(
+            last_service_text,
+            ServiceDialoguePolicy.ADDRESS_LOCALITY_FOLLOWUP_PROMPT,
+        ):
+            return (
+                "当前客服在追问具体小区、村或更细门牌。你这一轮优先补小区/村和门牌细节，"
+                "不要再从省、市、区重新说起。"
+            )
         return (
             "当前客服在收集地址。你只说当前需要补充的地址信息本体；"
             "不要补充路线指引、附近地标、怎么走、门口标识、停车说明、‘你懂的’这类口头补充。"
@@ -318,10 +498,17 @@ def build_product_routing_note(transcript: list[DialogueTurn], scenario: Scenari
     answer_instruction = str(step.get("answer_instruction", "")).strip() or "围绕当前路由节点自然回答。"
     answer_key = str(step.get("answer_key", "")).strip() or "unknown"
     capacity_note = ""
+    unknown_note = ""
     if answer_key.startswith("capacity."):
         capacity_note = (
             " 如果是在回答容量或匹数，通常只说自己更确定的一个维度，"
             "优先只说升数或匹数其中一个，不要把两个都报出来。"
+        )
+    if answer_key.endswith(".unknown"):
+        unknown_note = (
+            " 如果当前节点本身就是“不清楚/不确定”，优先一两句直接表达不知道、"
+            "不确定、记不清就够了；不要先猜一个答案再否定，不要同时枚举多个可能，"
+            "不要为了显得自然而故意说得很长。"
         )
     return (
         "当前客服正在执行产品归属识别中间路由。"
@@ -333,6 +520,7 @@ def build_product_routing_note(transcript: list[DialogueTurn], scenario: Scenari
         "不要机械照抄参考事实，不要套固定模板，也不要只回一个被提示过的标准短句；"
         "可以带自然口头语、犹豫、补半句、换种说法，只要核心事实不变即可。"
         f"{capacity_note}"
+        f"{unknown_note}"
         " 同时不要跳到故障、地址、电话等其他话题。"
     )
 
@@ -529,7 +717,7 @@ def build_user_agent_messages(
 5. 如果客服要求你在拨号盘上输入联系方式并以#号键结束，只输出本轮应输入的内容，不要附带任何解释。
 6. 如果客服用“号码是某个号码，对吗”这类话术核对号码，无论前面是否带“好的”，都根据事实回答对或不对。
 7. 如果客服用“跟您确认一下，地址是某个地址，对吗？”或“您的地址是某个地址，对吗？”这类话术核对地址，无论前面是否带“好的”，都要根据隐藏设定回答；如果地址正确，通常只简短表示肯定，不要重复完整地址；如果地址不对，就参考“若客服核对了错误地址，这一轮可参考答法”里的事实去否认或更正，但不必逐字复述那句话，可以自然地说成“应该是2单元”“不是，是4单元602室”“不对，改成5栋2单元”这类口语化表达。
-8. 如果客服问地址，你可以按隐藏设定分几轮逐步补充；客服继续追问缺失部分时，就只补当前还没说到的那部分，也可以在合适时直接给出完整地址。完整地址确认完后，如果客服再按固定话术核对地址，就只做简短确认。
+8. 如果客服问地址，你可以按隐藏设定分几轮逐步补充；客服继续追问缺失部分时，就只补当前还没说到的那部分，也可以在合适时直接给出完整地址。完整地址确认完后，如果客服再按固定话术核对地址，就只做简短确认。特别注意：如果客服让你“完整说下省、市、区、乡镇，精确到门牌号”，不要只回“803室”“2单元”“3栋”这类尾巴；如果客服只追问“省、市、区和街道”或“区和街道”，就优先只答到行政区和镇/街道，不要继续一口气说到小区楼栋室号。
 9. 如果客服问产品或者产品到货了没，就按隐藏设定回答，说话不需要太正式，口语化些；已经确认过“要安装/要维修”后，不要把同一句诉求又重复一遍，除非客服重新追问。
 10. 如果客服通知“工单已受理成功”并说明后续联系时间，这一轮通常只做简短确认回复。
 11. 如果客服要求你对本次通话按 1 到 5 打分，必须只回复单个数字“1”或“2”；不要回复“挺好的”“满意”“好的”等自然语言，也不要输出其他解释。

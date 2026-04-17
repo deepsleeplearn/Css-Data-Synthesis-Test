@@ -28,6 +28,7 @@ class ConfigTests(unittest.TestCase):
                     "ADDRESS_SEGMENT_3_STRATEGY_WEIGHTS": '{"province_city_district__locality__detail": 1.0}',
                     "ADDRESS_SEGMENT_2_STRATEGY_WEIGHTS": '{"province_city_district_locality__detail": 0.7, "province_city_district__locality_detail": 0.3}',
                     "ADDRESS_SEGMENT_4_STRATEGY_WEIGHTS": '{"province_city__district__locality__detail": 1.0}',
+                    "ADDRESS_SEGMENT_5_STRATEGY_WEIGHTS": '{"province__city__district__locality__detail": 1.0}',
                     "ADDRESS_KNOWN_MISMATCH_REWRITE_END_LEVEL_WEIGHTS": '{"building": 0.3, "room": 0.7}',
                     "USER_REPLY_OFF_TOPIC_TARGET_WEIGHTS": '{"address_collection": 0.6, "surname_collection": 0.4}',
                     "USER_REPLY_OFF_TOPIC_ROUNDS_WEIGHTS": '{"1": 0.7, "2": 0.3}',
@@ -57,6 +58,10 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             config.address_segment_4_strategy_weights["province_city__district__locality__detail"],
+            1.0,
+        )
+        self.assertEqual(
+            config.address_segment_5_strategy_weights["province__city__district__locality__detail"],
             1.0,
         )
         self.assertEqual(config.address_known_mismatch_rewrite_end_level_weights["room"], 0.7)

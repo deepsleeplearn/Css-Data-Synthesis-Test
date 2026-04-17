@@ -10,6 +10,7 @@ from multi_agent_data_synthesis.product_routing import (
     PROMPT_USAGE_SCENE,
     PROMPT_USAGE_PURPOSE,
     ROUTING_RESULT_BUILDING,
+    ROUTING_RESULT_HOME,
     build_product_routing_plan,
     infer_product_routing_answer_key,
 )
@@ -553,6 +554,40 @@ class ProductRoutingServicePolicyTests(unittest.TestCase):
 
         self.assertIn("它只指用户自己居住的公寓住房", prompt_messages[1]["content"])
         self.assertNotIn("小区楼宇", prompt_messages[1]["content"])
+
+    def test_user_prompt_for_unknown_routing_answer_prefers_direct_uncertainty_expression(self):
+        plan = {
+            "enabled": True,
+            "result": ROUTING_RESULT_HOME,
+            "trace": ["purpose.unknown"],
+            "summary": "purpose.unknown -> 家用 + 可直接确认机型",
+            "steps": [
+                {
+                    "prompt_key": "usage_purpose",
+                    "prompt": PROMPT_USAGE_PURPOSE,
+                    "answer_key": "purpose.unknown",
+                    "answer_value": "不清楚用途",
+                    "answer_instruction": "优先用一小句直接表达自己不清楚机器用途；不要先猜生活用水还是采暖再反复改口。",
+                }
+            ],
+        }
+        scenario = build_scenario_with_routing(plan)
+        prompt_messages = build_user_agent_messages(
+            scenario,
+            transcript=[
+                DialogueTurn(
+                    speaker="service",
+                    text=PROMPT_USAGE_PURPOSE,
+                    round_index=4,
+                )
+            ],
+            round_index=5,
+            second_round_reply_strategy="confirm_only",
+        )
+
+        self.assertIn("优先一两句直接表达不知道、不确定、记不清就够了", prompt_messages[1]["content"])
+        self.assertIn("不要先猜一个答案再否定", prompt_messages[1]["content"])
+        self.assertIn("不要为了显得自然而故意说得很长", prompt_messages[1]["content"])
 
 
 class ProductRoutingUserAgentTests(unittest.IsolatedAsyncioTestCase):

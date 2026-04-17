@@ -40,6 +40,7 @@ PROVINCE_PREFIXES = (
 MUNICIPALITY_PREFIXES = ("北京", "上海", "天津", "重庆")
 COMMUNITY_SUFFIXES = (
     "小区",
+    "社区",
     "花园",
     "公寓",
     "庭",
@@ -80,6 +81,7 @@ DEFAULT_ADDRESS_SEGMENT_ROUNDS_WEIGHTS: dict[str, float] = {
     "2": 0.45,
     "3": 0.35,
     "4": 0.20,
+    "5": 0.05,
 }
 DEFAULT_ADDRESS_SEGMENT_2_STRATEGY_WEIGHTS: dict[str, float] = {
     "province_city_district_locality__detail": 0.6,
@@ -93,13 +95,17 @@ DEFAULT_ADDRESS_SEGMENT_3_STRATEGY_WEIGHTS: dict[str, float] = {
 DEFAULT_ADDRESS_SEGMENT_4_STRATEGY_WEIGHTS: dict[str, float] = {
     "province_city__district__locality__detail": 1.0,
 }
+DEFAULT_ADDRESS_SEGMENT_5_STRATEGY_WEIGHTS: dict[str, float] = {
+    "province__city__district__locality__detail": 1.0,
+}
 ADDRESS_SEGMENT_STRATEGIES: dict[str, tuple[tuple[int, ...], ...]] = {
-    "province_city__district__locality__detail": ((0,), (1,), (2,), (3,)),
-    "province_city_district__locality__detail": ((0, 1), (2,), (3,)),
-    "province_city__district_locality__detail": ((0,), (1, 2), (3,)),
-    "province_city__district__locality_detail": ((0,), (1,), (2, 3)),
-    "province_city_district_locality__detail": ((0, 1, 2), (3,)),
-    "province_city_district__locality_detail": ((0, 1), (2, 3)),
+    "province__city__district__locality__detail": ((0,), (1,), (2,), (3,), (4,)),
+    "province_city__district__locality__detail": ((0, 1), (2,), (3,), (4,)),
+    "province_city_district__locality__detail": ((0, 1, 2), (3,), (4,)),
+    "province_city__district_locality__detail": ((0, 1), (2, 3), (4,)),
+    "province_city__district__locality_detail": ((0, 1), (2,), (3, 4)),
+    "province_city_district_locality__detail": ((0, 1, 2, 3), (4,)),
+    "province_city_district__locality_detail": ((0, 1, 2), (3, 4)),
 }
 
 
@@ -262,12 +268,13 @@ def extract_address_components(text: str) -> AddressComponents:
                 remainder = remainder[suffixless_city_match.end() :]
 
     district = ""
-    district_match = re.match(r"^[\u4e00-\u9fa5]{1,24}?(?:(?<!小)区|县|旗)", remainder)
+    district_match = re.match(r"^[\u4e00-\u9fa5]{1,24}?(?:(?<!小)(?<!社)区|县|旗)", remainder)
     if district_match:
         candidate_district = district_match.group(0)
         trailing_remainder = remainder[district_match.end() :]
         is_numbered_section = bool(re.fullmatch(r"[\u4e00-\u9fa5]{1,20}[一二三四五六七八九十\d]+区", candidate_district))
-        if not (is_numbered_section and trailing_remainder):
+        is_community_like = any(candidate_district.endswith(suffix) for suffix in COMMUNITY_SUFFIXES)
+        if not is_community_like and not (is_numbered_section and trailing_remainder):
             district = candidate_district
             remainder = trailing_remainder
 
@@ -277,6 +284,24 @@ def extract_address_components(text: str) -> AddressComponents:
         town = town_match.group(0)
         remainder = remainder[town_match.end() :]
 
+    road = ""
+    road_end = -1
+    road_suffix_pattern = "|".join(re.escape(suffix) for suffix in ROAD_LOCALITY_SUFFIXES if suffix != "弄")
+    named_road_match = re.search(
+        rf"([A-Za-z0-9\u4e00-\u9fa5]{{1,24}}(?:{road_suffix_pattern}))",
+        remainder,
+    )
+    if named_road_match:
+        road = named_road_match.group(1)
+        road_end = named_road_match.end()
+    else:
+        lane_match = re.match(r"([零一二三四五六七八九十两\d]+弄)", remainder)
+        if not lane_match:
+            lane_match = re.search(r"([零一二三四五六七八九十两\d]+弄)", remainder)
+        if lane_match:
+            road = lane_match.group(1)
+            road_end = lane_match.end()
+
     community = ""
     community_patterns = [
         rf"([A-Za-z0-9\u4e00-\u9fa5]*?(?:{suffix})(?:[零一二三四五六七八九十两\d]+期)?)"
@@ -285,9 +310,22 @@ def extract_address_components(text: str) -> AddressComponents:
     community_match_spans: list[tuple[int, int, str]] = []
     for pattern in community_patterns:
         for match in re.finditer(pattern, remainder):
-            community_match_spans.append((match.start(), match.end(), match.group(1)))
+            trailing_text = remainder[match.end() :]
+            if trailing_text.startswith(ROAD_LOCALITY_SUFFIXES):
+                continue
+            start = match.start()
+            end = match.end()
+            value = match.group(1)
+            if road_end > 0 and start < road_end < end:
+                trimmed_value = remainder[road_end : match.end()]
+                if trimmed_value and any(trimmed_value.endswith(suffix) for suffix in COMMUNITY_SUFFIXES):
+                    community_match_spans.append((road_end, end, trimmed_value))
+                continue
+            if road_end > 0 and start < road_end:
+                continue
+            community_match_spans.append((start, end, value))
     section_match = COMMUNITY_SECTION_PATTERN.search(remainder)
-    if section_match:
+    if section_match and not (road_end > 0 and section_match.start() < road_end):
         community_match_spans.append((section_match.start(), section_match.end(), section_match.group(1)))
     community_start = -1
     community_end = -1
@@ -296,27 +334,6 @@ def extract_address_components(text: str) -> AddressComponents:
             community_match_spans,
             key=lambda item: (item[0], -len(item[2])),
         )[0]
-
-    road = ""
-    road_end = -1
-    road_suffix_pattern = "|".join(re.escape(suffix) for suffix in ROAD_LOCALITY_SUFFIXES if suffix != "弄")
-    named_road_source = remainder[:community_start] if community_start >= 0 else remainder
-    named_road_match = re.search(
-        rf"([A-Za-z0-9\u4e00-\u9fa5]{{1,24}}(?:{road_suffix_pattern})(?:[零一二三四五六七八九十两\d]+(?:号|弄))?)",
-        named_road_source,
-    )
-    if named_road_match:
-        road = named_road_match.group(1)
-        road_end = named_road_match.end()
-    else:
-        lane_source = remainder[community_end:] if community_end >= 0 else remainder
-        lane_match = re.match(r"([零一二三四五六七八九十两\d]+弄)", lane_source)
-        if not lane_match:
-            lane_match = re.search(r"([零一二三四五六七八九十两\d]+弄)", lane_source)
-        if lane_match:
-            road = lane_match.group(1)
-            lane_offset = community_end if community_end >= 0 else 0
-            road_end = lane_offset + lane_match.end()
 
     building_suffix_pattern = "|".join(re.escape(suffix) for suffix in BUILDING_SUFFIXES)
     building_match = re.search(
@@ -474,10 +491,12 @@ def build_address_progressive_segments(
     segment_2_strategy_weights: dict[str, float] | None = None,
     segment_3_strategy_weights: dict[str, float] | None = None,
     segment_4_strategy_weights: dict[str, float] | None = None,
+    segment_5_strategy_weights: dict[str, float] | None = None,
 ) -> list[str]:
     components = extract_address_components(address)
     groups = [
-        "".join(part for part in (components.province, components.city) if part),
+        components.province,
+        components.city,
         components.district,
         "".join(part for part in (components.town, components.road, components.community) if part),
         "".join(part for part in (components.building, components.unit, components.floor, components.room) if part),
@@ -490,6 +509,7 @@ def build_address_progressive_segments(
         2: segment_2_strategy_weights or DEFAULT_ADDRESS_SEGMENT_2_STRATEGY_WEIGHTS,
         3: segment_3_strategy_weights or DEFAULT_ADDRESS_SEGMENT_3_STRATEGY_WEIGHTS,
         4: segment_4_strategy_weights or DEFAULT_ADDRESS_SEGMENT_4_STRATEGY_WEIGHTS,
+        5: segment_5_strategy_weights or DEFAULT_ADDRESS_SEGMENT_5_STRATEGY_WEIGHTS,
     }
     valid_strategies: dict[int, list[tuple[str, list[str]]]] = {}
     for name, strategy in ADDRESS_SEGMENT_STRATEGIES.items():

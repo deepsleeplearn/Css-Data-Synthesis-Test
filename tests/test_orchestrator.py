@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from multi_agent_data_synthesis.config import AppConfig
@@ -198,6 +199,33 @@ class DialogueOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(exported["transcript"][3]["round_label"], "2*")
         self.assertTrue(exported["transcript"][3]["model_intent_inference_used"])
         self.assertIn("[2*] 客服:", exported["dialogue_text"])
+
+    async def test_generate_dialogue_locally_hydrates_hidden_settings_when_auto_disabled(self):
+        config = replace(
+            build_config(),
+            service_known_address_probability=0.0,
+            address_segmented_reply_probability=1.0,
+            address_segment_rounds_weights={"2": 0.0, "3": 1.0, "4": 0.0},
+            address_segment_3_strategy_weights={
+                "province_city_district__locality__detail": 1.0,
+                "province_city__district_locality__detail": 0.0,
+                "province_city__district__locality_detail": 0.0,
+            },
+        )
+        orchestrator = DialogueOrchestrator(config)
+        orchestrator.user_agent = StubUserAgent()
+        orchestrator.service_agent = StubServiceAgent()
+        scenario_data = build_scenario().to_dict()
+        scenario_data["customer"]["address"] = "江苏省扬州市宝应县安宜镇宝应碧桂园3幢5层502室"
+
+        sample = await orchestrator.generate_dialogue_async(Scenario.from_dict(scenario_data))
+
+        hidden_context = sample.scenario["hidden_context"]
+        self.assertEqual(hidden_context["second_round_reply_strategy"] in {"confirm_only", "confirm_with_issue"}, True)
+        self.assertEqual(
+            hidden_context["address_input_rounds"],
+            ["江苏省扬州市宝应县", "安宜镇宝应碧桂园", "3幢5层502室"],
+        )
 
 
 if __name__ == "__main__":

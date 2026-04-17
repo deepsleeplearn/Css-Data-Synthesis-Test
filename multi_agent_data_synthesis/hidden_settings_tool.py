@@ -239,6 +239,39 @@ ADDRESS_LEVEL_ORDER = (
 ADDRESS_REQUIRED_LOCALITY_KEYWORDS = tuple(
     dict.fromkeys((*COMMUNITY_SUFFIXES, "社区", "家园", "新村", "村", "屯", "组", "队"))
 )
+UNKNOWN_TEXT_MARKERS = frozenset({"", "未知", "unknown", "n/a", "na", "null", "none"})
+ADDRESS_TOWN_OPTIONS = (
+    "安宜镇",
+    "东城街道",
+    "五常街道",
+    "桂城街道",
+    "良渚街道",
+    "观音桥街道",
+)
+ADDRESS_COMMUNITY_OPTIONS = (
+    "幸福花园",
+    "滨江花园",
+    "锦绣苑",
+    "康乐社区",
+    "阳光家园",
+    "碧桂园",
+)
+ADDRESS_VILLAGE_OPTIONS = (
+    "大湖村",
+    "福寿村",
+    "新丰村",
+    "东风村",
+)
+ADDRESS_POI_OPTIONS = (
+    "社区卫生服务中心",
+    "实验小学",
+    "生活广场",
+    "便民服务站",
+)
+
+
+def _has_meaningful_text(value: Any) -> bool:
+    return str(value or "").strip().lower() not in UNKNOWN_TEXT_MARKERS
 
 
 @dataclass
@@ -416,6 +449,112 @@ class HiddenSettingsTool:
             "Failed to generate sufficiently distinct hidden settings after "
             f"{self.config.hidden_settings_max_attempts} attempts."
         )
+
+    def hydrate_scenario_locally(self, scenario: Scenario) -> Scenario:
+        candidate = scenario.to_dict()
+        candidate["_force_unknown_service_address"] = not _has_meaningful_text(
+            candidate.get("customer", {}).get("address", "")
+        )
+        hidden_context = dict(candidate.get("hidden_context", {}))
+        for key in (
+            "user_address_style",
+            "user_address_style_instruction",
+            "user_reply_noise_enabled",
+            "user_reply_noise_target",
+            "user_reply_noise_rounds",
+            "user_reply_noise_instruction",
+            "product_routing_plan",
+            "product_routing_result",
+            "product_routing_trace",
+            "product_routing_summary",
+            "product_routing_should_apply",
+            "current_call_contactable",
+            "contact_phone_owner",
+            "contact_phone_owner_spoken_label",
+            "contact_phone",
+            "phone_input_attempts_required",
+            "phone_input_round_1",
+            "phone_input_round_2",
+            "phone_input_round_3",
+            "service_known_address",
+            "service_known_address_value",
+            "service_known_address_matches_actual",
+            "service_known_address_mismatch_start_level",
+            "service_known_address_rewrite_levels",
+            "service_known_address_rewrite_end_level",
+            "service_known_address_correction_value",
+            "address_confirmation_no_reply",
+            "address_input_round_1",
+            "address_input_round_2",
+            "address_input_round_3",
+            "address_input_round_4",
+            "address_input_rounds",
+            "product_arrived",
+            "second_round_reply_strategy",
+        ):
+            hidden_context.pop(key, None)
+        candidate["hidden_context"] = hidden_context
+
+        generation_plan = self._sample_user_generation_plan()
+        self._hydrate_missing_customer_fields_locally(scenario.scenario_id, candidate, generation_plan)
+        self._attach_user_generation_plan(candidate, generation_plan)
+        self._attach_second_round_reply_plan(scenario.scenario_id, candidate)
+        self._attach_product_routing_plan(scenario, candidate)
+        self._attach_contact_plan(scenario.scenario_id, candidate)
+        self._attach_address_plan(scenario.scenario_id, candidate)
+        self._attach_installation_plan(candidate)
+        return scenario.with_generated_hidden_settings(
+            customer=CustomerProfile(**candidate["customer"]),
+            request=ServiceRequest(**candidate["request"]),
+            hidden_context=candidate["hidden_context"],
+        )
+
+    def _hydrate_missing_customer_fields_locally(
+        self,
+        scenario_id: str,
+        candidate: dict[str, Any],
+        generation_plan: UserGenerationPlan,
+    ) -> None:
+        customer = candidate.setdefault("customer", {})
+        if not _has_meaningful_text(customer.get("address", "")):
+            customer["address"] = self._generate_local_customer_address(
+                scenario_id,
+                generation_plan.address_style,
+            )
+
+    def _generate_local_customer_address(self, scenario_id: str, address_style: str) -> str:
+        rng = random.Random(f"{scenario_id}:customer-address")
+        use_municipality = rng.random() < 0.18
+        if use_municipality:
+            city = str(rng.choice(tuple(COHERENT_MUNICIPALITY_CITY_DISTRICT_MAP.keys())))
+            province = ""
+            district = str(rng.choice(COHERENT_MUNICIPALITY_CITY_DISTRICT_MAP[city]))
+        else:
+            option = rng.choice(COHERENT_REGION_OPTIONS)
+            province = str(option["province"])
+            city = str(option["city"])
+            district = str(rng.choice(tuple(option["districts"])))
+
+        town = rng.choice(ADDRESS_TOWN_OPTIONS)
+        community = rng.choice(ADDRESS_COMMUNITY_OPTIONS)
+        building_no = rng.randint(1, 18)
+        unit_no = rng.randint(1, 4)
+        floor_no = rng.randint(2, 18)
+        room_suffix = rng.randint(1, 4)
+        room_no = f"{floor_no}{room_suffix:02d}"
+        house_no = rng.randint(8, 168)
+
+        prefix = f"{province}{city}{district}"
+        if address_style == "rural_group_number":
+            village = rng.choice(ADDRESS_VILLAGE_OPTIONS)
+            group_no = rng.randint(1, 8)
+            return f"{prefix}{town}{village}{group_no}组{house_no}号"
+        if address_style == "landmark_poi":
+            poi = rng.choice(ADDRESS_POI_OPTIONS)
+            return f"{prefix}{town}{community}{poi}旁{house_no}号"
+        if address_style == "house_number_only":
+            return f"{prefix}{town}{community}{house_no}号"
+        return f"{prefix}{town}{community}{building_no}幢{unit_no}单元{room_no}室"
 
     async def generate_for_scenario_async(self, scenario: Scenario) -> Scenario:
         rejection_feedback = ""
@@ -1026,8 +1165,32 @@ class HiddenSettingsTool:
 
     def _attach_address_plan(self, scenario_id: str, candidate: dict[str, Any]) -> None:
         rng = random.Random()
-        actual_address = candidate["customer"]["address"]
-        service_knows_address = rng.random() < self.config.service_known_address_probability
+        actual_address = str(candidate["customer"].get("address", "")).strip()
+        if not _has_meaningful_text(actual_address):
+            candidate["hidden_context"].update(
+                {
+                    "service_known_address": False,
+                    "service_known_address_value": "",
+                    "service_known_address_matches_actual": False,
+                    "service_known_address_mismatch_start_level": "",
+                    "service_known_address_rewrite_levels": [],
+                    "service_known_address_rewrite_end_level": "",
+                    "service_known_address_correction_value": "",
+                    "address_confirmation_no_reply": "不对。",
+                    "address_input_round_1": "",
+                    "address_input_round_2": "",
+                    "address_input_round_3": "",
+                    "address_input_round_4": "",
+                    "address_input_rounds": [],
+                }
+            )
+            return
+        force_unknown_service_address = bool(candidate.get("_force_unknown_service_address", False))
+        service_knows_address = (
+            False
+            if force_unknown_service_address
+            else rng.random() < self.config.service_known_address_probability
+        )
         address_round_1 = actual_address
         address_round_2 = actual_address
         service_known_address_value = ""
@@ -1078,13 +1241,8 @@ class HiddenSettingsTool:
                         ]
                     )
 
-        should_force_full_address_after_known_mismatch = (
-            service_knows_address and not service_known_address_matches_actual
-        )
         address_rounds = [actual_address]
-        if should_force_full_address_after_known_mismatch:
-            address_rounds = [mismatch_correction_value]
-        elif rng.random() < self.config.address_collection_followup_probability:
+        if rng.random() < self.config.address_segmented_reply_probability:
             address_rounds = build_address_progressive_segments(
                 actual_address,
                 rng,
@@ -1092,6 +1250,7 @@ class HiddenSettingsTool:
                 segment_2_strategy_weights=self.config.address_segment_2_strategy_weights,
                 segment_3_strategy_weights=self.config.address_segment_3_strategy_weights,
                 segment_4_strategy_weights=self.config.address_segment_4_strategy_weights,
+                segment_5_strategy_weights=self.config.address_segment_5_strategy_weights,
             )
 
         compacted_address_rounds = [
@@ -1436,6 +1595,11 @@ class HiddenSettingsTool:
             rng,
         )
         correction_value = self._address_text_from_levels(actual_address, rewrite_levels)
+        correction_value = self._normalize_known_address_correction_value(
+            actual_address=actual_address,
+            correction_value=correction_value,
+            rewrite_levels=rewrite_levels,
+        )
         if stale_address == actual_address or not correction_value:
             fallback_stale = self._generate_stale_address(actual_address, rng)
             fallback_start_level = self._infer_mismatch_start_level(actual_address, fallback_stale)
@@ -1453,6 +1617,11 @@ class HiddenSettingsTool:
                     stale_address=fallback_stale,
                     rng=rng,
                 )
+            fallback_correction = self._normalize_known_address_correction_value(
+                actual_address=actual_address,
+                correction_value=fallback_correction,
+                rewrite_levels=fallback_rewrite_levels,
+            )
             return (
                 fallback_stale,
                 fallback_start_level,
@@ -1467,6 +1636,46 @@ class HiddenSettingsTool:
             rewrite_levels,
             rewrite_levels[-1] if rewrite_levels else start_level,
         )
+
+    @classmethod
+    def _normalize_known_address_correction_value(
+        cls,
+        *,
+        actual_address: str,
+        correction_value: str,
+        rewrite_levels: list[str],
+    ) -> str:
+        normalized_correction = str(correction_value or "").strip()
+        if not normalized_correction or not rewrite_levels:
+            return normalized_correction
+        if rewrite_levels[0] in {"province", "city", "district", "locality"}:
+            return normalized_correction
+
+        try:
+            end_index = ADDRESS_LEVEL_ORDER.index(rewrite_levels[-1])
+            locality_index = ADDRESS_LEVEL_ORDER.index("locality")
+        except ValueError:
+            return normalized_correction
+        if end_index < locality_index:
+            return normalized_correction
+
+        components = extract_address_components(actual_address)
+        locality_tail = actual_address
+        for prefix in (components.province, components.city, components.district):
+            if prefix and locality_tail.startswith(prefix):
+                locality_tail = locality_tail[len(prefix) :]
+        detail_levels = [
+            level
+            for level in ADDRESS_LEVEL_ORDER[locality_index + 1 : end_index + 1]
+            if cls._address_level_values(actual_address).get(level, "")
+        ]
+        detail_text = cls._address_text_from_levels(actual_address, detail_levels)
+        if detail_text and locality_tail.endswith(detail_text):
+            locality_prefix = locality_tail[: -len(detail_text)]
+        else:
+            locality_prefix = locality_tail
+        expanded_correction = f"{locality_prefix}{detail_text}".strip() or normalized_correction
+        return expanded_correction or normalized_correction
 
     def _generate_stale_address_for_levels(
         self,

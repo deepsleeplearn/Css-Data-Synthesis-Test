@@ -48,6 +48,7 @@ DEFAULT_ADDRESS_SEGMENT_ROUNDS_WEIGHTS = {
     "2": 0.45,
     "3": 0.35,
     "4": 0.20,
+    "5": 0.05,
 }
 DEFAULT_ADDRESS_SEGMENT_2_STRATEGY_WEIGHTS = {
     "province_city_district_locality__detail": 0.6,
@@ -60,6 +61,9 @@ DEFAULT_ADDRESS_SEGMENT_3_STRATEGY_WEIGHTS = {
 }
 DEFAULT_ADDRESS_SEGMENT_4_STRATEGY_WEIGHTS = {
     "province_city__district__locality__detail": 1.0,
+}
+DEFAULT_ADDRESS_SEGMENT_5_STRATEGY_WEIGHTS = {
+    "province__city__district__locality__detail": 1.0,
 }
 DEFAULT_ADDRESS_KNOWN_MISMATCH_START_LEVEL_WEIGHTS = {
     "province": 0.05,
@@ -170,6 +174,9 @@ class AppConfig:
     )
     address_known_mismatch_rewrite_end_level_weights: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_ADDRESS_KNOWN_MISMATCH_REWRITE_END_LEVEL_WEIGHTS)
+    )
+    address_segment_5_strategy_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_ADDRESS_SEGMENT_5_STRATEGY_WEIGHTS)
     )
 
 
@@ -372,6 +379,11 @@ def load_config() -> AppConfig:
         address_segment_4_strategy_weights=_load_segment_strategy_weights(
             env_name="ADDRESS_SEGMENT_4_STRATEGY_WEIGHTS",
             default=DEFAULT_ADDRESS_SEGMENT_4_STRATEGY_WEIGHTS,
+            legacy_values=legacy_segment_strategy_weights,
+        ),
+        address_segment_5_strategy_weights=_load_segment_strategy_weights(
+            env_name="ADDRESS_SEGMENT_5_STRATEGY_WEIGHTS",
+            default=DEFAULT_ADDRESS_SEGMENT_5_STRATEGY_WEIGHTS,
             legacy_values=legacy_segment_strategy_weights,
         ),
         address_input_omit_province_city_suffix_probability=float(
