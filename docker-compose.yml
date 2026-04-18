@@ -1,7 +1,6 @@
 services:
   redis:
     image: redis:7-alpine
-    container_name: multi-agent-data-synthesis-redis
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -10,7 +9,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: multi-agent-data-synthesis
     restart: unless-stopped
     ports:
       - "8527:8000"
