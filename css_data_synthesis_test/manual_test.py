@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from multi_agent_data_synthesis.schemas import (
+from css_data_synthesis_test.schemas import (
     DialogueSample,
     DialogueTurn,
     Scenario,
@@ -18,9 +18,9 @@ from multi_agent_data_synthesis.schemas import (
     display_speaker,
     effective_required_slots,
 )
-from multi_agent_data_synthesis.scenario_factory import ScenarioFactory
-from multi_agent_data_synthesis.service_policy import ServiceDialoguePolicy, ServiceRuntimeState
-from multi_agent_data_synthesis.validator import validate_dialogue
+from css_data_synthesis_test.scenario_factory import ScenarioFactory
+from css_data_synthesis_test.service_policy import ServiceDialoguePolicy, ServiceRuntimeState
+from css_data_synthesis_test.validator import validate_dialogue
 
 
 InputFunc = Callable[[str], str]

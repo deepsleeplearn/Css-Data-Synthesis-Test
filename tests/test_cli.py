@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
-from multi_agent_data_synthesis.cli import (
+from css_data_synthesis_test.cli import (
     _configure_manual_test_known_address,
     _hydrate_manual_test_scenario_locally,
     _manual_test_requires_generated_hidden_settings,
@@ -17,10 +17,10 @@ from multi_agent_data_synthesis.cli import (
     build_parser,
     run_generate_async,
 )
-from multi_agent_data_synthesis.orchestrator import DialogueOrchestrator
+from css_data_synthesis_test.orchestrator import DialogueOrchestrator
 from tests.test_orchestrator import build_scenario
 from tests.test_manual_test import build_scenario_payload
-from multi_agent_data_synthesis.schemas import Scenario
+from css_data_synthesis_test.schemas import Scenario
 
 
 class CliTests(unittest.TestCase):
@@ -165,14 +165,14 @@ class CliTests(unittest.TestCase):
             return_value=[SimpleNamespace(status="completed")]
         )
 
-        with patch("multi_agent_data_synthesis.cli._load_cli_config", return_value=config):
-            with patch("multi_agent_data_synthesis.cli.ScenarioFactory", return_value=factory_instance):
+        with patch("css_data_synthesis_test.cli._load_cli_config", return_value=config):
+            with patch("css_data_synthesis_test.cli.ScenarioFactory", return_value=factory_instance):
                 with patch(
-                    "multi_agent_data_synthesis.cli.DialogueOrchestrator",
+                    "css_data_synthesis_test.cli.DialogueOrchestrator",
                     return_value=orchestrator_instance,
                 ):
-                    with patch("multi_agent_data_synthesis.cli.write_jsonl") as write_jsonl_mock:
-                        with patch("multi_agent_data_synthesis.cli.write_json") as write_json_mock:
+                    with patch("css_data_synthesis_test.cli.write_jsonl") as write_jsonl_mock:
+                        with patch("css_data_synthesis_test.cli.write_json") as write_json_mock:
                             asyncio.run(run_generate_async(args))
 
         write_jsonl_mock.assert_not_called()

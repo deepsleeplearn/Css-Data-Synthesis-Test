@@ -12,8 +12,8 @@ from types import SimpleNamespace
 from fastapi.testclient import TestClient
 
 import frontend.server as frontend_server
-from multi_agent_data_synthesis.scenario_factory import ScenarioFactory
-from multi_agent_data_synthesis.product_routing import ROUTING_RESULT_HUMAN
+from css_data_synthesis_test.scenario_factory import ScenarioFactory
+from css_data_synthesis_test.product_routing import ROUTING_RESULT_HUMAN
 from tests.test_manual_test import build_scenario_payload
 
 

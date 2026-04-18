@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from multi_agent_data_synthesis.address_utils import (
+from css_data_synthesis_test.address_utils import (
     compact_address_text,
     extract_address_components,
     normalize_address_text,
 )
-from multi_agent_data_synthesis.dialogue_plans import (
+from css_data_synthesis_test.dialogue_plans import (
     SECOND_ROUND_REPLY_CONFIRM_ONLY,
     SECOND_ROUND_REPLY_CONFIRM_WITH_ISSUE,
     normalize_second_round_reply_strategy,
 )
-from multi_agent_data_synthesis.product_routing import product_routing_instruction_for_prompt
-from multi_agent_data_synthesis.service_policy import ServiceDialoguePolicy
-from multi_agent_data_synthesis.schemas import (
+from css_data_synthesis_test.product_routing import product_routing_instruction_for_prompt
+from css_data_synthesis_test.service_policy import ServiceDialoguePolicy
+from css_data_synthesis_test.schemas import (
     SLOT_DESCRIPTIONS,
     DialogueTurn,
     Scenario,

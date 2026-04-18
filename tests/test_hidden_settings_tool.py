@@ -7,10 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from multi_agent_data_synthesis.address_utils import extract_address_components
-from multi_agent_data_synthesis.config import AppConfig
-from multi_agent_data_synthesis.dialogue_plans import decide_second_round_reply_strategy
-from multi_agent_data_synthesis.hidden_settings_tool import (
+from css_data_synthesis_test.address_utils import extract_address_components
+from css_data_synthesis_test.config import AppConfig
+from css_data_synthesis_test.dialogue_plans import decide_second_round_reply_strategy
+from css_data_synthesis_test.hidden_settings_tool import (
     COHERENT_MUNICIPALITY_CITY_DISTRICT_MAP,
     COHERENT_MUNICIPALITY_OPTIONS,
     COHERENT_REGION_CITY_DISTRICT_MAP,
@@ -20,8 +20,8 @@ from multi_agent_data_synthesis.hidden_settings_tool import (
     SURNAME_OPTIONS,
     UserGenerationPlan,
 )
-from multi_agent_data_synthesis.prompts import build_user_agent_messages, next_address_input_value
-from multi_agent_data_synthesis.schemas import DialogueTurn, Scenario
+from css_data_synthesis_test.prompts import build_user_agent_messages, next_address_input_value
+from css_data_synthesis_test.schemas import DialogueTurn, Scenario
 
 
 class SequenceFakeClient:
@@ -312,7 +312,7 @@ def build_candidate(
 class HiddenSettingsToolTests(unittest.TestCase):
     def test_second_round_reply_strategy_is_not_derived_from_scenario_id(self):
         with patch(
-            "multi_agent_data_synthesis.dialogue_plans.random.random",
+            "css_data_synthesis_test.dialogue_plans.random.random",
             side_effect=[0.9, 0.1],
         ):
             first = decide_second_round_reply_strategy("same_scenario", 0.5)

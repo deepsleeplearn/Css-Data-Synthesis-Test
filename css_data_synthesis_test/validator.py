@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from multi_agent_data_synthesis.schemas import (
+from css_data_synthesis_test.schemas import (
     DialogueSample,
     Scenario,
     SERVICE_SPEAKER,
@@ -10,7 +10,7 @@ from multi_agent_data_synthesis.schemas import (
     effective_required_slots,
     normalize_speaker,
 )
-from multi_agent_data_synthesis.service_policy import ServiceDialoguePolicy
+from css_data_synthesis_test.service_policy import ServiceDialoguePolicy
 
 
 ISSUE_KEYWORD_PATTERN = re.compile(

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from multi_agent_data_synthesis.agents import ServiceAgent, UserAgent
-from multi_agent_data_synthesis.schemas import DialogueTurn, Scenario
-from multi_agent_data_synthesis.service_policy import ServiceRuntimeState
+from css_data_synthesis_test.agents import ServiceAgent, UserAgent
+from css_data_synthesis_test.schemas import DialogueTurn, Scenario
+from css_data_synthesis_test.service_policy import ServiceRuntimeState
 
 
 def build_scenario() -> Scenario:

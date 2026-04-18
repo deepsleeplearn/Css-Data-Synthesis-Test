@@ -6,20 +6,20 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from multi_agent_data_synthesis.config import load_config
-from multi_agent_data_synthesis.exporter import write_json, write_jsonl, write_sqlite
-from multi_agent_data_synthesis.hidden_settings_tool import HiddenSettingsTool
-from multi_agent_data_synthesis.llm import OpenAIChatClient
-from multi_agent_data_synthesis.agents import ServiceAgent
-from multi_agent_data_synthesis.manual_test import (
+from css_data_synthesis_test.config import load_config
+from css_data_synthesis_test.exporter import write_json, write_jsonl, write_sqlite
+from css_data_synthesis_test.hidden_settings_tool import HiddenSettingsTool
+from css_data_synthesis_test.llm import OpenAIChatClient
+from css_data_synthesis_test.agents import ServiceAgent
+from css_data_synthesis_test.manual_test import (
     _sanitize_manual_user_text,
     default_manual_test_output_path,
     load_manual_test_scenario,
     run_manual_test_session,
 )
-from multi_agent_data_synthesis.orchestrator import DialogueOrchestrator
-from multi_agent_data_synthesis.product_routing import ensure_product_routing_plan
-from multi_agent_data_synthesis.scenario_factory import ScenarioFactory
+from css_data_synthesis_test.orchestrator import DialogueOrchestrator
+from css_data_synthesis_test.product_routing import ensure_product_routing_plan
+from css_data_synthesis_test.scenario_factory import ScenarioFactory
 
 
 DEFAULT_SCENARIO_FILE = Path("data/seed_scenarios.json")

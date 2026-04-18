@@ -3,9 +3,9 @@ from __future__ import annotations
 import random
 import unittest
 
-from multi_agent_data_synthesis.address_utils import extract_address_components
-from multi_agent_data_synthesis.agents import ServiceAgent, UserAgent
-from multi_agent_data_synthesis.product_routing import (
+from css_data_synthesis_test.address_utils import extract_address_components
+from css_data_synthesis_test.agents import ServiceAgent, UserAgent
+from css_data_synthesis_test.product_routing import (
     PROMPT_BRAND_OR_SERIES,
     PROMPT_PURCHASE_OR_PROPERTY,
     PROMPT_USAGE_SCENE,
@@ -16,9 +16,9 @@ from multi_agent_data_synthesis.product_routing import (
     infer_product_routing_answer_key,
     next_product_routing_steps_from_observed_trace,
 )
-from multi_agent_data_synthesis.prompts import build_user_agent_messages
-from multi_agent_data_synthesis.schemas import DialogueTurn, Scenario
-from multi_agent_data_synthesis.service_policy import ServiceDialoguePolicy, ServiceRuntimeState
+from css_data_synthesis_test.prompts import build_user_agent_messages
+from css_data_synthesis_test.schemas import DialogueTurn, Scenario
+from css_data_synthesis_test.service_policy import ServiceDialoguePolicy, ServiceRuntimeState
 
 
 def build_scenario_with_routing(plan: dict | None = None) -> Scenario:

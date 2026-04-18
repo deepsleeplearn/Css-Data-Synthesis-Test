@@ -3,8 +3,8 @@ from __future__ import annotations
 import random
 import unittest
 
-from multi_agent_data_synthesis.scenario_factory import ScenarioFactory
-from multi_agent_data_synthesis.schemas import Scenario
+from css_data_synthesis_test.scenario_factory import ScenarioFactory
+from css_data_synthesis_test.schemas import Scenario
 
 
 def build_scenarios() -> list[Scenario]:

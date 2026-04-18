@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 from typing import Any
 
-from multi_agent_data_synthesis.schemas import SERVICE_SPEAKER, display_speaker, normalize_speaker
+from css_data_synthesis_test.schemas import SERVICE_SPEAKER, display_speaker, normalize_speaker
 
 
 REVIEW_TABLE = "manual_test_reviews"

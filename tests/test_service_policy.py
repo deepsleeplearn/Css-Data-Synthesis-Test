@@ -3,9 +3,9 @@ from __future__ import annotations
 import random
 import unittest
 
-from multi_agent_data_synthesis.address_utils import extract_address_components
-from multi_agent_data_synthesis.schemas import DialogueTurn, Scenario
-from multi_agent_data_synthesis.service_policy import (
+from css_data_synthesis_test.address_utils import extract_address_components
+from css_data_synthesis_test.schemas import DialogueTurn, Scenario
+from css_data_synthesis_test.service_policy import (
     ServiceDialoguePolicy,
     ServiceRuntimeState,
 )

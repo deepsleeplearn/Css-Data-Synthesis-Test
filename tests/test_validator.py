@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from multi_agent_data_synthesis.schemas import DialogueSample, DialogueTurn
-from multi_agent_data_synthesis.validator import validate_dialogue
+from css_data_synthesis_test.schemas import DialogueSample, DialogueTurn
+from css_data_synthesis_test.validator import validate_dialogue
 
 
 class ValidatorTests(unittest.TestCase):

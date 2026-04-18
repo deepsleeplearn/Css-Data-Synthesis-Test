@@ -4,9 +4,9 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from multi_agent_data_synthesis.config import AppConfig
-from multi_agent_data_synthesis.orchestrator import DialogueOrchestrator
-from multi_agent_data_synthesis.schemas import (
+from css_data_synthesis_test.config import AppConfig
+from css_data_synthesis_test.orchestrator import DialogueOrchestrator
+from css_data_synthesis_test.schemas import (
     SERVICE_SPEAKER,
     USER_SPEAKER,
     Scenario,

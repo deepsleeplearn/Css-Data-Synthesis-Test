@@ -4,8 +4,8 @@ import os
 import unittest
 from unittest.mock import patch
 
-import multi_agent_data_synthesis.config as config_module
-from multi_agent_data_synthesis.config import load_config
+import css_data_synthesis_test.config as config_module
+from css_data_synthesis_test.config import load_config
 
 
 class ConfigTests(unittest.TestCase):

@@ -4,7 +4,7 @@ import json
 import random
 from pathlib import Path
 
-from multi_agent_data_synthesis.schemas import Scenario
+from css_data_synthesis_test.schemas import Scenario
 
 
 class ScenarioFactory:

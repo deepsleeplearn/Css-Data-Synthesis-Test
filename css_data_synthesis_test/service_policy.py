@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from multi_agent_data_synthesis.address_utils import (
+from css_data_synthesis_test.address_utils import (
     BUILDING_SUFFIXES,
     MUNICIPALITY_PREFIXES,
     PROVINCE_PREFIXES,
@@ -16,7 +16,7 @@ from multi_agent_data_synthesis.address_utils import (
     extract_address_components,
     normalize_address_text,
 )
-from multi_agent_data_synthesis.product_routing import (
+from css_data_synthesis_test.product_routing import (
     ROUTING_RESULT_HUMAN,
     allowed_product_routing_answer_keys,
     default_unknown_product_routing_answer_key,
@@ -24,7 +24,7 @@ from multi_agent_data_synthesis.product_routing import (
     infer_product_routing_answer_key,
     next_product_routing_steps_from_observed_trace,
 )
-from multi_agent_data_synthesis.schemas import (
+from css_data_synthesis_test.schemas import (
     DialogueTurn,
     Scenario,
     SERVICE_SPEAKER,
@@ -33,7 +33,7 @@ from multi_agent_data_synthesis.schemas import (
     effective_required_slots,
     normalize_speaker,
 )
-from multi_agent_data_synthesis.static_utterances import (
+from css_data_synthesis_test.static_utterances import (
     appointment_utterance,
     ask_satisfaction_utterance,
     end_utterance,

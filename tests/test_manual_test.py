@@ -5,14 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from multi_agent_data_synthesis.manual_test import (
+from css_data_synthesis_test.manual_test import (
     _manual_command_token,
     _sanitize_manual_user_text,
     load_manual_test_scenario,
     run_manual_test_session,
 )
-from multi_agent_data_synthesis.schemas import Scenario
-from multi_agent_data_synthesis.service_policy import ServicePolicyResult
+from css_data_synthesis_test.schemas import Scenario
+from css_data_synthesis_test.service_policy import ServicePolicyResult
 
 
 def build_scenario_payload(scenario_id: str) -> dict:

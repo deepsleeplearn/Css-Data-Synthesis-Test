@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 import httpx
 
-from multi_agent_data_synthesis.config import AppConfig
-from multi_agent_data_synthesis.llm import OpenAIChatClient
+from css_data_synthesis_test.config import AppConfig
+from css_data_synthesis_test.llm import OpenAIChatClient
 
 
 def build_config() -> AppConfig:

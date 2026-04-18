@@ -3,15 +3,15 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from multi_agent_data_synthesis.dialogue_plans import resolve_second_round_reply_strategy
-from multi_agent_data_synthesis.llm import OpenAIChatClient
-from multi_agent_data_synthesis.product_routing import (
+from css_data_synthesis_test.dialogue_plans import resolve_second_round_reply_strategy
+from css_data_synthesis_test.llm import OpenAIChatClient
+from css_data_synthesis_test.product_routing import (
     ensure_product_routing_plan,
     product_routing_instruction_for_prompt,
 )
-from multi_agent_data_synthesis.prompts import build_user_agent_messages, next_address_input_value
-from multi_agent_data_synthesis.schemas import DialogueTurn, Scenario, SERVICE_SPEAKER
-from multi_agent_data_synthesis.service_policy import (
+from css_data_synthesis_test.prompts import build_user_agent_messages, next_address_input_value
+from css_data_synthesis_test.schemas import DialogueTurn, Scenario, SERVICE_SPEAKER
+from css_data_synthesis_test.service_policy import (
     ServiceDialoguePolicy,
     ServiceRuntimeState,
 )

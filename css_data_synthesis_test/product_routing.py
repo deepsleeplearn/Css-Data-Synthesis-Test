@@ -4,7 +4,7 @@ import random
 import re
 from typing import Any
 
-from multi_agent_data_synthesis.schemas import DialogueTurn, SERVICE_SPEAKER, normalize_speaker
+from css_data_synthesis_test.schemas import DialogueTurn, SERVICE_SPEAKER, normalize_speaker
 
 
 ROUTING_RESULT_HOME = "家用 + 可直接确认机型"

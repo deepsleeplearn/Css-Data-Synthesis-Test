@@ -5,7 +5,7 @@ from typing import Any
 
 import httpx
 
-from multi_agent_data_synthesis.config import AppConfig, load_model_request_profiles
+from css_data_synthesis_test.config import AppConfig, load_model_request_profiles
 
 
 def extract_json_object(text: str) -> dict[str, Any]:

@@ -24,22 +24,22 @@ try:
 except ImportError:  # pragma: no cover
     redis = None
 
-# Add the project root to sys.path to ensure multi_agent_data_synthesis can be imported.
+# Add the project root to sys.path to ensure css_data_synthesis_test can be imported.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
-    from multi_agent_data_synthesis.agents import ServiceAgent
-    from multi_agent_data_synthesis.cli import (
+    from css_data_synthesis_test.agents import ServiceAgent
+    from css_data_synthesis_test.cli import (
         _hydrate_manual_test_scenario_locally,
         _manual_test_requires_generated_hidden_settings,
         _resolve_interactive_max_rounds,
     )
-    from multi_agent_data_synthesis.config import load_config
-    from multi_agent_data_synthesis.hidden_settings_tool import HiddenSettingsTool
-    from multi_agent_data_synthesis.llm import OpenAIChatClient
-    from multi_agent_data_synthesis.manual_test import (
+    from css_data_synthesis_test.config import load_config
+    from css_data_synthesis_test.hidden_settings_tool import HiddenSettingsTool
+    from css_data_synthesis_test.llm import OpenAIChatClient
+    from css_data_synthesis_test.manual_test import (
         MANUAL_TEST_EXIT_COMMANDS,
         MANUAL_TEST_HELP_COMMAND,
         MANUAL_TEST_SHOW_SLOTS_COMMAND,
@@ -47,7 +47,7 @@ try:
         _manual_command_token,
         _sanitize_manual_user_text,
     )
-    from multi_agent_data_synthesis.product_routing import (
+    from css_data_synthesis_test.product_routing import (
         PROMPT_BRAND_OR_SERIES,
         PROMPT_CAPACITY,
         PROMPT_PROPERTY_YEAR,
@@ -57,8 +57,8 @@ try:
         default_unknown_product_routing_answer_key,
         ensure_product_routing_plan,
     )
-    from multi_agent_data_synthesis.scenario_factory import ScenarioFactory
-    from multi_agent_data_synthesis.schemas import (
+    from css_data_synthesis_test.scenario_factory import ScenarioFactory
+    from css_data_synthesis_test.schemas import (
         SERVICE_SPEAKER,
         SUPPLEMENTARY_COLLECTED_SLOTS,
         USER_SPEAKER,
@@ -66,7 +66,7 @@ try:
         Scenario,
         effective_required_slots,
     )
-    from multi_agent_data_synthesis.service_policy import ServiceRuntimeState
+    from css_data_synthesis_test.service_policy import ServiceRuntimeState
 except ImportError as exc:  # pragma: no cover
     print(f"Error: Could not import core modules. {exc}")
     print(f"sys.path: {sys.path}")

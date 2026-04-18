@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 
-from multi_agent_data_synthesis.agents import ServiceAgent, UserAgent
-from multi_agent_data_synthesis.config import AppConfig
-from multi_agent_data_synthesis.hidden_settings_tool import HiddenSettingsTool
-from multi_agent_data_synthesis.llm import OpenAIChatClient
-from multi_agent_data_synthesis.schemas import (
+from css_data_synthesis_test.agents import ServiceAgent, UserAgent
+from css_data_synthesis_test.config import AppConfig
+from css_data_synthesis_test.hidden_settings_tool import HiddenSettingsTool
+from css_data_synthesis_test.llm import OpenAIChatClient
+from css_data_synthesis_test.schemas import (
     DialogueSample,
     DialogueTurn,
     Scenario,
@@ -16,8 +16,8 @@ from multi_agent_data_synthesis.schemas import (
     display_speaker,
     effective_required_slots,
 )
-from multi_agent_data_synthesis.service_policy import ServiceRuntimeState
-from multi_agent_data_synthesis.validator import validate_dialogue
+from css_data_synthesis_test.service_policy import ServiceRuntimeState
+from css_data_synthesis_test.validator import validate_dialogue
 
 
 class DialogueOrchestrator:
