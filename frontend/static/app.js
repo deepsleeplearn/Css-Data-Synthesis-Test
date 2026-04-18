@@ -31,35 +31,147 @@ const failedFlowStageSelect = document.getElementById('failed-flow-stage');
 const reviewNotes = document.getElementById('review-notes');
 const reviewPersistCheckbox = document.getElementById('review-persist-to-db');
 const reviewSubmitButton = document.getElementById('review-submit-btn');
+const terminalScrollRegion = document.getElementById('terminal-scroll-region');
 const terminalOutput = document.getElementById('terminal-output');
-
-function terminalPlaceholderHtml() {
-    return `
-        <div class="terminal-empty">
-            <p>登录并启动会话后，这里会按 CLI 方式逐行输出会话内容。</p>
-            <p>第一轮由你先输入用户话术，点击任意用户行可删除该行及其下方所有内容。</p>
-        </div>
-    `;
-}
+const sessionContextPanel = document.getElementById('session-context-panel');
+const sessionContextTitle = document.getElementById('session-context-title');
+const sessionContextMode = document.getElementById('session-context-mode');
+const sessionContextSummary = document.getElementById('session-context-summary');
+const sessionCustomerContainer = document.getElementById('session-customer-container');
+const sessionRequestContainer = document.getElementById('session-request-container');
+const sessionHiddenContextContainer = document.getElementById('session-hidden-context-container');
+const sessionContextDetails = Array.from(document.querySelectorAll('.context-group'));
+const PERSONA_HIDDEN_CONTEXT_FIELDS = [
+    ['gender', '性别'],
+    ['emotion', '当前情绪'],
+    ['urgency', '紧急程度'],
+    ['prior_attempts', '过往尝试'],
+    ['special_constraints', '特殊约束'],
+    ['current_call_contactable', '当前来电可联系'],
+    ['contact_phone_owner', '联系电话归属'],
+    ['contact_phone_owner_spoken_label', '联系电话口语表达'],
+];
 
 function appendTerminalLine(text, tone = 'system') {
-    const empty = terminalOutput.querySelector('.terminal-empty');
-    if (empty) empty.remove();
-
     const line = document.createElement('div');
     line.className = `terminal-line ${tone}`;
     line.textContent = text;
     terminalOutput.appendChild(line);
-    terminalOutput.scrollTop = terminalOutput.scrollHeight;
+    terminalScrollRegion.scrollTop = terminalScrollRegion.scrollHeight;
+}
+
+function clearElement(element) {
+    if (element) element.innerHTML = '';
+}
+
+function appendContextItem(container, key, value) {
+    if (!container) return;
+    const item = document.createElement('div');
+    item.className = 'context-item';
+
+    const keyNode = document.createElement('span');
+    keyNode.className = 'context-item-key';
+    keyNode.textContent = key;
+
+    const valueNode = document.createElement('span');
+    valueNode.className = 'context-item-value';
+    const normalized = value === null || value === undefined ? '' : String(value).trim();
+    valueNode.textContent = normalized || '-';
+    if (!normalized) valueNode.classList.add('is-empty');
+
+    item.appendChild(keyNode);
+    item.appendChild(valueNode);
+    container.appendChild(item);
+}
+
+function appendSummaryChip(container, label, value) {
+    if (!container) return;
+    const chip = document.createElement('div');
+    chip.className = 'context-summary-chip';
+    chip.innerHTML = `<strong>${label}</strong><span>${value}</span>`;
+    container.appendChild(chip);
+}
+
+function updateSessionContextDensity() {
+    if (!sessionContextPanel || sessionContextPanel.classList.contains('hidden')) return;
+    const hasOpenGroup = sessionContextDetails.some((detail) => detail.open);
+    sessionContextPanel.classList.toggle('is-compact', !hasOpenGroup);
+}
+
+function updateSessionContext(scenario, sessionConfig = {}) {
+    if (!scenario || !sessionConfig.auto_generate_hidden_settings) {
+        sessionContextPanel.classList.add('hidden');
+        sessionContextPanel.classList.remove('is-compact');
+        sessionContextTitle.textContent = '本次会话设定';
+        sessionContextMode.textContent = !scenario ? '未开始' : '未启用';
+        clearElement(sessionContextSummary);
+        clearElement(sessionCustomerContainer);
+        clearElement(sessionRequestContainer);
+        clearElement(sessionHiddenContextContainer);
+        return;
+    }
+
+    sessionContextPanel.classList.remove('hidden');
+    sessionContextTitle.textContent = `${scenario.scenario_id} 的会话设定`;
+    sessionContextMode.textContent = sessionConfig.auto_generate_hidden_settings
+        ? '已启用自动生成隐藏设定'
+        : '使用原始/兜底设定';
+
+    clearElement(sessionContextSummary);
+    clearElement(sessionCustomerContainer);
+    clearElement(sessionRequestContainer);
+    clearElement(sessionHiddenContextContainer);
+
+    const customer = scenario.customer || {};
+    const request = scenario.request || {};
+    const hiddenContext = scenario.hidden_context || {};
+
+    appendSummaryChip(sessionContextSummary, '场景', scenario.scenario_id || '-');
+    appendSummaryChip(sessionContextSummary, '诉求类型', request.request_type || '-');
+    appendSummaryChip(
+        sessionContextSummary,
+        '已知地址',
+        sessionConfig.known_address ? '前端指定核对地址' : '未指定',
+    );
+
+    [
+        ['full_name', customer.full_name],
+        ['surname', customer.surname],
+        ['phone', customer.phone],
+        ['address', customer.address],
+        ['persona', customer.persona],
+        ['speech_style', customer.speech_style],
+    ].forEach(([key, value]) => appendContextItem(sessionCustomerContainer, key, value));
+
+    [
+        ['request_type', request.request_type],
+        ['issue', request.issue],
+        ['desired_resolution', request.desired_resolution],
+        ['availability', request.availability],
+    ].forEach(([key, value]) => appendContextItem(sessionRequestContainer, key, value));
+
+    const visiblePersonaFields = PERSONA_HIDDEN_CONTEXT_FIELDS
+        .map(([key, label]) => [label, hiddenContext[key]])
+        .filter(([, value]) => {
+            if (value === null || value === undefined) return false;
+            if (typeof value === 'string') return value.trim() !== '';
+            return true;
+        });
+
+    if (!visiblePersonaFields.length) {
+        appendContextItem(sessionHiddenContextContainer, '人设信息', '');
+        return;
+    }
+
+    visiblePersonaFields.forEach(([label, value]) => {
+        const renderedValue = typeof value === 'string' ? value : JSON.stringify(value);
+        appendContextItem(sessionHiddenContextContainer, label, renderedValue);
+    });
+    updateSessionContextDensity();
 }
 
 function renderTerminalEntries(entries = []) {
     terminalOutput.innerHTML = '';
-    if (!entries.length) {
-        terminalOutput.innerHTML = terminalPlaceholderHtml();
-        return;
-    }
-
     entries.forEach((entry) => {
         const line = document.createElement('div');
         line.className = `terminal-line ${entry.tone || 'system'}`;
@@ -96,7 +208,7 @@ function renderTerminalEntries(entries = []) {
 
         terminalOutput.appendChild(line);
     });
-    terminalOutput.scrollTop = terminalOutput.scrollHeight;
+    terminalScrollRegion.scrollTop = terminalScrollRegion.scrollHeight;
 }
 
 function setSessionStatus(status) {
@@ -225,6 +337,7 @@ function applySessionView(data) {
     setSessionIdIndicator(data.session_id);
     setNextRound(data.next_round_index);
     updateScenarioHeader(data.scenario);
+    updateSessionContext(data.scenario, data.session_config || {});
     updateInspector(data.collected_slots, data.runtime_state);
     renderTerminalEntries(sessionTerminalEntries);
 
@@ -309,13 +422,14 @@ function resetWorkspace() {
     sessionTerminalEntries = [];
     resetReviewState();
     updateScenarioHeader(null);
+    updateSessionContext(null, {});
     updateInspector({}, {});
     setSessionStatus('idle');
     setSessionIdIndicator('');
     setNextRound(1);
     updateInputAvailability(false);
     document.getElementById('scenario-list').innerHTML = '<div class="terminal-hint">登录后显示场景列表</div>';
-    document.getElementById('terminal-output').innerHTML = terminalPlaceholderHtml();
+    document.getElementById('terminal-output').innerHTML = '';
     document.querySelectorAll('.scenario-item').forEach((item) => item.classList.remove('active'));
 }
 
@@ -689,6 +803,10 @@ terminalOutput.addEventListener('click', (event) => {
     const restoreCheckpointIndex = Number(button.dataset.restoreCheckpointIndex || '-1');
     if (!roundIndex) return;
     rewindFromUserRound(roundIndex, restoreCheckpointIndex);
+});
+
+sessionContextDetails.forEach((detail) => {
+    detail.addEventListener('toggle', updateSessionContextDensity);
 });
 document.getElementById('user-input').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {

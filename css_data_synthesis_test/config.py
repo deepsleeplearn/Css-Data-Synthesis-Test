@@ -298,7 +298,7 @@ def load_config() -> AppConfig:
         default_model=default_model,
         user_agent_model=os.getenv("USER_AGENT_MODEL", default_model).strip(),
         service_agent_model=os.getenv("SERVICE_AGENT_MODEL", default_model).strip(),
-        default_temperature=float(os.getenv("DEFAULT_TEMPERATURE", "0.7")),
+        default_temperature=float(os.getenv("DEFAULT_TEMPERATURE", "1.0")),
         service_ok_prefix_probability=float(os.getenv("SERVICE_OK_PREFIX_PROBABILITY", "0.7")),
         second_round_include_issue_probability=float(
             os.getenv("SECOND_ROUND_INCLUDE_ISSUE_PROBABILITY", "0.4")

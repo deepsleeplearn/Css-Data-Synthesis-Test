@@ -314,6 +314,16 @@ def _apply_known_address(scenario: Scenario, known_address: str) -> tuple[Scenar
     sanitized = _sanitize_manual_user_text(known_address)
     hidden_context = dict(scenario.hidden_context)
     if not sanitized:
+        generated_known_address = str(hidden_context.get("service_known_address_value", "")).strip()
+        if bool(hidden_context.get("service_known_address", False)) and generated_known_address:
+            return (
+                scenario.with_generated_hidden_settings(
+                    customer=scenario.customer,
+                    request=scenario.request,
+                    hidden_context=hidden_context,
+                ),
+                f"使用隐藏设定中的已知地址，客服将优先核对: {generated_known_address}",
+            )
         hidden_context.update(
             {
                 "service_known_address": False,
@@ -718,6 +728,7 @@ def _build_session_view(session_id: str, session: dict[str, Any]) -> dict[str, A
     return {
         "session_id": session_id,
         "scenario": session["scenario"].to_dict(),
+        "session_config": dict(session.get("session_config", {})),
         "required_slots": list(session["required_slots"]),
         "collected_slots": dict(session["collected_slots"]),
         "runtime_state": asdict(session["runtime_state"]),
@@ -987,12 +998,6 @@ def start_session(
                 "persist_to_db": bool(req.persist_to_db),
             },
         }
-        _append_terminal_lines(
-            sessions[session_id],
-            lines=initial_lines + [f"[系统] 当前会话 session_id: {session_id}"],
-            tone="system",
-            round_count_snapshot=0,
-        )
         _append_checkpoint(sessions[session_id], source_round_index=0)
         _persist_session(session_id, sessions[session_id])
         return {

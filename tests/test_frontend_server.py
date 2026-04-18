@@ -8,6 +8,7 @@ import unittest
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -96,7 +97,7 @@ class FrontendServerTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
 
-    def test_start_session_returns_cli_style_header(self):
+    def test_start_session_keeps_cli_metadata_out_of_terminal(self):
         self._login()
         response = self.client.post(
             "/api/session/start",
@@ -110,6 +111,7 @@ class FrontendServerTests(unittest.TestCase):
         self.assertIn("场景: frontend_case", payload["initial_lines"])
         self.assertIn("可用命令: /help, /slots, /state, /quit", payload["initial_lines"])
         self.assertIn("未设置已知地址，客服将按询问流程采集地址。", payload["initial_lines"])
+        self.assertEqual(payload["terminal_entries"], [])
         self.assertFalse(payload["persist_to_db_default"])
         self.assertEqual(len(frontend_server.sessions[payload["session_id"]]["checkpoints"]), 1)
         self.assertEqual(
@@ -194,6 +196,45 @@ class FrontendServerTests(unittest.TestCase):
         self.assertTrue(reply_payload["session_closed"])
         self.assertIn("--- 已达到最大轮次，会话结束 ---", reply_payload["output_lines"])
         self.assertTrue(reply_payload["review_required"])
+
+    def test_auto_generated_known_address_is_preserved_when_frontend_input_is_empty(self):
+        self._login()
+        frontend_server.config.openai_api_key = "test-key"
+        base_scenario = frontend_server.factory.load_from_file(Path(self.temp_dir.name) / "seed_scenarios.json")[0]
+        generated_scenario = base_scenario.with_generated_hidden_settings(
+            customer=base_scenario.customer,
+            request=base_scenario.request,
+            hidden_context={
+                **dict(base_scenario.hidden_context),
+                "service_known_address": True,
+                "service_known_address_value": "浙江省杭州市余杭区良渚街道玉鸟路88号",
+                "service_known_address_matches_actual": True,
+            },
+        )
+
+        with patch("frontend.server.HiddenSettingsTool") as tool_cls:
+            tool_cls.return_value.generate_for_scenario.return_value = generated_scenario
+            start_response = self.client.post(
+                "/api/session/start",
+                json={
+                    "scenario_id": "frontend_case",
+                    "auto_generate_hidden_settings": True,
+                    "known_address": "",
+                },
+            )
+
+        self.assertEqual(start_response.status_code, 200)
+        start_payload = start_response.json()
+        session = frontend_server.sessions[start_payload["session_id"]]
+        self.assertTrue(session["scenario"].hidden_context["service_known_address"])
+        self.assertEqual(
+            session["scenario"].hidden_context["service_known_address_value"],
+            "浙江省杭州市余杭区良渚街道玉鸟路88号",
+        )
+        self.assertIn(
+            "使用隐藏设定中的已知地址，客服将优先核对: 浙江省杭州市余杭区良渚街道玉鸟路88号",
+            start_payload["initial_lines"],
+        )
 
     def test_rewind_endpoint_restores_session_snapshot_and_reopens_session(self):
         self._login()
@@ -280,7 +321,7 @@ class FrontendServerTests(unittest.TestCase):
         self.assertEqual(rewind_payload["status"], "active")
         self.assertEqual(rewind_payload["next_round_index"], 1)
         self.assertEqual(rewind_payload["transcript"], [])
-        self.assertEqual(len(rewind_payload["terminal_entries"]), 8)
+        self.assertEqual(rewind_payload["terminal_entries"], [])
         self.assertEqual(frontend_server.sessions[session_id]["checkpoints"][0]["completed_rounds"], 0)
         self.assertEqual(len(frontend_server.sessions[session_id]["checkpoints"]), 1)
 

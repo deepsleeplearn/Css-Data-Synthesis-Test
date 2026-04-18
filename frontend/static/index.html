@@ -116,11 +116,38 @@
                 </div>
             </header>
 
-            <section id="terminal-output" class="terminal-output">
-                <div class="terminal-empty">
+            <section id="terminal-scroll-region" class="terminal-scroll-region">
+                <section id="session-context-panel" class="session-context-panel hidden">
+                    <div class="session-context-header">
+                        <div>
+                            <p class="eyebrow">Session Context</p>
+                            <h3 id="session-context-title">本次会话设定</h3>
+                        </div>
+                        <span id="session-context-mode" class="context-mode-badge">未开始</span>
+                    </div>
+                    <div id="session-context-summary" class="session-context-summary"></div>
+                    <div class="session-context-groups">
+                        <details class="context-group" open>
+                            <summary>用户信息</summary>
+                            <div id="session-customer-container" class="context-items"></div>
+                        </details>
+                        <details class="context-group" open>
+                            <summary>诉求信息</summary>
+                            <div id="session-request-container" class="context-items"></div>
+                        </details>
+                        <details class="context-group">
+                            <summary>人设信息</summary>
+                            <div id="session-hidden-context-container" class="context-items"></div>
+                        </details>
+                    </div>
+                </section>
+
+                <section class="terminal-guide">
                     <p>登录并启动会话后，这里会按 CLI 方式逐行输出会话内容。</p>
-                    <p>第一轮由你先输入用户话术，客服不会预先发开场白。</p>
-                </div>
+                    <p>第一轮由你先输入用户话术，点击任意用户行可删除该行及其下方所有内容。</p>
+                </section>
+
+                <section id="terminal-output" class="terminal-output"></section>
             </section>
 
             <footer class="command-bar">
