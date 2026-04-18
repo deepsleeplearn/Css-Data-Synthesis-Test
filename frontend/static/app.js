@@ -3,6 +3,9 @@ let currentSessionId = null;
 let currentSlotKeys = [];
 let nextRoundIndex = 1;
 let sessionClosed = true;
+let sessionBusy = false;
+let sessionReviewLocked = false;
+let sessionTerminalEntries = [];
 let reviewPending = false;
 let reviewAvailable = false;
 let reviewContext = null;
@@ -26,26 +29,72 @@ const failedFlowStageSelect = document.getElementById('failed-flow-stage');
 const reviewNotes = document.getElementById('review-notes');
 const reviewPersistCheckbox = document.getElementById('review-persist-to-db');
 const reviewSubmitButton = document.getElementById('review-submit-btn');
+const terminalOutput = document.getElementById('terminal-output');
 
 function terminalPlaceholderHtml() {
     return `
         <div class="terminal-empty">
             <p>登录并启动会话后，这里会按 CLI 方式逐行输出会话内容。</p>
-            <p>第一轮由你先输入用户话术，客服不会预先发开场白。</p>
+            <p>第一轮由你先输入用户话术，点击任意用户行可删除该行及其下方所有内容。</p>
         </div>
     `;
 }
 
 function appendTerminalLine(text, tone = 'system') {
-    const output = document.getElementById('terminal-output');
-    const empty = output.querySelector('.terminal-empty');
+    const empty = terminalOutput.querySelector('.terminal-empty');
     if (empty) empty.remove();
 
     const line = document.createElement('div');
     line.className = `terminal-line ${tone}`;
     line.textContent = text;
-    output.appendChild(line);
-    output.scrollTop = output.scrollHeight;
+    terminalOutput.appendChild(line);
+    terminalOutput.scrollTop = terminalOutput.scrollHeight;
+}
+
+function renderTerminalEntries(entries = []) {
+    terminalOutput.innerHTML = '';
+    if (!entries.length) {
+        terminalOutput.innerHTML = terminalPlaceholderHtml();
+        return;
+    }
+
+    entries.forEach((entry) => {
+        const line = document.createElement('div');
+        line.className = `terminal-line ${entry.tone || 'system'}`;
+
+        if (entry.entry_type === 'turn') {
+            const contentText = `[${entry.round_label}] ${entry.speaker}: ${entry.text}`;
+            const canRewind = entry.tone === 'user'
+                && Boolean(currentSessionId)
+                && !sessionBusy
+                && !sessionReviewLocked
+                && Number(entry.round_index) > 0;
+            if (entry.tone === 'user') {
+                const trigger = document.createElement('button');
+                trigger.type = 'button';
+                trigger.className = 'terminal-turn-trigger';
+                trigger.textContent = contentText;
+                trigger.title = '删除该用户行及其下方所有内容';
+                trigger.dataset.roundIndex = String(entry.round_index || '');
+                trigger.dataset.restoreCheckpointIndex = String(
+                    Number.isFinite(Number(entry.restore_checkpoint_index))
+                        ? Number(entry.restore_checkpoint_index)
+                        : Math.max(Number(entry.round_index || 0) - 1, 0),
+                );
+                trigger.dataset.rewindEnabled = canRewind ? 'true' : 'false';
+                trigger.classList.toggle('is-disabled', !canRewind);
+                line.classList.add('rewindable');
+                line.appendChild(trigger);
+            } else {
+                line.textContent = contentText;
+            }
+        } else {
+            line.textContent = entry.text || '';
+        }
+
+        terminalOutput.appendChild(line);
+    });
+    terminalOutput.scrollTop = terminalOutput.scrollHeight;
 }
 
 function setSessionStatus(status) {
@@ -68,10 +117,15 @@ function updateInputAvailability(enabled) {
     const input = document.getElementById('user-input');
     const button = document.getElementById('send-btn');
     const endButton = document.getElementById('end-session-btn');
-    const canInteract = enabled && !reviewPending && !isReviewModalVisible() && Boolean(authenticatedUser);
+    const canInteract = enabled
+        && !sessionBusy
+        && !reviewPending
+        && !isReviewModalVisible()
+        && Boolean(authenticatedUser)
+        && !sessionReviewLocked;
     input.disabled = !canInteract;
     button.disabled = !canInteract;
-    endButton.disabled = !currentSessionId || sessionClosed || !authenticatedUser;
+    endButton.disabled = !currentSessionId || sessionClosed || !authenticatedUser || sessionBusy || sessionReviewLocked;
     if (canInteract) input.focus();
 }
 
@@ -93,6 +147,12 @@ function updateReviewToggleButton() {
     const shouldShow = reviewAvailable && !isReviewModalVisible();
     reviewToggleButton.classList.toggle('hidden', !shouldShow);
     reviewToggleButton.disabled = !shouldShow;
+}
+
+function setSessionBusyState(busy) {
+    sessionBusy = busy;
+    updateInputAvailability(!sessionClosed);
+    renderTerminalEntries(sessionTerminalEntries);
 }
 
 function resetReviewState() {
@@ -148,6 +208,36 @@ function prepareOptionalReview(data) {
     reviewAvailable = true;
     reviewContext = data;
     updateReviewToggleButton();
+}
+
+function applySessionView(data) {
+    if (!data || !data.session_id) return;
+
+    currentSessionId = data.session_id;
+    currentSlotKeys = Object.keys(data.collected_slots || {});
+    sessionClosed = Boolean(data.session_closed);
+    sessionTerminalEntries = Array.isArray(data.terminal_entries) ? data.terminal_entries : [];
+    sessionReviewLocked = false;
+
+    setSessionStatus(data.status || 'active');
+    setSessionIdIndicator(data.session_id);
+    setNextRound(data.next_round_index);
+    updateScenarioHeader(data.scenario);
+    updateInspector(data.collected_slots, data.runtime_state);
+    renderTerminalEntries(sessionTerminalEntries);
+
+    if (sessionClosed) {
+        resetReviewState();
+        if (data.status === 'transferred') {
+            prepareOptionalReview(data);
+        } else {
+            openReviewModal(data);
+        }
+    } else {
+        resetReviewState();
+    }
+
+    updateInputAvailability(!sessionClosed);
 }
 
 function updateScenarioHeader(scenario) {
@@ -212,6 +302,9 @@ function resetWorkspace() {
     currentSessionId = null;
     currentSlotKeys = [];
     sessionClosed = true;
+    sessionBusy = false;
+    sessionReviewLocked = false;
+    sessionTerminalEntries = [];
     resetReviewState();
     updateScenarioHeader(null);
     updateInspector({}, {});
@@ -389,8 +482,10 @@ async function submitReview() {
                 : `[系统] 评审已提交，session_id=${data.session_id}，username=${data.username}，本次数据未写入 SQLite。`,
             'system',
         );
+        sessionReviewLocked = true;
         resetReviewState();
         updateInputAvailability(false);
+        renderTerminalEntries(sessionTerminalEntries);
     } catch (error) {
         reviewSubmitButton.disabled = false;
         reviewCloseButton.disabled = false;
@@ -444,7 +539,9 @@ async function startSession() {
     const output = document.getElementById('terminal-output');
     output.innerHTML = '';
     appendTerminalLine('正在初始化手工测试会话...', 'system');
+    sessionBusy = true;
     updateInputAvailability(false);
+    let errorMessage = '';
 
     try {
         const data = await apiFetch('/api/session/start', {
@@ -452,60 +549,46 @@ async function startSession() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
-
-        currentSessionId = data.session_id;
-        currentSlotKeys = Object.keys(data.collected_slots || {});
-        sessionClosed = false;
-        resetReviewState();
-
-        output.innerHTML = '';
-        data.initial_lines.forEach((line) => appendTerminalLine(line, 'system'));
-        appendTerminalLine(`[系统] 当前会话 session_id: ${data.session_id}`, 'system');
-        setSessionStatus(data.status);
-        setSessionIdIndicator(data.session_id);
-        setNextRound(data.next_round_index);
-        updateScenarioHeader(data.scenario);
-        updateInspector(data.collected_slots, data.runtime_state);
-        updateInputAvailability(true);
+        applySessionView(data);
     } catch (error) {
         currentSessionId = null;
         currentSlotKeys = [];
         sessionClosed = true;
+        sessionTerminalEntries = [];
+        sessionReviewLocked = false;
         resetReviewState();
         setSessionStatus('error');
         setSessionIdIndicator('');
         setNextRound(1);
         updateInspector({}, {});
-        appendTerminalLine(`[系统错误] ${error.message}`, 'error');
+        errorMessage = error.message;
+    } finally {
+        setSessionBusyState(false);
+        if (errorMessage) {
+            appendTerminalLine(`[系统错误] ${errorMessage}`, 'error');
+        }
     }
 }
 
 async function forceEndSession() {
     if (!currentSessionId || sessionClosed) return;
 
+    setSessionBusyState(true);
+    let errorMessage = '';
     try {
         const data = await apiFetch('/api/session/respond', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ session_id: currentSessionId, text: '/quit' }),
         });
-
-        appendTerminalLine('[系统] 已手动强制结束会话', 'system');
-        (data.output_lines || []).forEach((line) => appendTerminalLine(line, 'system'));
-        setSessionStatus(data.status);
-        setNextRound(data.next_round_index);
-        updateInspector(data.collected_slots, data.runtime_state);
-        sessionClosed = Boolean(data.session_closed);
-        updateInputAvailability(!sessionClosed);
-        if (sessionClosed) {
-            if (data.status === 'transferred') {
-                prepareOptionalReview(data);
-            } else {
-                openReviewModal(data);
-            }
-        }
+        applySessionView(data);
     } catch (error) {
-        appendTerminalLine(`[系统错误] ${error.message}`, 'error');
+        errorMessage = error.message;
+    } finally {
+        setSessionBusyState(false);
+        if (errorMessage) {
+            appendTerminalLine(`[系统错误] ${errorMessage}`, 'error');
+        }
     }
 }
 
@@ -516,39 +599,55 @@ async function sendMessage() {
     if (!text || !currentSessionId || sessionClosed) return;
 
     input.value = '';
-    appendTerminalLine(`[${nextRoundIndex}] 用户: ${text}`, 'user');
-
+    setSessionBusyState(true);
+    let errorMessage = '';
     try {
         const data = await apiFetch('/api/session/respond', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ session_id: currentSessionId, text: rawText }),
         });
-
-        if (data.service_turn) {
-            appendTerminalLine(
-                `[${data.service_turn.round_label}] ${data.service_turn.speaker}: ${data.service_turn.text}`,
-                'service',
-            );
-        }
-
-        (data.output_lines || []).forEach((line) => appendTerminalLine(line, 'system'));
-
-        setSessionStatus(data.status);
-        setNextRound(data.next_round_index);
-        updateInspector(data.collected_slots, data.runtime_state);
-
-        sessionClosed = Boolean(data.session_closed);
-        updateInputAvailability(!sessionClosed);
-        if (sessionClosed) {
-            if (data.status === 'transferred') {
-                prepareOptionalReview(data);
-            } else {
-                openReviewModal(data);
-            }
-        }
+        applySessionView(data);
     } catch (error) {
-        appendTerminalLine(`[系统错误] ${error.message}`, 'error');
+        errorMessage = error.message;
+    } finally {
+        setSessionBusyState(false);
+        if (errorMessage) {
+            appendTerminalLine(`[系统错误] ${errorMessage}`, 'error');
+        }
+    }
+}
+
+async function rewindFromUserRound(roundIndex, restoreCheckpointIndex) {
+    if (!currentSessionId || sessionBusy || sessionReviewLocked || roundIndex < 1) return;
+
+    setSessionBusyState(true);
+    let errorMessage = '';
+    try {
+        const data = await apiFetch('/api/session/rewind', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: currentSessionId,
+                clicked_user_round_index: roundIndex,
+                restore_checkpoint_index: restoreCheckpointIndex,
+            }),
+        });
+        applySessionView(data);
+    } catch (error) {
+        errorMessage = error.message;
+        if (errorMessage.includes('评审已提交')) {
+            sessionReviewLocked = true;
+        }
+    } finally {
+        setSessionBusyState(false);
+        if (sessionReviewLocked) {
+            renderTerminalEntries(sessionTerminalEntries);
+            updateInputAvailability(false);
+        }
+        if (errorMessage) {
+            appendTerminalLine(`[系统错误] ${errorMessage}`, 'error');
+        }
     }
 }
 
@@ -562,6 +661,16 @@ document.getElementById('review-close-btn').onclick = dismissReview;
 document.getElementById('review-toggle-btn').onclick = reopenReviewModal;
 document.querySelectorAll('input[name="review-correctness"]').forEach((input) => {
     input.addEventListener('change', syncReviewErrorFields);
+});
+terminalOutput.addEventListener('click', (event) => {
+    const button = event.target.closest('.terminal-turn-trigger');
+    if (!button) return;
+    event.preventDefault();
+    if (button.dataset.rewindEnabled !== 'true') return;
+    const roundIndex = Number(button.dataset.roundIndex || '0');
+    const restoreCheckpointIndex = Number(button.dataset.restoreCheckpointIndex || '-1');
+    if (!roundIndex) return;
+    rewindFromUserRound(roundIndex, restoreCheckpointIndex);
 });
 document.getElementById('user-input').addEventListener('keydown', (event) => {
     if (event.key === 'Enter') {

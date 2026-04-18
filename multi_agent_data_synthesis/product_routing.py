@@ -66,7 +66,8 @@ BRAND_SERIES_WEIGHTS = {
     "lieyan": 0.22,
 }
 MODEL_LOOKUP_WEIGHTS = {
-    "home": 0.58,
+    "home": 0.43,
+    "unknown": 0.15,
     "building": 0.42,
 }
 UNKNOWN_PURPOSE_WEIGHTS = {
@@ -820,6 +821,18 @@ def next_product_routing_steps_from_observed_trace(
             )
         ], ""
 
+    if current_answer_key in {"model_lookup.home", "model_lookup.unknown"}:
+        return [
+            _make_step(
+                "purchase_or_property",
+                PROMPT_PURCHASE_OR_PROPERTY,
+                "purchase.self_buy",
+                _answer_value(rng, "purchase.self_buy", model_hint=model_hint),
+            )
+        ], ""
+    if current_answer_key == "model_lookup.building":
+        return [], ROUTING_RESULT_BUILDING
+
     if current_answer_key in {"brand_series.colmo", "brand_series.home_series"}:
         return [], ROUTING_RESULT_HOME
     if current_answer_key == "brand_series.cooling_or_little_swan":
@@ -979,18 +992,18 @@ def build_product_routing_plan(
             "lieyan": ROUTING_RESULT_BUILDING,
         }[brand_choice]
     elif entry == "model":
-        steps.append(
-            _make_step(
-                "brand_or_series",
-                PROMPT_BRAND_OR_SERIES,
-                "entry.model",
-                _answer_value(resolved_rng, "entry.model", model_hint=model_hint),
-            )
-        )
-        trace.append("entry.model")
         lookup_result = _weighted_choice(resolved_rng, MODEL_LOOKUP_WEIGHTS)
+        model_step = _make_step(
+            "brand_or_series",
+            PROMPT_BRAND_OR_SERIES,
+            "entry.model",
+            _answer_value(resolved_rng, "entry.model", model_hint=model_hint),
+        )
+        model_step["post_answer_trace"] = [f"model_lookup.{lookup_result}"]
+        steps.append(model_step)
+        trace.append("entry.model")
         trace.append(f"model_lookup.{lookup_result}")
-        if lookup_result == "home":
+        if lookup_result in {"home", "unknown"}:
             result = _append_purchase_chain(
                 rng=resolved_rng,
                 steps=steps,
@@ -1161,12 +1174,12 @@ def get_product_routing_plan(hidden_context: dict[str, Any] | None) -> dict[str,
     return plan
 
 
-def get_product_routing_steps(hidden_context: dict[str, Any] | None) -> list[dict[str, str]]:
+def get_product_routing_steps(hidden_context: dict[str, Any] | None) -> list[dict[str, Any]]:
     plan = get_product_routing_plan(hidden_context)
     if not plan:
         return []
     steps = plan.get("steps", [])
-    normalized_steps: list[dict[str, str]] = []
+    normalized_steps: list[dict[str, Any]] = []
     for step in steps:
         if not isinstance(step, dict):
             continue
@@ -1177,15 +1190,19 @@ def get_product_routing_steps(hidden_context: dict[str, Any] | None) -> list[dic
         answer_instruction = str(step.get("answer_instruction", "")).strip()
         if not prompt or not prompt_key or not answer_key or not answer_instruction:
             continue
-        normalized_steps.append(
-            {
-                "prompt_key": prompt_key,
-                "prompt": prompt,
-                "answer_key": answer_key,
-                "answer_value": answer_value,
-                "answer_instruction": answer_instruction,
-            }
-        )
+        normalized_step: dict[str, Any] = {
+            "prompt_key": prompt_key,
+            "prompt": prompt,
+            "answer_key": answer_key,
+            "answer_value": answer_value,
+            "answer_instruction": answer_instruction,
+        }
+        raw_post_answer_trace = step.get("post_answer_trace", [])
+        if isinstance(raw_post_answer_trace, list):
+            normalized_step["post_answer_trace"] = [
+                str(item).strip() for item in raw_post_answer_trace if str(item).strip()
+            ]
+        normalized_steps.append(normalized_step)
     return normalized_steps
 
 

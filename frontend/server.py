@@ -19,6 +19,11 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+try:
+    import redis
+except ImportError:  # pragma: no cover
+    redis = None
+
 # Add the project root to sys.path to ensure multi_agent_data_synthesis can be imported.
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -42,7 +47,16 @@ try:
         _manual_command_token,
         _sanitize_manual_user_text,
     )
-    from multi_agent_data_synthesis.product_routing import ensure_product_routing_plan
+    from multi_agent_data_synthesis.product_routing import (
+        PROMPT_BRAND_OR_SERIES,
+        PROMPT_CAPACITY,
+        PROMPT_PROPERTY_YEAR,
+        PROMPT_PURCHASE_OR_PROPERTY,
+        PROMPT_USAGE_PURPOSE,
+        PROMPT_USAGE_SCENE,
+        default_unknown_product_routing_answer_key,
+        ensure_product_routing_plan,
+    )
     from multi_agent_data_synthesis.scenario_factory import ScenarioFactory
     from multi_agent_data_synthesis.schemas import (
         SERVICE_SPEAKER,
@@ -77,6 +91,8 @@ sessions: dict[str, dict[str, Any]] = {}
 auth_sessions: dict[str, dict[str, Any]] = {}
 SESSION_REVIEW_DB_PATH = PROJECT_ROOT / "outputs" / "frontend_manual_test.sqlite3"
 SESSION_REVIEW_DB_LOCK = threading.Lock()
+SESSION_REDIS_URL = os.getenv("FRONTEND_SESSION_REDIS_URL", "").strip()
+SESSION_REDIS_TTL_SECONDS = int(os.getenv("FRONTEND_SESSION_REDIS_TTL_SECONDS", "43200") or "43200")
 FLOW_REVIEW_OPTIONS = [
     {"key": "opening_confirmation", "label": "开场确认"},
     {"key": "issue_collection", "label": "故障/诉求采集"},
@@ -93,6 +109,31 @@ FLOW_REVIEW_OPTIONS = [
 ]
 
 
+def _build_service_policy():
+    service_agent = ServiceAgent(
+        llm_client,
+        model=config.service_agent_model,
+        temperature=config.default_temperature,
+        ok_prefix_probability=config.service_ok_prefix_probability,
+        product_routing_enabled=config.product_routing_enabled,
+        product_routing_apply_probability=config.product_routing_apply_probability,
+    )
+    return service_agent.policy
+
+
+def _session_redis_client():
+    if not SESSION_REDIS_URL or redis is None:
+        return None
+    try:
+        return redis.Redis.from_url(SESSION_REDIS_URL, decode_responses=True)
+    except Exception:
+        return None
+
+
+def _session_redis_key(session_id: str) -> str:
+    return f"frontend:session:{session_id}"
+
+
 class StartSessionRequest(BaseModel):
     scenario_id: str = ""
     scenario_index: int = 0
@@ -105,6 +146,13 @@ class StartSessionRequest(BaseModel):
 class RespondRequest(BaseModel):
     session_id: str
     text: str
+
+
+class RewindSessionRequest(BaseModel):
+    session_id: str
+    clicked_user_round_index: int = 0
+    restore_checkpoint_index: int | None = None
+    target_round_index: int | None = None
 
 
 class LoginRequest(BaseModel):
@@ -365,6 +413,8 @@ def _build_collected_slots(scenario: Scenario) -> tuple[list[str], dict[str, str
 def _session_state(session_id: str) -> dict[str, Any]:
     session = sessions.get(session_id)
     if session is None:
+        session = _load_session_from_redis(session_id)
+    if session is None:
         raise HTTPException(status_code=404, detail="会话已过期或不存在")
     return session
 
@@ -372,6 +422,10 @@ def _session_state(session_id: str) -> dict[str, Any]:
 def _next_round_index(transcript: list[DialogueTurn]) -> int:
     user_turns = sum(1 for turn in transcript if turn.speaker == USER_SPEAKER)
     return user_turns + 1
+
+
+def _completed_round_count(transcript: list[DialogueTurn]) -> int:
+    return sum(1 for turn in transcript if turn.speaker == USER_SPEAKER)
 
 
 def _merge_slots(
@@ -415,6 +469,269 @@ def _serialize_transcript(transcript: list[DialogueTurn]) -> list[dict[str, Any]
     return [turn.to_display_dict() for turn in transcript]
 
 
+def _serialize_turns_for_storage(transcript: list[DialogueTurn]) -> list[dict[str, Any]]:
+    return [turn.to_dict() for turn in transcript]
+
+
+def _deserialize_turns_from_storage(items: list[dict[str, Any]] | None) -> list[DialogueTurn]:
+    if not isinstance(items, list):
+        return []
+    turns: list[DialogueTurn] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        turns.append(
+            DialogueTurn(
+                speaker=str(item.get("speaker", "")).strip(),
+                text=str(item.get("text", "")),
+                round_index=int(item.get("round_index", 0) or 0),
+                model_intent_inference_used=bool(item.get("model_intent_inference_used", False)),
+                previous_user_intent_model_inference_used=item.get("previous_user_intent_model_inference_used"),
+            )
+        )
+    return turns
+
+
+def _checkpoint_snapshot(
+    session: dict[str, Any],
+    *,
+    checkpoint_index: int,
+    source_round_index: int,
+) -> dict[str, Any]:
+    transcript = session["transcript"]
+    return {
+        "checkpoint_index": checkpoint_index,
+        "source_round_index": source_round_index,
+        "completed_rounds": _completed_round_count(transcript),
+        "scenario": session["scenario"].to_dict(),
+        "transcript": _serialize_turns_for_storage(transcript),
+        "terminal_entries": _copy_terminal_entries(session.get("terminal_entries", [])),
+        "collected_slots": dict(session["collected_slots"]),
+        "runtime_state": asdict(session["runtime_state"]),
+        "status": session["status"],
+        "aborted_reason": session.get("aborted_reason", ""),
+        "ended_at": session.get("ended_at", ""),
+    }
+
+
+def _append_checkpoint(session: dict[str, Any], *, source_round_index: int) -> None:
+    checkpoints = session.setdefault("checkpoints", [])
+    checkpoints.append(
+        _checkpoint_snapshot(
+            session,
+            checkpoint_index=len(checkpoints),
+            source_round_index=source_round_index,
+        )
+    )
+
+
+def _serialize_session_for_storage(session: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "username": str(session.get("username", "")).strip(),
+        "scenario": session["scenario"].to_dict(),
+        "base_scenario": dict(session.get("base_scenario", {})),
+        "runtime_state": asdict(session["runtime_state"]),
+        "transcript": _serialize_turns_for_storage(session.get("transcript", [])),
+        "trace": list(session.get("trace", [])),
+        "terminal_entries": _copy_terminal_entries(session.get("terminal_entries", [])),
+        "required_slots": list(session.get("required_slots", [])),
+        "collected_slots": dict(session.get("collected_slots", {})),
+        "initial_runtime_state": dict(session.get("initial_runtime_state", {})),
+        "initial_collected_slots": dict(session.get("initial_collected_slots", {})),
+        "rounds_limit": int(session.get("rounds_limit", 0) or 0),
+        "status": str(session.get("status", "active")).strip() or "active",
+        "aborted_reason": str(session.get("aborted_reason", "")).strip(),
+        "started_at": str(session.get("started_at", "")).strip(),
+        "ended_at": str(session.get("ended_at", "")).strip(),
+        "review_submitted": bool(session.get("review_submitted", False)),
+        "session_config": dict(session.get("session_config", {})),
+        "review": dict(session.get("review", {})) if isinstance(session.get("review"), dict) else None,
+        "checkpoints": list(session.get("checkpoints", [])),
+    }
+    return payload
+
+
+def _deserialize_session_from_storage(payload: dict[str, Any]) -> dict[str, Any]:
+    scenario = Scenario.from_dict(dict(payload.get("scenario", {})))
+    runtime_state = ServiceRuntimeState(**dict(payload.get("runtime_state", {})))
+    session: dict[str, Any] = {
+        "username": str(payload.get("username", "")).strip(),
+        "scenario": scenario,
+        "base_scenario": dict(payload.get("base_scenario", {})),
+        "policy": _build_service_policy(),
+        "runtime_state": runtime_state,
+        "transcript": _deserialize_turns_from_storage(payload.get("transcript")),
+        "trace": list(payload.get("trace", [])),
+        "terminal_entries": _copy_terminal_entries(payload.get("terminal_entries", [])),
+        "required_slots": list(payload.get("required_slots", [])),
+        "collected_slots": dict(payload.get("collected_slots", {})),
+        "initial_runtime_state": dict(payload.get("initial_runtime_state", {})),
+        "initial_collected_slots": dict(payload.get("initial_collected_slots", {})),
+        "rounds_limit": int(payload.get("rounds_limit", 0) or 0),
+        "status": str(payload.get("status", "active")).strip() or "active",
+        "aborted_reason": str(payload.get("aborted_reason", "")).strip(),
+        "started_at": str(payload.get("started_at", "")).strip(),
+        "ended_at": str(payload.get("ended_at", "")).strip(),
+        "review_submitted": bool(payload.get("review_submitted", False)),
+        "session_config": dict(payload.get("session_config", {})),
+        "checkpoints": list(payload.get("checkpoints", [])),
+    }
+    review = payload.get("review")
+    if isinstance(review, dict):
+        session["review"] = dict(review)
+    return session
+
+
+def _persist_session(session_id: str, session: dict[str, Any]) -> None:
+    redis_client = _session_redis_client()
+    if redis_client is None:
+        return
+    try:
+        redis_client.setex(
+            _session_redis_key(session_id),
+            max(60, SESSION_REDIS_TTL_SECONDS),
+            json.dumps(_serialize_session_for_storage(session), ensure_ascii=False),
+        )
+    except Exception:
+        pass
+
+
+def _load_session_from_redis(session_id: str) -> dict[str, Any] | None:
+    redis_client = _session_redis_client()
+    if redis_client is None:
+        return None
+    try:
+        payload = redis_client.get(_session_redis_key(session_id))
+    except Exception:
+        return None
+    if not payload:
+        return None
+    try:
+        loaded = _deserialize_session_from_storage(json.loads(payload))
+    except Exception:
+        return None
+    sessions[session_id] = loaded
+    return loaded
+
+
+def _routing_prompt_key_from_text(text: str) -> str:
+    normalized = str(text or "").strip()
+    mapping = {
+        PROMPT_BRAND_OR_SERIES: "brand_or_series",
+        PROMPT_USAGE_PURPOSE: "usage_purpose",
+        PROMPT_USAGE_SCENE: "usage_scene",
+        PROMPT_PURCHASE_OR_PROPERTY: "purchase_or_property",
+        PROMPT_PROPERTY_YEAR: "property_year",
+        PROMPT_CAPACITY: "capacity_or_hp",
+    }
+    return mapping.get(normalized, "")
+
+
+def _rebuild_scenario_for_checkpoint(session: dict[str, Any], checkpoint: dict[str, Any]) -> Scenario:
+    checkpoint_scenario = checkpoint.get("scenario")
+    if isinstance(checkpoint_scenario, dict):
+        return Scenario.from_dict(dict(checkpoint_scenario))
+
+    base_scenario_payload = session.get("base_scenario")
+    if isinstance(base_scenario_payload, dict) and base_scenario_payload:
+        scenario = Scenario.from_dict(dict(base_scenario_payload))
+    else:
+        scenario = Scenario.from_dict(session["scenario"].to_dict())
+
+    runtime_state_payload = dict(checkpoint.get("runtime_state", {}))
+    observed_trace = list(runtime_state_payload.get("product_routing_observed_trace", []))
+    expected_routing = bool(runtime_state_payload.get("expected_product_routing_response", False))
+    checkpoint_transcript = _deserialize_turns_from_storage(checkpoint.get("transcript"))
+    last_service_text = ""
+    for turn in reversed(checkpoint_transcript):
+        if turn.speaker == SERVICE_SPEAKER:
+            last_service_text = turn.text
+            break
+
+    hidden_context = dict(scenario.hidden_context)
+    prompt_key = _routing_prompt_key_from_text(last_service_text) if expected_routing else ""
+    if prompt_key:
+        hidden_context["product_routing_plan"] = {
+            "enabled": True,
+            "result": "",
+            "trace": list(observed_trace),
+            "steps": [
+                {
+                    "prompt_key": prompt_key,
+                    "prompt": last_service_text,
+                    "answer_key": default_unknown_product_routing_answer_key(prompt_key),
+                    "answer_value": "",
+                    "answer_instruction": "围绕当前问题直接回答。",
+                }
+            ],
+            "summary": " -> ".join(item for item in observed_trace if str(item).strip()),
+        }
+        hidden_context["product_routing_trace"] = list(observed_trace)
+        hidden_context["product_routing_result"] = ""
+        hidden_context["product_routing_summary"] = hidden_context["product_routing_plan"]["summary"]
+    scenario.hidden_context = hidden_context
+    return scenario
+
+
+def _append_terminal_lines(
+    session: dict[str, Any],
+    *,
+    lines: list[str],
+    tone: str,
+    round_count_snapshot: int,
+) -> None:
+    terminal_entries = session.setdefault("terminal_entries", [])
+    for line in lines:
+        terminal_entries.append(
+            {
+                "entry_type": "line",
+                "tone": tone,
+                "text": line,
+                "round_count_snapshot": round_count_snapshot,
+            }
+        )
+
+
+def _append_turn_entry(session: dict[str, Any], turn: DialogueTurn) -> None:
+    display_turn = turn.to_display_dict()
+    terminal_entries = session.setdefault("terminal_entries", [])
+    entry = {
+        "entry_type": "turn",
+        "tone": "service" if turn.speaker == SERVICE_SPEAKER else "user",
+        "speaker": display_turn["speaker"],
+        "text": display_turn["text"],
+        "round_index": display_turn["round_index"],
+        "round_label": display_turn["round_label"],
+        "round_count_snapshot": display_turn["round_index"],
+    }
+    if turn.speaker == USER_SPEAKER:
+        entry["restore_checkpoint_index"] = max(int(display_turn["round_index"]) - 1, 0)
+    terminal_entries.append(entry)
+
+
+def _copy_terminal_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [dict(entry) for entry in entries]
+
+
+def _build_session_view(session_id: str, session: dict[str, Any]) -> dict[str, Any]:
+    transcript = session["transcript"]
+    return {
+        "session_id": session_id,
+        "scenario": session["scenario"].to_dict(),
+        "required_slots": list(session["required_slots"]),
+        "collected_slots": dict(session["collected_slots"]),
+        "runtime_state": asdict(session["runtime_state"]),
+        "rounds_limit": session["rounds_limit"],
+        "status": session["status"],
+        "session_closed": session["status"] != "active",
+        "next_round_index": _next_round_index(transcript),
+        "completed_rounds": _completed_round_count(transcript),
+        "transcript": _serialize_transcript(transcript),
+        "terminal_entries": _copy_terminal_entries(session.get("terminal_entries", [])),
+        **_review_prompt_payload(session),
+    }
+
+
 def _session_snapshot(session_id: str, session: dict[str, Any]) -> dict[str, Any]:
     scenario = session["scenario"]
     runtime_state = session["runtime_state"]
@@ -434,7 +751,9 @@ def _session_snapshot(session_id: str, session: dict[str, Any]) -> dict[str, Any
         "collected_slots": dict(session["collected_slots"]),
         "runtime_state_final": asdict(runtime_state),
         "transcript": _serialize_transcript(transcript),
+        "terminal_entries": _copy_terminal_entries(session.get("terminal_entries", [])),
         "trace": list(session["trace"]),
+        "checkpoints": list(session.get("checkpoints", [])),
     }
 
 
@@ -632,25 +951,28 @@ def start_session(
     try:
         scenario, known_address_notice, rounds_limit = _prepare_manual_test_scenario(req)
         required_slots, collected_slots = _build_collected_slots(scenario)
-        service_agent = ServiceAgent(
-            llm_client,
-            model=config.service_agent_model,
-            temperature=config.default_temperature,
-            ok_prefix_probability=config.service_ok_prefix_probability,
-            product_routing_enabled=config.product_routing_enabled,
-            product_routing_apply_probability=config.product_routing_apply_probability,
+        initial_runtime_state = asdict(ServiceRuntimeState())
+        initial_lines = _build_initial_lines(
+            scenario,
+            rounds_limit=rounds_limit,
+            known_address_notice=known_address_notice,
         )
 
         session_id = str(uuid.uuid4())
         sessions[session_id] = {
             "username": current_user["username"],
             "scenario": scenario,
-            "policy": service_agent.policy,
+            "base_scenario": scenario.to_dict(),
+            "policy": _build_service_policy(),
             "runtime_state": ServiceRuntimeState(),
             "transcript": [],
             "trace": [],
+            "terminal_entries": [],
+            "checkpoints": [],
             "required_slots": required_slots,
             "collected_slots": collected_slots,
+            "initial_runtime_state": dict(initial_runtime_state),
+            "initial_collected_slots": dict(collected_slots),
             "rounds_limit": rounds_limit,
             "status": "active",
             "aborted_reason": "",
@@ -665,20 +987,17 @@ def start_session(
                 "persist_to_db": bool(req.persist_to_db),
             },
         }
+        _append_terminal_lines(
+            sessions[session_id],
+            lines=initial_lines + [f"[系统] 当前会话 session_id: {session_id}"],
+            tone="system",
+            round_count_snapshot=0,
+        )
+        _append_checkpoint(sessions[session_id], source_round_index=0)
+        _persist_session(session_id, sessions[session_id])
         return {
-            "session_id": session_id,
-            "scenario": scenario.to_dict(),
-            "required_slots": required_slots,
-            "collected_slots": collected_slots,
-            "runtime_state": asdict(ServiceRuntimeState()),
-            "rounds_limit": rounds_limit,
-            "next_round_index": 1,
-            "status": "active",
-            "initial_lines": _build_initial_lines(
-                scenario,
-                rounds_limit=rounds_limit,
-                known_address_notice=known_address_notice,
-            ),
+            **_build_session_view(session_id, sessions[session_id]),
+            "initial_lines": initial_lines,
             "persist_to_db_default": bool(req.persist_to_db),
         }
     except HTTPException:
@@ -708,69 +1027,85 @@ def respond(
     runtime_state = session["runtime_state"]
     transcript = session["transcript"]
     collected_slots = session["collected_slots"]
+    completed_rounds = _completed_round_count(transcript)
 
     if command_token == MANUAL_TEST_HELP_COMMAND:
+        output_lines = ["可用命令: /help, /slots, /state, /quit"]
+        _append_terminal_lines(
+            session,
+            lines=output_lines,
+            tone="system",
+            round_count_snapshot=completed_rounds,
+        )
+        _persist_session(req.session_id, session)
         return {
             "mode": "command",
-            "output_lines": ["可用命令: /help, /slots, /state, /quit"],
-            "collected_slots": collected_slots,
-            "runtime_state": asdict(runtime_state),
-            "status": session["status"],
-            "session_closed": False,
-            "next_round_index": _next_round_index(transcript),
-            **_review_prompt_payload(session),
+            "output_lines": output_lines,
+            **_build_session_view(req.session_id, session),
         }
 
     if command_token == MANUAL_TEST_SHOW_SLOTS_COMMAND:
+        output_lines = [json.dumps(collected_slots, ensure_ascii=False, indent=2)]
+        _append_terminal_lines(
+            session,
+            lines=output_lines,
+            tone="system",
+            round_count_snapshot=completed_rounds,
+        )
+        _persist_session(req.session_id, session)
         return {
             "mode": "command",
-            "output_lines": [json.dumps(collected_slots, ensure_ascii=False, indent=2)],
-            "collected_slots": collected_slots,
-            "runtime_state": asdict(runtime_state),
-            "status": session["status"],
-            "session_closed": False,
-            "next_round_index": _next_round_index(transcript),
-            **_review_prompt_payload(session),
+            "output_lines": output_lines,
+            **_build_session_view(req.session_id, session),
         }
 
     if command_token == MANUAL_TEST_SHOW_STATE_COMMAND:
+        output_lines = [json.dumps(asdict(runtime_state), ensure_ascii=False, indent=2)]
+        _append_terminal_lines(
+            session,
+            lines=output_lines,
+            tone="system",
+            round_count_snapshot=completed_rounds,
+        )
+        _persist_session(req.session_id, session)
         return {
             "mode": "command",
-            "output_lines": [json.dumps(asdict(runtime_state), ensure_ascii=False, indent=2)],
-            "collected_slots": collected_slots,
-            "runtime_state": asdict(runtime_state),
-            "status": session["status"],
-            "session_closed": False,
-            "next_round_index": _next_round_index(transcript),
-            **_review_prompt_payload(session),
+            "output_lines": output_lines,
+            **_build_session_view(req.session_id, session),
         }
 
     if command_token in MANUAL_TEST_EXIT_COMMANDS:
+        output_lines = ["会话已结束。"]
         _mark_session_closed(session, status="aborted", aborted_reason="user_exit")
+        _append_terminal_lines(
+            session,
+            lines=output_lines,
+            tone="system",
+            round_count_snapshot=completed_rounds,
+        )
+        _persist_session(req.session_id, session)
         return {
             "mode": "command",
-            "output_lines": ["会话已结束。"],
-            "collected_slots": collected_slots,
-            "runtime_state": asdict(runtime_state),
-            "status": session["status"],
-            "session_closed": True,
-            "next_round_index": _next_round_index(transcript),
-            **_review_prompt_payload(session),
+            "output_lines": output_lines,
+            **_build_session_view(req.session_id, session),
         }
 
     round_index = _next_round_index(transcript)
     rounds_limit = int(session["rounds_limit"])
     if round_index > rounds_limit:
+        output_lines = ["已达到最大轮次，会话结束。"]
         _mark_session_closed(session, status="incomplete", aborted_reason="round_limit_reached")
+        _append_terminal_lines(
+            session,
+            lines=output_lines,
+            tone="system",
+            round_count_snapshot=completed_rounds,
+        )
+        _persist_session(req.session_id, session)
         return {
             "mode": "command",
-            "output_lines": ["已达到最大轮次，会话结束。"],
-            "collected_slots": collected_slots,
-            "runtime_state": asdict(runtime_state),
-            "status": session["status"],
-            "session_closed": True,
-            "next_round_index": round_index,
-            **_review_prompt_payload(session),
+            "output_lines": output_lines,
+            **_build_session_view(req.session_id, session),
         }
 
     scenario = session["scenario"]
@@ -809,6 +1144,8 @@ def respond(
         previous_user_intent_model_inference_used=used_model_intent_inference,
     )
     transcript.append(service_turn)
+    _append_turn_entry(session, user_turn)
+    _append_turn_entry(session, service_turn)
 
     session["trace"].append(
         {
@@ -840,20 +1177,85 @@ def respond(
     elif round_index >= rounds_limit:
         _mark_session_closed(session, status="incomplete", aborted_reason="round_limit_reached")
         output_lines.append("--- 已达到最大轮次，会话结束 ---")
+    if output_lines:
+        _append_terminal_lines(
+            session,
+            lines=output_lines,
+            tone="system",
+            round_count_snapshot=round_index,
+        )
+    _append_checkpoint(session, source_round_index=round_index)
+    _persist_session(req.session_id, session)
 
     return {
         "mode": "reply",
         "service_turn": service_turn.to_display_dict(),
         "output_lines": output_lines,
-        "collected_slots": collected_slots,
-        "runtime_state": asdict(runtime_state),
-        "status": session["status"],
-        "session_closed": session["status"] != "active",
-        "next_round_index": _next_round_index(transcript),
         "is_ready_to_close": service_result.is_ready_to_close,
         "close_status": getattr(service_result, "close_status", ""),
         "close_reason": getattr(service_result, "close_reason", ""),
-        **_review_prompt_payload(session),
+        **_build_session_view(req.session_id, session),
+    }
+
+
+@app.post("/api/session/rewind")
+def rewind_session(
+    req: RewindSessionRequest,
+    current_user: dict[str, str] = Depends(_require_authenticated_user),
+):
+    session = _session_state(req.session_id)
+    if session.get("review_submitted"):
+        raise HTTPException(status_code=409, detail="当前会话评审已提交，不能再回退。")
+
+    checkpoints = list(session.get("checkpoints", []))
+    if not checkpoints:
+        raise HTTPException(status_code=409, detail="当前会话缺少可恢复的状态节点。")
+    completed_rounds = _completed_round_count(session["transcript"])
+    clicked_user_round_index = int(req.clicked_user_round_index)
+    requested_checkpoint_index = req.restore_checkpoint_index
+    if requested_checkpoint_index is None and req.target_round_index is not None:
+        requested_checkpoint_index = int(req.target_round_index)
+        if clicked_user_round_index < 1:
+            clicked_user_round_index = requested_checkpoint_index + 1
+    if requested_checkpoint_index is None:
+        if clicked_user_round_index < 1:
+            raise HTTPException(status_code=400, detail="被删除的用户轮次无效。")
+        requested_checkpoint_index = clicked_user_round_index - 1
+    target_checkpoint_index = int(requested_checkpoint_index)
+    if target_checkpoint_index < 0 or target_checkpoint_index >= len(checkpoints):
+        raise HTTPException(status_code=400, detail="被删除的用户轮次无效。")
+    if clicked_user_round_index < 1:
+        clicked_user_round_index = target_checkpoint_index + 1
+    target_round_index = target_checkpoint_index
+    checkpoint = checkpoints[target_checkpoint_index]
+    if not isinstance(checkpoint, dict):
+        raise HTTPException(status_code=409, detail="当前会话状态节点损坏，无法回退。")
+
+    session["scenario"] = _rebuild_scenario_for_checkpoint(session, checkpoint)
+    session["policy"] = _build_service_policy()
+    session["transcript"] = _deserialize_turns_from_storage(checkpoint.get("transcript"))
+    session["terminal_entries"] = _copy_terminal_entries(checkpoint.get("terminal_entries", []))
+    session["collected_slots"] = dict(checkpoint.get("collected_slots", {}))
+    session["runtime_state"] = ServiceRuntimeState(**dict(checkpoint.get("runtime_state", {})))
+    session["status"] = "active"
+    session["aborted_reason"] = ""
+    session["ended_at"] = ""
+    session["review_submitted"] = False
+    session.pop("review", None)
+    session["trace"] = [
+        trace_item
+        for trace_item in session["trace"]
+        if int(trace_item.get("round_index", 0)) <= target_round_index
+    ]
+    session["checkpoints"] = checkpoints[:target_checkpoint_index + 1]
+    _persist_session(req.session_id, session)
+
+    return {
+        "mode": "rewind",
+        "rewound_from_round": completed_rounds,
+        "clicked_user_round_index": clicked_user_round_index,
+        "target_round_index": target_round_index,
+        **_build_session_view(req.session_id, session),
     }
 
 
@@ -894,6 +1296,7 @@ def review_session(
         "persist_to_db": bool(req.persist_to_db),
         "reviewed_at": _utc_now_iso(),
     }
+    _persist_session(req.session_id, session)
     return {
         "ok": True,
         "session_id": req.session_id,

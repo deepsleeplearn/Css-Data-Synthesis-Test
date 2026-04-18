@@ -932,12 +932,20 @@ class ServiceDialoguePolicy:
                 )
 
         if observed_answer_key:
+            post_answer_trace: list[str] = []
+            if current_step:
+                raw_post_answer_trace = current_step.get("post_answer_trace", [])
+                if isinstance(raw_post_answer_trace, list):
+                    post_answer_trace = [
+                        str(item).strip() for item in raw_post_answer_trace if str(item).strip()
+                    ]
             return self._advance_product_routing_with_answer(
                 scenario=scenario,
                 collected_slots=collected_slots,
                 slot_updates=slot_updates,
                 runtime_state=runtime_state,
                 observed_answer_key=observed_answer_key,
+                post_answer_trace=post_answer_trace,
             )
 
         runtime_state.product_routing_step_index += 1
@@ -3795,8 +3803,13 @@ class ServiceDialoguePolicy:
         slot_updates: dict[str, str],
         runtime_state: ServiceRuntimeState,
         observed_answer_key: str,
+        post_answer_trace: list[str] | None = None,
     ) -> ServicePolicyResult:
         runtime_state.product_routing_observed_trace.append(observed_answer_key)
+        if post_answer_trace:
+            runtime_state.product_routing_observed_trace.extend(
+                item for item in post_answer_trace if str(item).strip()
+            )
         next_steps, result = next_product_routing_steps_from_observed_trace(
             runtime_state.product_routing_observed_trace,
             model_hint=scenario.product.model,

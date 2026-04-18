@@ -5,6 +5,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 
 import frontend.server as frontend_server
 from multi_agent_data_synthesis.scenario_factory import ScenarioFactory
+from multi_agent_data_synthesis.product_routing import ROUTING_RESULT_HUMAN
 from tests.test_manual_test import build_scenario_payload
 
 
@@ -57,6 +59,7 @@ class FrontendServerTests(unittest.TestCase):
             max_rounds=6,
             installation_request_probability=0.5,
         )
+        frontend_server.SESSION_REDIS_URL = ""
         frontend_server.factory = ScenarioFactory()
         self.previous_accounts_file = os.environ.get("FRONTEND_REGISTERED_ACCOUNTS_FILE")
         os.environ["FRONTEND_REGISTERED_ACCOUNTS_FILE"] = str(self.accounts_file)
@@ -108,6 +111,11 @@ class FrontendServerTests(unittest.TestCase):
         self.assertIn("可用命令: /help, /slots, /state, /quit", payload["initial_lines"])
         self.assertIn("未设置已知地址，客服将按询问流程采集地址。", payload["initial_lines"])
         self.assertFalse(payload["persist_to_db_default"])
+        self.assertEqual(len(frontend_server.sessions[payload["session_id"]]["checkpoints"]), 1)
+        self.assertEqual(
+            frontend_server.sessions[payload["session_id"]]["checkpoints"][0]["completed_rounds"],
+            0,
+        )
 
     def test_commands_do_not_consume_round_and_quit_closes_session(self):
         self._login()
@@ -186,6 +194,274 @@ class FrontendServerTests(unittest.TestCase):
         self.assertTrue(reply_payload["session_closed"])
         self.assertIn("--- 已达到最大轮次，会话结束 ---", reply_payload["output_lines"])
         self.assertTrue(reply_payload["review_required"])
+
+    def test_rewind_endpoint_restores_session_snapshot_and_reopens_session(self):
+        self._login()
+        start_payload = self.client.post(
+            "/api/session/start",
+            json={"scenario_id": "frontend_case"},
+        ).json()
+        session_id = start_payload["session_id"]
+
+        first_reply = self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "美的空气能热水器需要维修"},
+        )
+        self.assertEqual(first_reply.status_code, 200)
+        first_round_snapshot = dict(frontend_server.sessions[session_id]["trace"][0]["collected_slots_snapshot"])
+        first_round_state = dict(frontend_server.sessions[session_id]["trace"][0]["runtime_state_snapshot"])
+        self.assertEqual(len(frontend_server.sessions[session_id]["checkpoints"]), 2)
+
+        second_reply = self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "我姓张"},
+        )
+        self.assertEqual(second_reply.status_code, 200)
+        self.assertEqual(second_reply.json()["next_round_index"], 3)
+        self.assertEqual(len(frontend_server.sessions[session_id]["checkpoints"]), 3)
+
+        quit_payload = self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "/quit"},
+        ).json()
+        self.assertTrue(quit_payload["session_closed"])
+        self.assertTrue(quit_payload["review_required"])
+
+        rewind_response = self.client.post(
+            "/api/session/rewind",
+            json={"session_id": session_id, "clicked_user_round_index": 2},
+        )
+        self.assertEqual(rewind_response.status_code, 200)
+        rewind_payload = rewind_response.json()
+
+        self.assertEqual(rewind_payload["mode"], "rewind")
+        self.assertEqual(rewind_payload["clicked_user_round_index"], 2)
+        self.assertEqual(rewind_payload["status"], "active")
+        self.assertFalse(rewind_payload["session_closed"])
+        self.assertFalse(rewind_payload["review_required"])
+        self.assertEqual(rewind_payload["next_round_index"], 2)
+        self.assertEqual(len(rewind_payload["transcript"]), 2)
+        self.assertEqual(rewind_payload["collected_slots"], first_round_snapshot)
+        self.assertEqual(rewind_payload["runtime_state"], first_round_state)
+        self.assertTrue(all(entry["round_count_snapshot"] <= 1 for entry in rewind_payload["terminal_entries"]))
+        self.assertNotIn("会话已结束。", [entry["text"] for entry in rewind_payload["terminal_entries"]])
+
+        session = frontend_server.sessions[session_id]
+        self.assertEqual(session["status"], "active")
+        self.assertEqual(session["aborted_reason"], "")
+        self.assertEqual(session["ended_at"], "")
+        self.assertEqual(len(session["trace"]), 1)
+        self.assertEqual(len(session["checkpoints"]), 2)
+        self.assertEqual(len(session["transcript"]), 2)
+        self.assertEqual(session["collected_slots"], first_round_snapshot)
+        self.assertEqual(asdict(session["runtime_state"]), first_round_state)
+
+    def test_rewind_to_initial_checkpoint_clears_all_dialogue(self):
+        self._login()
+        start_payload = self.client.post(
+            "/api/session/start",
+            json={"scenario_id": "frontend_case"},
+        ).json()
+        session_id = start_payload["session_id"]
+
+        reply_response = self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "美的空气能热水器需要维修"},
+        )
+        self.assertEqual(reply_response.status_code, 200)
+
+        rewind_response = self.client.post(
+            "/api/session/rewind",
+            json={"session_id": session_id, "clicked_user_round_index": 1},
+        )
+        self.assertEqual(rewind_response.status_code, 200)
+        rewind_payload = rewind_response.json()
+
+        self.assertEqual(rewind_payload["status"], "active")
+        self.assertEqual(rewind_payload["next_round_index"], 1)
+        self.assertEqual(rewind_payload["transcript"], [])
+        self.assertEqual(len(rewind_payload["terminal_entries"]), 8)
+        self.assertEqual(frontend_server.sessions[session_id]["checkpoints"][0]["completed_rounds"], 0)
+        self.assertEqual(len(frontend_server.sessions[session_id]["checkpoints"]), 1)
+
+    def test_rewind_clicked_third_user_round_restores_second_round_checkpoint(self):
+        self._login()
+        start_payload = self.client.post(
+            "/api/session/start",
+            json={"scenario_id": "frontend_case"},
+        ).json()
+        session_id = start_payload["session_id"]
+
+        self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "你好"},
+        )
+        self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "是的"},
+        )
+        third_round_response = self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "不知道"},
+        )
+        self.assertEqual(third_round_response.status_code, 200)
+        fourth_round_response = self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "单独生活用水的"},
+        )
+        self.assertEqual(fourth_round_response.status_code, 200)
+
+        rewind_response = self.client.post(
+            "/api/session/rewind",
+            json={"session_id": session_id, "clicked_user_round_index": 3},
+        )
+        self.assertEqual(rewind_response.status_code, 200)
+        rewind_payload = rewind_response.json()
+
+        self.assertEqual(rewind_payload["clicked_user_round_index"], 3)
+        self.assertEqual(rewind_payload["target_round_index"], 2)
+        self.assertEqual(rewind_payload["next_round_index"], 3)
+        self.assertEqual(len(rewind_payload["transcript"]), 4)
+        self.assertEqual(rewind_payload["transcript"][-1]["speaker"], "客服")
+        self.assertEqual(rewind_payload["transcript"][-1]["round_index"], 2)
+        self.assertEqual(len(frontend_server.sessions[session_id]["checkpoints"]), 3)
+
+    def test_rewind_clicked_second_user_round_restores_first_round_checkpoint(self):
+        self._login()
+        start_payload = self.client.post(
+            "/api/session/start",
+            json={"scenario_id": "frontend_case"},
+        ).json()
+        session_id = start_payload["session_id"]
+
+        self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "你好"},
+        )
+        self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "是的"},
+        )
+
+        rewind_response = self.client.post(
+            "/api/session/rewind",
+            json={
+                "session_id": session_id,
+                "clicked_user_round_index": 2,
+                "restore_checkpoint_index": 1,
+            },
+        )
+        self.assertEqual(rewind_response.status_code, 200)
+        rewind_payload = rewind_response.json()
+
+        self.assertEqual(rewind_payload["clicked_user_round_index"], 2)
+        self.assertEqual(rewind_payload["target_round_index"], 1)
+        self.assertEqual(rewind_payload["next_round_index"], 2)
+        self.assertEqual(len(rewind_payload["transcript"]), 2)
+        self.assertEqual(rewind_payload["transcript"][-1]["speaker"], "客服")
+        self.assertEqual(rewind_payload["transcript"][-1]["round_index"], 1)
+
+    def test_rewind_accepts_legacy_target_round_index_payload(self):
+        self._login()
+        start_payload = self.client.post(
+            "/api/session/start",
+            json={"scenario_id": "frontend_case"},
+        ).json()
+        session_id = start_payload["session_id"]
+
+        self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "你好"},
+        )
+        self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "是的"},
+        )
+
+        rewind_response = self.client.post(
+            "/api/session/rewind",
+            json={
+                "session_id": session_id,
+                "target_round_index": 1,
+            },
+        )
+        self.assertEqual(rewind_response.status_code, 200)
+        rewind_payload = rewind_response.json()
+
+        self.assertEqual(rewind_payload["clicked_user_round_index"], 2)
+        self.assertEqual(rewind_payload["target_round_index"], 1)
+        self.assertEqual(rewind_payload["next_round_index"], 2)
+        self.assertEqual(len(rewind_payload["transcript"]), 2)
+
+    def test_rewind_restores_product_routing_plan_from_checkpoint(self):
+        self._login()
+        start_payload = self.client.post(
+            "/api/session/start",
+            json={"scenario_id": "frontend_case"},
+        ).json()
+        session_id = start_payload["session_id"]
+        session = frontend_server.sessions[session_id]
+        frontend_server.config.product_routing_enabled = True
+        frontend_server.config.product_routing_apply_probability = 1.0
+        session["policy"] = frontend_server._build_service_policy()
+        session["scenario"].hidden_context["interactive_test_freeform"] = True
+        session["scenario"].hidden_context["product_routing_plan"] = {
+            "enabled": True,
+            "result": "",
+            "trace": [],
+            "summary": "",
+            "steps": [
+                {
+                    "prompt_key": "brand_or_series",
+                    "prompt": "请问您的空气能是什么具体品牌或系列呢？",
+                    "answer_key": "entry.unknown",
+                    "answer_value": "不知道品牌或系列",
+                    "answer_instruction": "自然表达自己不知道品牌或系列。",
+                }
+            ],
+        }
+        session["scenario"].hidden_context["product_routing_result"] = ""
+        session["checkpoints"][0]["scenario"] = session["scenario"].to_dict()
+
+        self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "你好"},
+        )
+        self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "是的"},
+        )
+        self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "不清楚"},
+        )
+        self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "单独生活用水的"},
+        )
+
+        rewind_response = self.client.post(
+            "/api/session/rewind",
+            json={
+                "session_id": session_id,
+                "clicked_user_round_index": 3,
+                "restore_checkpoint_index": 2,
+            },
+        )
+        self.assertEqual(rewind_response.status_code, 200)
+        self.assertEqual(
+            frontend_server.sessions[session_id]["scenario"].hidden_context["product_routing_plan"]["steps"][0]["prompt_key"],
+            "brand_or_series",
+        )
+
+        reply_response = self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "酷风的"},
+        )
+        self.assertEqual(reply_response.status_code, 200)
+        reply_payload = reply_response.json()
+        self.assertEqual(reply_payload["status"], "transferred")
+        self.assertEqual(reply_payload["collected_slots"]["product_routing_result"], ROUTING_RESULT_HUMAN)
 
     def test_review_endpoint_persists_session_to_sqlite_when_enabled(self):
         self._login()
@@ -378,10 +654,13 @@ class FrontendServerTests(unittest.TestCase):
         self.assertEqual(index_response.status_code, 200)
         self.assertIn('id="review-close-btn"', index_response.text)
         self.assertIn('id="review-toggle-btn"', index_response.text)
+        self.assertIn("点击任意用户行可删除该行及其下方所有内容", index_response.text)
 
         app_response = self.client.get("/static/app.js")
         self.assertEqual(app_response.status_code, 200)
         self.assertIn("打开评审", app_response.text)
+        self.assertIn("/api/session/rewind", app_response.text)
+        self.assertIn("terminal-turn-trigger", app_response.text)
         self.assertNotIn("/api/session/review/dismiss", app_response.text)
 
     def test_user_requested_human_handoff_closes_session_and_keeps_review_flow(self):

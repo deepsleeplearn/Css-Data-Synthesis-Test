@@ -7,12 +7,14 @@ from multi_agent_data_synthesis.address_utils import extract_address_components
 from multi_agent_data_synthesis.agents import ServiceAgent, UserAgent
 from multi_agent_data_synthesis.product_routing import (
     PROMPT_BRAND_OR_SERIES,
+    PROMPT_PURCHASE_OR_PROPERTY,
     PROMPT_USAGE_SCENE,
     PROMPT_USAGE_PURPOSE,
     ROUTING_RESULT_BUILDING,
     ROUTING_RESULT_HOME,
     build_product_routing_plan,
     infer_product_routing_answer_key,
+    next_product_routing_steps_from_observed_trace,
 )
 from multi_agent_data_synthesis.prompts import build_user_agent_messages
 from multi_agent_data_synthesis.schemas import DialogueTurn, Scenario
@@ -201,8 +203,88 @@ class ProductRoutingPlanTests(unittest.TestCase):
 
         self.assertEqual(answer_key, "property_year.unknown")
 
+    def test_next_product_routing_steps_routes_unknown_model_lookup_to_purchase_question(self):
+        next_steps, result = next_product_routing_steps_from_observed_trace(
+            ["entry.model", "model_lookup.unknown"],
+            model_hint="KF66/200L-MI(E4)",
+        )
+
+        self.assertEqual(result, "")
+        self.assertEqual(len(next_steps), 1)
+        self.assertEqual(next_steps[0]["prompt_key"], "purchase_or_property")
+        self.assertEqual(next_steps[0]["prompt"], PROMPT_PURCHASE_OR_PROPERTY)
+
+    def test_next_product_routing_steps_routes_building_model_lookup_directly_to_building(self):
+        next_steps, result = next_product_routing_steps_from_observed_trace(
+            ["entry.model", "model_lookup.building"],
+            model_hint="KF66/200L-MI(E4)",
+        )
+
+        self.assertEqual(next_steps, [])
+        self.assertEqual(result, ROUTING_RESULT_BUILDING)
+
 
 class ProductRoutingServicePolicyTests(unittest.TestCase):
+    def test_service_policy_uses_hidden_model_lookup_trace_after_user_provides_model_but_lookup_is_unknown(self):
+        plan = {
+            "enabled": True,
+            "result": ROUTING_RESULT_HOME,
+            "trace": ["entry.model", "model_lookup.unknown", "purchase.self_buy"],
+            "summary": "entry.model -> model_lookup.unknown -> purchase.self_buy -> 家用 + 可直接确认机型",
+            "steps": [
+                {
+                    "prompt_key": "brand_or_series",
+                    "prompt": PROMPT_BRAND_OR_SERIES,
+                    "answer_key": "entry.model",
+                    "answer_value": "KF66/200L-MI(E4)",
+                    "answer_instruction": "自然提供一个具体型号，不要说自己不知道。",
+                    "post_answer_trace": ["model_lookup.unknown"],
+                }
+            ],
+        }
+        scenario = build_scenario_with_routing(plan)
+        policy = ServiceDialoguePolicy(ok_prefix_probability=0.0, rng=random.Random(0))
+        state = ServiceRuntimeState(
+            expected_product_routing_response=True,
+            product_routing_step_index=0,
+            product_routing_observed_trace=[],
+        )
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(
+                    speaker="service",
+                    text=PROMPT_BRAND_OR_SERIES,
+                    round_index=2,
+                ),
+                DialogueTurn(
+                    speaker="user",
+                    text="型号是KF66/200L-MI(E4)",
+                    round_index=3,
+                ),
+            ],
+            collected_slots={
+                "issue_description": "热水不稳定",
+                "surname": "",
+                "phone": "",
+                "address": "",
+                "request_type": "fault",
+                "phone_contactable": "",
+                "phone_contact_owner": "",
+                "phone_collection_attempts": "",
+                "product_arrived": "",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, PROMPT_PURCHASE_OR_PROPERTY)
+        self.assertEqual(
+            state.product_routing_observed_trace,
+            ["entry.model", "model_lookup.unknown"],
+        )
+        self.assertTrue(state.expected_product_routing_response)
+
     def test_service_policy_inserts_routing_between_opening_and_fault_question(self):
         plan = {
             "enabled": True,
