@@ -146,6 +146,26 @@ GENERIC_MIDEA_PRODUCT_TOKENS = (
     "系列",
     "款",
 )
+GENERIC_MIDEA_UNKNOWN_PATTERNS = (
+    r"^(?:我)?(?:只|就)?知道(?:是)?美的(?:的)?(?:啊|呀|吧|呢|哈|嘛)?$",
+    r"^(?:只|就)知道美的(?:的)?(?:啊|呀|吧|呢|哈|嘛)?$",
+)
+HEATING_USAGE_TOKENS = ("采暖", "供暖", "地暖", "暖气", "取暖", "制热")
+HEATING_NEGATION_PREFIXES = (
+    "不",
+    "没",
+    "没有",
+    "无",
+    "非",
+    "不是",
+    "并非",
+    "不带",
+    "没带",
+    "没有带",
+    "不用",
+    "不做",
+    "不搞",
+)
 ROUTING_SEGMENT_SPLIT_PATTERN = re.compile(r"[，,。！？!?；;、]")
 ROUTING_PREFIX_PATTERNS = (
     r"^(这个|那个|这边|那边|我这边|我家这个|我们这个)",
@@ -395,6 +415,8 @@ def _is_generic_midea_brand_expression(text: str) -> bool:
         return False
     if re.search(r"(不是|非)美的", normalized):
         return False
+    if any(re.fullmatch(pattern, normalized) for pattern in GENERIC_MIDEA_UNKNOWN_PATTERNS):
+        return True
     for token in GENERIC_MIDEA_PRODUCT_TOKENS:
         normalized = normalized.replace(token, "")
     normalized = re.sub(r"(吧|呢|啊|呀|哈|嘛|啦)+$", "", normalized)
@@ -599,6 +621,20 @@ def _contains_water_usage_intent(text: str) -> bool:
     )
 
 
+def _contains_positive_heating_usage_intent(text: str) -> bool:
+    normalized = re.sub(r"\s+", "", _normalize_text(text))
+    if not normalized:
+        return False
+
+    for token in HEATING_USAGE_TOKENS:
+        for match in re.finditer(re.escape(token), normalized):
+            prefix = normalized[max(0, match.start() - 4) : match.start()]
+            if any(prefix.endswith(neg) for neg in HEATING_NEGATION_PREFIXES):
+                continue
+            return True
+    return False
+
+
 def _simple_chinese_number_to_int(text: str) -> int | None:
     normalized = str(text or "").strip()
     if not normalized:
@@ -761,7 +797,7 @@ def infer_product_routing_answer_key(prompt_key: str, user_text: str) -> str:
         if prompt_key == "usage_purpose":
             if _contains_unknown_intent(compact):
                 return "purpose.unknown"
-            has_heating = any(token in compact for token in ("采暖", "供暖", "地暖", "暖气", "取暖", "制热"))
+            has_heating = _contains_positive_heating_usage_intent(compact)
             has_water = _contains_water_usage_intent(compact)
             if has_heating and has_water:
                 return "purpose.both"

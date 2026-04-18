@@ -128,8 +128,18 @@ class ProductRoutingPlanTests(unittest.TestCase):
 
         self.assertEqual(answer_key, "entry.unknown")
 
+    def test_infer_product_routing_answer_key_maps_only_knows_midea_brand_to_unknown_entry_branch(self):
+        answer_key = infer_product_routing_answer_key("brand_or_series", "我就知道是美的的啊")
+
+        self.assertEqual(answer_key, "entry.unknown")
+
     def test_infer_product_routing_answer_key_maps_colloquial_water_usage_to_water_branch(self):
         answer_key = infer_product_routing_answer_key("usage_purpose", "单独生活的")
+
+        self.assertEqual(answer_key, "purpose.water")
+
+    def test_infer_product_routing_answer_key_maps_negated_heating_with_bathing_to_water_branch(self):
+        answer_key = infer_product_routing_answer_key("usage_purpose", "我们家好像就用它来洗澡，应该没采暖功能")
 
         self.assertEqual(answer_key, "purpose.water")
 
