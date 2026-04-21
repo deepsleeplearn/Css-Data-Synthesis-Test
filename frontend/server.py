@@ -6,16 +6,21 @@ import sys
 import threading
 import traceback
 import uuid
+import argparse
 import hashlib
 import os
 import re
 import secrets
 import copy
+import subprocess
+import atexit
+import time
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
+import requests
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Response, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -40,6 +45,9 @@ try:
         _resolve_interactive_max_rounds,
     )
     from css_data_synthesis_test.config import load_config
+    from css_data_synthesis_test.function_call import (
+        build_address_model_observation,
+    )
     from css_data_synthesis_test.hidden_settings_tool import (
         HiddenSettingsTool,
         generate_local_customer_address,
@@ -52,6 +60,11 @@ try:
         MANUAL_TEST_SHOW_STATE_COMMAND,
         _manual_command_token,
         _sanitize_manual_user_text,
+    )
+    from css_data_synthesis_test.punctuation_service import (
+        configure_punctuation_service,
+        get_punctuation_service,
+        punctuate_text,
     )
     from css_data_synthesis_test.product_routing import (
         PROMPT_BRAND_OR_SERIES,
@@ -70,9 +83,14 @@ try:
         USER_SPEAKER,
         DialogueTurn,
         Scenario,
+        build_display_transcript,
         effective_required_slots,
     )
-    from css_data_synthesis_test.service_policy import ServiceDialoguePolicy, ServiceRuntimeState
+    from css_data_synthesis_test.service_policy import (
+        ServiceDialoguePolicy,
+        ServicePolicyResult,
+        ServiceRuntimeState,
+    )
 except ImportError as exc:  # pragma: no cover
     print(f"Error: Could not import core modules. {exc}")
     print(f"sys.path: {sys.path}")
@@ -108,6 +126,11 @@ CHAT_STORAGE_PATH = PROJECT_ROOT / "outputs" / "frontend_chat_messages.json"
 CHAT_RECALL_STORAGE_PATH = PROJECT_ROOT / "outputs" / "frontend_chat_message_recalls.json"
 CHAT_STORAGE_LOCK = threading.RLock()
 CHAT_PRESENCE_TTL = timedelta(seconds=int(os.getenv("FRONTEND_CHAT_PRESENCE_TTL_SECONDS", "30") or "30"))
+LOCAL_PUNCT_API_PORT = int(os.getenv("LOCAL_PUNCT_API_PORT", "8797") or "8797")
+LOCAL_PUNCT_API_HOST = os.getenv("LOCAL_PUNCT_API_HOST", "127.0.0.1").strip() or "127.0.0.1"
+LOCAL_PUNCT_API_TIMEOUT_SECONDS = float(os.getenv("LOCAL_PUNCT_API_TIMEOUT_SECONDS", "10") or "10")
+LOCAL_PUNCT_API_URL = f"http://{LOCAL_PUNCT_API_HOST}:{LOCAL_PUNCT_API_PORT}/predict"
+_local_punctuation_api_process: subprocess.Popen[str] | None = None
 chat_state: dict[str, Any] = {
     "messages": [],
     "last_message_id": 0,
@@ -172,11 +195,21 @@ class RespondRequest(BaseModel):
     text: str
 
 
+class PunctuationRequest(BaseModel):
+    text: str
+
+
 class RewindSessionRequest(BaseModel):
     session_id: str
     clicked_user_round_index: int = 0
     restore_checkpoint_index: int | None = None
     target_round_index: int | None = None
+
+
+class AddressIeDisplayRequest(BaseModel):
+    session_id: str
+    round_index: int
+    enabled: bool = True
 
 
 class LoginRequest(BaseModel):
@@ -218,6 +251,113 @@ def _registered_accounts_file() -> Path:
 
 def _current_display_timestamp() -> str:
     return datetime.now(DISPLAY_TIMEZONE).strftime(DISPLAY_TIME_FORMAT)
+
+
+def _stop_local_punctuation_api() -> None:
+    global _local_punctuation_api_process
+    process = _local_punctuation_api_process
+    if process is None:
+        return
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            process.kill()
+    _local_punctuation_api_process = None
+
+
+atexit.register(_stop_local_punctuation_api)
+
+
+def _wait_for_local_punctuation_api(timeout_seconds: float = 15.0) -> None:
+    deadline = time.time() + max(timeout_seconds, 1.0)
+    last_error = ""
+    while time.time() < deadline:
+        try:
+            response = requests.get(
+                f"http://{LOCAL_PUNCT_API_HOST}:{LOCAL_PUNCT_API_PORT}/health",
+                timeout=1.5,
+            )
+            if response.status_code < 400:
+                return
+            last_error = f"status={response.status_code}, body={response.text[:200]}"
+        except Exception as exc:
+            last_error = str(exc)
+        time.sleep(0.25)
+    raise RuntimeError(f"local punctuation api not ready: {last_error}")
+
+
+def _start_local_punctuation_api(*, model_dir: str = "") -> None:
+    global _local_punctuation_api_process
+    if _local_punctuation_api_process is not None and _local_punctuation_api_process.poll() is None:
+        return
+    env = os.environ.copy()
+    if model_dir:
+        env["PUNCT_MODEL_DIR"] = model_dir
+    command = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "css_data_synthesis_test.local_punctuation_api:app",
+        "--host",
+        LOCAL_PUNCT_API_HOST,
+        "--port",
+        str(LOCAL_PUNCT_API_PORT),
+    ]
+    _local_punctuation_api_process = subprocess.Popen(
+        command,
+        cwd=str(PROJECT_ROOT),
+        env=env,
+        text=True,
+    )
+    _wait_for_local_punctuation_api()
+    print(
+        "[punctuation] local api started url=%s pid=%s"
+        % (LOCAL_PUNCT_API_URL, _local_punctuation_api_process.pid if _local_punctuation_api_process else "")
+    )
+
+
+def _punctuate_via_local_api(text: str) -> str:
+    response = requests.post(
+        LOCAL_PUNCT_API_URL,
+        json={"text": text},
+        timeout=LOCAL_PUNCT_API_TIMEOUT_SECONDS,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"status={response.status_code}, body={response.text[:300]}")
+    payload = response.json()
+    punctuated_text = str(payload.get("punctuated_text") or "").strip()
+    if punctuated_text:
+        return punctuated_text
+    raise RuntimeError(f"empty local punctuation response: {response.text[:300]}")
+
+
+def _punctuate_user_text_for_session(text: str) -> str:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return ""
+    try:
+        punct_service = get_punctuation_service()
+        if punct_service.backend == "local":
+            punctuated = _punctuate_via_local_api(normalized)
+        else:
+            punctuated = punctuate_text(normalized)
+        final_text = str(punctuated or normalized).strip()
+        print(
+            "[punctuation] backend=%s input=%r output=%r changed=%s"
+            % (
+                punct_service.backend,
+                normalized,
+                final_text,
+                str(final_text != normalized).lower(),
+            )
+        )
+        return final_text
+    except Exception as exc:  # pragma: no cover
+        print(f"[punctuation] failed input={normalized!r} error={exc!r}")
+        print(f"[punctuation] fallback output={normalized!r}")
+        return normalized
 
 
 def _normalize_display_timestamp(value: str) -> str:
@@ -890,7 +1030,7 @@ def _review_prompt_payload(session: dict[str, Any]) -> dict[str, Any]:
 
 
 def _serialize_transcript(transcript: list[DialogueTurn]) -> list[dict[str, Any]]:
-    return [turn.to_display_dict() for turn in transcript]
+    return build_display_transcript(transcript)
 
 
 def _serialize_turns_for_storage(transcript: list[DialogueTurn]) -> list[dict[str, Any]]:
@@ -911,6 +1051,11 @@ def _deserialize_turns_from_storage(items: list[dict[str, Any]] | None) -> list[
                 round_index=int(item.get("round_index", 0) or 0),
                 model_intent_inference_used=bool(item.get("model_intent_inference_used", False)),
                 previous_user_intent_model_inference_used=item.get("previous_user_intent_model_inference_used"),
+                post_display_lines=[
+                    str(line)
+                    for line in item.get("post_display_lines", [])
+                    if str(line).strip()
+                ] if isinstance(item.get("post_display_lines"), list) else [],
             )
         )
     return turns
@@ -1119,6 +1264,10 @@ def _append_terminal_lines(
 def _append_turn_entry(session: dict[str, Any], turn: DialogueTurn) -> None:
     display_turn = turn.to_display_dict()
     terminal_entries = session.setdefault("terminal_entries", [])
+    has_address_ie_display = any(
+        str(line).strip().startswith("function_call:")
+        for line in turn.post_display_lines
+    )
     entry = {
         "entry_type": "turn",
         "tone": "service" if turn.speaker == SERVICE_SPEAKER else "user",
@@ -1127,14 +1276,185 @@ def _append_turn_entry(session: dict[str, Any], turn: DialogueTurn) -> None:
         "round_index": display_turn["round_index"],
         "round_label": display_turn["round_label"],
         "round_count_snapshot": display_turn["round_index"],
+        "has_address_ie_display": has_address_ie_display,
     }
     if turn.speaker == USER_SPEAKER:
         entry["restore_checkpoint_index"] = max(int(display_turn["round_index"]) - 1, 0)
     terminal_entries.append(entry)
+    for line in turn.post_display_lines:
+        normalized_line = str(line).strip()
+        if not normalized_line:
+            continue
+        terminal_entries.append(
+            {
+                "entry_type": "message",
+                "tone": "system",
+                "text": normalized_line,
+                "round_count_snapshot": display_turn["round_index"],
+            }
+        )
+
+
+def _rebuild_terminal_entries_from_transcript(
+    session: dict[str, Any],
+    *,
+    keep_line_entries: bool = True,
+) -> None:
+    line_entries_by_round: dict[int, list[dict[str, Any]]] = {}
+    if keep_line_entries:
+        for entry in session.get("terminal_entries", []):
+            if str(entry.get("entry_type", "")).strip() != "line":
+                continue
+            round_snapshot = int(entry.get("round_count_snapshot", 0) or 0)
+            line_entries_by_round.setdefault(round_snapshot, []).append(dict(entry))
+
+    rebuilt_entries: list[dict[str, Any]] = list(line_entries_by_round.get(0, []))
+    session["terminal_entries"] = rebuilt_entries
+    transcript = list(session.get("transcript", []))
+    for index, turn in enumerate(transcript):
+        _append_turn_entry(session, turn)
+        current_round_index = int(turn.round_index or 0)
+        next_round_index = int(transcript[index + 1].round_index or 0) if index + 1 < len(transcript) else None
+        if next_round_index != current_round_index:
+            session["terminal_entries"].extend(line_entries_by_round.get(current_round_index, []))
 
 
 def _copy_terminal_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [dict(entry) for entry in entries]
+
+
+def _append_address_ie_display_lines(
+    *,
+    policy: ServiceDialoguePolicy,
+    turn: DialogueTurn,
+    transcript: list[DialogueTurn],
+    runtime_state: ServiceRuntimeState,
+) -> dict[str, Any] | None:
+    if not policy.should_insert_address_ie_function_call(
+        user_text=turn.text,
+        transcript=transcript,
+        runtime_state=runtime_state,
+    ):
+        return None
+    observation = build_address_model_observation(
+        transcript,
+        client=llm_client,
+    )
+    turn.post_display_lines.append(policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY)
+    turn.post_display_lines.append(f"observation: {json.dumps(observation, ensure_ascii=False)}")
+    return observation
+
+
+def _address_ie_post_display_lines_for_transcript(transcript: list[DialogueTurn]) -> list[str]:
+    observation = build_address_model_observation(
+        transcript,
+        client=llm_client,
+    )
+    return [
+        ServiceDialoguePolicy.ADDRESS_IE_FUNCTION_CALL_DISPLAY,
+        f"observation: {json.dumps(observation, ensure_ascii=False)}",
+    ]
+
+
+def _find_user_turn_by_round_index(transcript: list[DialogueTurn], round_index: int) -> tuple[int, DialogueTurn] | None:
+    for index, turn in enumerate(transcript):
+        if turn.speaker == USER_SPEAKER and int(turn.round_index) == int(round_index):
+            return index, turn
+    return None
+
+
+def _apply_manual_address_ie_display_lines(
+    session: dict[str, Any],
+    *,
+    round_index: int,
+    enabled: bool,
+) -> bool:
+    transcript = session.get("transcript", [])
+    turn_match = _find_user_turn_by_round_index(transcript, round_index)
+    if turn_match is None:
+        raise HTTPException(status_code=404, detail="未找到对应的用户轮次。")
+
+    turn_position, user_turn = turn_match
+    preserved_lines = [
+        str(line).strip()
+        for line in user_turn.post_display_lines
+        if str(line).strip()
+        and not str(line).strip().startswith("function_call:")
+        and not str(line).strip().startswith("observation:")
+    ]
+    if not enabled:
+        changed = preserved_lines != list(user_turn.post_display_lines)
+        user_turn.post_display_lines = preserved_lines
+    else:
+        observation_lines = _address_ie_post_display_lines_for_transcript(transcript[: turn_position + 1])
+        updated_lines = preserved_lines + observation_lines
+        changed = updated_lines != list(user_turn.post_display_lines)
+        user_turn.post_display_lines = updated_lines
+
+    if not changed:
+        return False
+
+    _rebuild_terminal_entries_from_transcript(session)
+    checkpoints = session.get("checkpoints", [])
+    for checkpoint in checkpoints:
+        if int(checkpoint.get("source_round_index", 0) or 0) < int(round_index):
+            continue
+        checkpoint_transcript = _deserialize_turns_from_storage(checkpoint.get("transcript"))
+        checkpoint_turn_match = _find_user_turn_by_round_index(checkpoint_transcript, round_index)
+        if checkpoint_turn_match is None:
+            continue
+        checkpoint_turn_position, checkpoint_user_turn = checkpoint_turn_match
+        checkpoint_preserved_lines = [
+            str(line).strip()
+            for line in checkpoint_user_turn.post_display_lines
+            if str(line).strip()
+            and not str(line).strip().startswith("function_call:")
+            and not str(line).strip().startswith("observation:")
+        ]
+        if enabled:
+            checkpoint_observation_lines = _address_ie_post_display_lines_for_transcript(
+                checkpoint_transcript[: checkpoint_turn_position + 1]
+            )
+            checkpoint_user_turn.post_display_lines = checkpoint_preserved_lines + checkpoint_observation_lines
+        else:
+            checkpoint_user_turn.post_display_lines = checkpoint_preserved_lines
+        checkpoint["transcript"] = _serialize_turns_for_storage(checkpoint_transcript)
+        checkpoint_session = {"transcript": checkpoint_transcript, "terminal_entries": []}
+        _rebuild_terminal_entries_from_transcript(checkpoint_session)
+        checkpoint["terminal_entries"] = _copy_terminal_entries(checkpoint_session["terminal_entries"])
+    return True
+
+
+def _build_auto_address_confirmation_result(
+    *,
+    policy: ServiceDialoguePolicy,
+    runtime_state: ServiceRuntimeState,
+    observation: dict[str, Any] | None,
+) -> ServicePolicyResult | None:
+    if not isinstance(observation, dict):
+        return None
+    error_code = observation.get("error_code", 1)
+    try:
+        normalized_error_code = int(error_code)
+    except (TypeError, ValueError):
+        normalized_error_code = 1
+    if normalized_error_code != 0:
+        return None
+    confirmed_address = str(observation.get("address") or "").strip()
+    if not confirmed_address:
+        return None
+
+    runtime_state.expected_address_confirmation = True
+    runtime_state.awaiting_full_address = False
+    runtime_state.pending_address_confirmation = confirmed_address
+    runtime_state.partial_address_candidate = ""
+    runtime_state.address_vague_retry_count = 0
+    runtime_state.last_address_followup_prompt = ""
+    return ServicePolicyResult(
+        reply=policy._address_confirmation_prompt(confirmed_address),
+        slot_updates={},
+        is_ready_to_close=False,
+    )
 
 
 def _address_runtime_state_snapshot(
@@ -1817,6 +2137,23 @@ def get_fault_issue_categories(
     return {"categories": categories}
 
 
+@app.post("/api/punctuation/predict")
+def predict_punctuation(
+    req: PunctuationRequest,
+    current_user: dict[str, str] = Depends(_require_authenticated_user),
+):
+    _ = current_user
+    normalized = _sanitize_manual_user_text(req.text)
+    if not normalized:
+        return {"ok": True, "input_text": "", "punctuated_text": ""}
+    punctuated_text = _punctuate_user_text_for_session(normalized)
+    return {
+        "ok": True,
+        "input_text": normalized,
+        "punctuated_text": punctuated_text,
+    }
+
+
 @app.post("/api/session/start")
 def start_session(
     req: StartSessionRequest,
@@ -1978,23 +2315,39 @@ def respond(
             **_build_session_view(req.session_id, session),
         }
 
+    punctuated_user_text = (
+        sanitized if round_index == 1 else _punctuate_user_text_for_session(sanitized)
+    )
+
     scenario = session["scenario"]
     policy = session["policy"]
     required_slots = session["required_slots"]
     user_turn = DialogueTurn(
         speaker=USER_SPEAKER,
-        text=sanitized,
+        text=punctuated_user_text,
         round_index=round_index,
     )
     transcript.append(user_turn)
+    auto_address_observation = _append_address_ie_display_lines(
+        policy=policy,
+        turn=user_turn,
+        transcript=transcript,
+        runtime_state=runtime_state,
+    )
 
     try:
-        service_result = policy.respond(
-            scenario=scenario,
-            transcript=transcript,
-            collected_slots=collected_slots,
+        service_result = _build_auto_address_confirmation_result(
+            policy=policy,
             runtime_state=runtime_state,
+            observation=auto_address_observation,
         )
+        if service_result is None:
+            service_result = policy.respond(
+                scenario=scenario,
+                transcript=transcript,
+                collected_slots=collected_slots,
+                runtime_state=runtime_state,
+            )
     except Exception as exc:
         transcript.pop()
         traceback.print_exc()
@@ -2020,7 +2373,7 @@ def respond(
     session["trace"].append(
         {
             "round_index": round_index,
-            "user_text": sanitized,
+            "user_text": punctuated_user_text,
             "service_reply": service_result.reply,
             "used_model_intent_inference": used_model_intent_inference,
             "previous_user_intent_model_inference_used": used_model_intent_inference,
@@ -2129,6 +2482,29 @@ def rewind_session(
     }
 
 
+@app.post("/api/session/address-ie-display")
+def update_address_ie_display(
+    req: AddressIeDisplayRequest,
+    current_user: dict[str, str] = Depends(_require_authenticated_user),
+):
+    session = _session_state(req.session_id)
+    if session.get("review_submitted"):
+        raise HTTPException(status_code=409, detail="当前会话评审已提交，不能再修改展示内容。")
+    changed = _apply_manual_address_ie_display_lines(
+        session,
+        round_index=req.round_index,
+        enabled=bool(req.enabled),
+    )
+    _persist_session(req.session_id, session)
+    return {
+        "ok": True,
+        "changed": changed,
+        "round_index": int(req.round_index),
+        "enabled": bool(req.enabled),
+        **_build_session_view(req.session_id, session),
+    }
+
+
 @app.post("/api/session/review")
 def review_session(
     req: ReviewSessionRequest,
@@ -2191,4 +2567,28 @@ else:  # pragma: no cover
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    parser = argparse.ArgumentParser(description="Frontend manual test server")
+    parser.add_argument(
+        "--host",
+        default=os.getenv("FRONTEND_HOST", "0.0.0.0"),
+        help="Server host.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.getenv("FRONTEND_PORT", "8000") or "8000"),
+        help="Server port.",
+    )
+    args = parser.parse_args()
+    configure_punctuation_service()
+    if get_punctuation_service().backend == "local":
+        _start_local_punctuation_api(model_dir=str(get_punctuation_service().model_dir))
+    print(
+        "[punctuation] configured backend=%s model_dir=%s api_url=%s"
+        % (
+            get_punctuation_service().backend,
+            str(get_punctuation_service().model_dir),
+            get_punctuation_service().api_url,
+        )
+    )
+    uvicorn.run(app, host=args.host, port=args.port)

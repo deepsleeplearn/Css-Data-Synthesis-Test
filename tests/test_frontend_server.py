@@ -181,6 +181,21 @@ class FrontendServerTests(unittest.TestCase):
             ["不制热/无热水", "故障码（P1/P4/P2/P5/PF等）", "设备不启动/通电不工作"],
         )
 
+    def test_punctuation_predict_endpoint_returns_punctuated_text(self):
+        self._login()
+
+        with patch("frontend.server._punctuate_user_text_for_session", return_value="我在江苏省苏州市。"):
+            response = self.client.post(
+                "/api/punctuation/predict",
+                json={"text": "我在江苏省苏州市"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["input_text"], "我在江苏省苏州市")
+        self.assertEqual(payload["punctuated_text"], "我在江苏省苏州市。")
+
     def test_chat_state_lists_online_users_and_accepts_group_messages(self):
         self._login()
 
@@ -531,6 +546,28 @@ class FrontendServerTests(unittest.TestCase):
             json={"session_id": session_id, "text": "继续"},
         )
         self.assertEqual(closed_response.status_code, 409)
+
+    def test_session_respond_stores_and_displays_punctuated_user_text(self):
+        self._login()
+        start_payload = self.client.post(
+            "/api/session/start",
+            json={"scenario_id": "frontend_case"},
+        ).json()
+        session_id = start_payload["session_id"]
+
+        with patch("frontend.server._punctuate_user_text_for_session", return_value="美的空气能热水器需要维修。"):
+            reply_response = self.client.post(
+                "/api/session/respond",
+                json={"session_id": session_id, "text": "美的空气能热水器需要维修"},
+            )
+
+        self.assertEqual(reply_response.status_code, 200)
+        payload = reply_response.json()
+        session = frontend_server.sessions[session_id]
+        self.assertEqual(session["transcript"][0].text, "美的空气能热水器需要维修。")
+        self.assertEqual(session["trace"][0]["user_text"], "美的空气能热水器需要维修。")
+        self.assertEqual(payload["transcript"][0]["text"], "美的空气能热水器需要维修。")
+        self.assertEqual(payload["terminal_entries"][0]["text"], "美的空气能热水器需要维修。")
 
     def test_known_address_and_round_limit_follow_manual_mode(self):
         self._login()

@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from css_data_synthesis_test.address_utils import (
     BUILDING_SUFFIXES,
+    LANDMARK_LOCALITY_SUFFIXES,
     MUNICIPALITY_PREFIXES,
     PROVINCE_PREFIXES,
     AddressComponents,
@@ -86,6 +87,7 @@ class ServicePolicyResult:
 class ServiceDialoguePolicy:
     FAULT_ACKNOWLEDGEMENT_PREFIX = "非常抱歉，给您添麻烦了，我这就安排师傅上门维修"
     HUMAN_HANDOFF_REPLY = "请稍等，正在为您转接人工服务。"
+    ADDRESS_IE_FUNCTION_CALL_DISPLAY = 'function_call: [{"name": "ie", "arguments": {"entity_type": "addressInfo"}}]'
 
     SURNAME_PROMPT = "请问您贵姓？"
     CONTACTABLE_PROMPT = "请问您当前这个来电号码能联系到您吗？"
@@ -96,11 +98,16 @@ class ServiceDialoguePolicy:
     ADDRESS_PROMPT = "需要登记下您的地址，麻烦您完整的说下省、市、区、乡镇，精确到门牌号。"
     ADDRESS_PROVINCE_CITY_DISTRICT_STREET_FOLLOWUP_TEMPLATE = "好的，请问是{province}哪个城市的哪个区和街道呢？"
     ADDRESS_CITY_DISTRICT_FOLLOWUP_TEMPLATE = "好的，您是在{city}的哪个区县呢？具体小区门牌号也提供一下呢？"
+    ADDRESS_PROVINCE_CITY_FOLLOWUP_PROMPT = "好的，请问您是在哪个省哪个市呢？"
+    ADDRESS_FULL_REGION_FOLLOWUP_PROMPT = "好的，还请您说一下完整的省、市、区。"
+    ADDRESS_CITY_DISTRICT_ONLY_FOLLOWUP_PROMPT = "好的，麻烦您再补充一下是在哪个市和哪个区县呢？"
+    ADDRESS_CITY_DISTRICT_INFO_FOLLOWUP_PROMPT = "好的，麻烦您再补充一下城市和区县信息。"
+    ADDRESS_CITY_DISTRICT_TOWN_TEMPLATE = "好的，您是在{city}的哪个区和哪个街道呢？"
+    ADDRESS_FULL_REGION_COMPACT_FOLLOWUP_PROMPT = "请您说一下完整的省市区信息。"
     ADDRESS_REGION_STREET_FOLLOWUP_PROMPT = "好的，请您说一下省、市、区和街道。"
     ADDRESS_DISTRICT_STREET_FOLLOWUP_PROMPT = "好的，请您继续说一下区和街道。"
     ADDRESS_LOCALITY_FOLLOWUP_PROMPT = "请问具体是在哪个小区或村呢？尽量详细到门牌号。"
-    ADDRESS_BUILDING_FOLLOWUP_PROMPT = "请问是几栋几单元几楼几号呢？"
-    ADDRESS_HOUSE_NUMBER_FOLLOWUP_PROMPT = "好的，请您再说一下具体门牌号。"
+    ADDRESS_LOCALITY_WHICH_FOLLOWUP_PROMPT = "请问是在哪个小区或哪个村呢？尽量详细到门牌号。"
     ADDRESS_RURAL_DETAIL_FOLLOWUP_PROMPT = "好的，请您提供一下详细的地址，具体到门牌号。"
     ADDRESS_CONFIRMATION_TEMPLATE = "跟您确认一下，地址是{address}，对吗？"
     KNOWN_ADDRESS_CONFIRMATION_TEMPLATE = "您的地址是{address}，对吗？"
@@ -122,11 +129,16 @@ class ServiceDialoguePolicy:
     ADDRESS_CITY_DISTRICT_FOLLOWUP_TEMPLATE: PromptConfig = [
         ("好的，您是在{city}的哪个区县呢？具体小区门牌号也提供一下呢？", 1.0)
     ]
+    ADDRESS_PROVINCE_CITY_FOLLOWUP_PROMPT: PromptConfig = [("好的，请问您是在哪个省哪个市呢？", 1.0)]
+    ADDRESS_FULL_REGION_FOLLOWUP_PROMPT: PromptConfig = [("好的，还请您说一下完整的省、市、区。", 1.0)]
+    ADDRESS_CITY_DISTRICT_ONLY_FOLLOWUP_PROMPT: PromptConfig = [("好的，麻烦您再补充一下是在哪个市和哪个区县呢？", 1.0)]
+    ADDRESS_CITY_DISTRICT_INFO_FOLLOWUP_PROMPT: PromptConfig = [("好的，麻烦您再补充一下城市和区县信息。", 1.0)]
+    ADDRESS_CITY_DISTRICT_TOWN_TEMPLATE: PromptConfig = [("好的，您是在{city}的哪个区和哪个街道呢？", 1.0)]
+    ADDRESS_FULL_REGION_COMPACT_FOLLOWUP_PROMPT: PromptConfig = [("请您说一下完整的省市区信息。", 1.0)]
     ADDRESS_REGION_STREET_FOLLOWUP_PROMPT: PromptConfig = [("好的，请您说一下省、市、区和街道。", 1.0)]
     ADDRESS_DISTRICT_STREET_FOLLOWUP_PROMPT: PromptConfig = [("好的，请您继续说一下区和街道。", 1.0)]
     ADDRESS_LOCALITY_FOLLOWUP_PROMPT: PromptConfig = [("请问具体是在哪个小区或村呢？尽量详细到门牌号。", 1.0)]
-    ADDRESS_BUILDING_FOLLOWUP_PROMPT: PromptConfig = [("请问是几栋几单元几楼几号呢？", 1.0)]
-    ADDRESS_HOUSE_NUMBER_FOLLOWUP_PROMPT: PromptConfig = [("好的，请您再说一下具体门牌号。", 1.0)]
+    ADDRESS_LOCALITY_WHICH_FOLLOWUP_PROMPT: PromptConfig = [("请问是在哪个小区或哪个村呢？尽量详细到门牌号。", 1.0)]
     ADDRESS_RURAL_DETAIL_FOLLOWUP_PROMPT: PromptConfig = [("好的，请您提供一下详细的地址，具体到门牌号。", 1.0)]
     ADDRESS_CONFIRMATION_TEMPLATE: PromptConfig = [("跟您确认一下，地址是{address}，对吗？", 1.0)]
     KNOWN_ADDRESS_CONFIRMATION_TEMPLATE: PromptConfig = [("您的地址是{address}，对吗？", 1.0)]
@@ -543,11 +555,16 @@ class ServiceDialoguePolicy:
             )
 
         if intent == "no":
+            denial_address = self._extract_address_candidate_from_denial(
+                user_text=user_text,
+                confirmation_address=confirmation_address,
+            )
             strong_denial_address = self._extract_strong_address_candidate_from_denial(
                 user_text=user_text,
                 confirmation_address=confirmation_address,
             )
-            denial_address = strong_denial_address
+            if strong_denial_address:
+                denial_address = strong_denial_address
             use_confirmation_as_merge_source = bool(strong_denial_address)
             if (
                 self.address_inference_callback is not None
@@ -2332,23 +2349,22 @@ class ServiceDialoguePolicy:
     @classmethod
     def _has_unknown_actual_confirmation_precision(cls, candidate: str) -> bool:
         components = extract_address_components(candidate)
-        if cls._is_rural_address_candidate(candidate):
-            return bool(
-                (components.has_admin_region or components.has_locality)
-                and (
-                    components.has_precise_detail
-                    or cls._extract_village_group_token(candidate)
-                    or cls._extract_house_number_token(candidate)
-                )
-            )
-
         has_region_context = bool(components.has_admin_region or components.town)
-        has_door_level_detail = bool(
-            cls._extract_house_number_token(candidate)
-            or components.room
-            or cls._has_landmark_delivery_detail(candidate)
-        )
-        return has_region_context and has_door_level_detail
+        has_confirmation_anchor = cls._address_has_confirmation_anchor(candidate, components)
+        if cls._is_rural_address_candidate(candidate):
+            if cls._is_rural_landmark_candidate(candidate):
+                return bool(
+                    (components.has_admin_region or components.town)
+                    and (
+                        components.community
+                        or components.road
+                        or components.has_precise_detail
+                        or cls._has_nonstandard_address_detail(candidate)
+                    )
+                )
+            return has_region_context and has_confirmation_anchor
+
+        return has_region_context and has_confirmation_anchor
 
     @classmethod
     def _has_required_address_precision(cls, candidate: str, actual_address: str) -> bool:
@@ -2358,6 +2374,11 @@ class ServiceDialoguePolicy:
     def _missing_required_address_precision(cls, candidate: str, actual_address: str) -> list[str]:
         candidate_components = extract_address_components(candidate)
         actual_components = extract_address_components(actual_address)
+        if (
+            (candidate_components.has_admin_region or candidate_components.town)
+            and cls._address_has_confirmation_anchor(candidate, candidate_components)
+        ):
+            return []
         has_landmark_anchor = bool(
             candidate_components.city
             and candidate_components.district
@@ -2391,13 +2412,70 @@ class ServiceDialoguePolicy:
         return list(dict.fromkeys(missing))
 
     @classmethod
+    def _canonicalize_merged_address(cls, address: str) -> str:
+        canonicalized = canonicalize_address_text(address)
+        return canonicalized or address
+
+    @classmethod
+    def _address_component_presence_count(cls, components: AddressComponents) -> int:
+        return sum(
+            1
+            for value in (
+                components.province,
+                components.city,
+                components.district,
+                components.town,
+                components.road,
+                components.community,
+                components.building,
+                components.unit,
+                components.floor,
+                components.room,
+            )
+            if value
+        )
+
+    @classmethod
+    def _merge_address_components_by_level(
+        cls,
+        *,
+        existing: str,
+        new: str,
+        existing_components: AddressComponents,
+        new_components: AddressComponents,
+    ) -> str:
+        if not existing or not new:
+            return ""
+
+        ordered_values: list[str] = []
+        merged_count = 0
+        existing_count = cls._address_component_presence_count(existing_components)
+        new_count = cls._address_component_presence_count(new_components)
+
+        for level in ("province", "city", "district", "town", "road", "community", "building", "unit", "floor", "room"):
+            existing_value = getattr(existing_components, level)
+            new_value = getattr(new_components, level)
+            normalized_existing = cls._normalize_address_text(existing_value)
+            normalized_new = cls._normalize_address_text(new_value)
+            if normalized_existing and normalized_new and normalized_existing != normalized_new:
+                return ""
+            merged_value = new_value or existing_value
+            if merged_value:
+                ordered_values.append(merged_value)
+                merged_count += 1
+
+        if merged_count <= max(existing_count, new_count):
+            return ""
+        return cls._canonicalize_merged_address("".join(ordered_values))
+
+    @classmethod
     def _merge_address_candidate(cls, existing: str, new: str) -> str:
         prepared_existing = cls._prepare_address_for_confirmation(existing)
         prepared_new = cls._prepare_address_for_confirmation(new)
         if not prepared_existing:
-            return prepared_new
+            return cls._canonicalize_merged_address(prepared_new)
         if not prepared_new:
-            return prepared_existing
+            return cls._canonicalize_merged_address(prepared_existing)
 
         normalized_existing = cls._normalize_address_text(prepared_existing)
         normalized_new = cls._normalize_address_text(prepared_new)
@@ -2415,9 +2493,9 @@ class ServiceDialoguePolicy:
             new_components=new_components,
         )
         if rewritten_prefix:
-            return rewritten_prefix
+            return cls._canonicalize_merged_address(rewritten_prefix)
         if new_components.has_precise_detail and components_match(new_components, existing_components):
-            return prepared_existing
+            return cls._canonicalize_merged_address(prepared_existing)
 
         existing_has_region = cls._address_has_region_info(prepared_existing)
         existing_has_detail = cls._address_has_detail_info(prepared_existing)
@@ -2450,7 +2528,7 @@ class ServiceDialoguePolicy:
         ):
             merged_with_region = f"{existing_region_town_prefix or existing_admin_prefix}{prepared_new}"
             if cls._normalize_address_text(merged_with_region):
-                return merged_with_region
+                return cls._canonicalize_merged_address(merged_with_region)
 
         if (
             existing_components.has_locality
@@ -2461,8 +2539,8 @@ class ServiceDialoguePolicy:
             if existing_has_nonstandard_detail:
                 updated = cls._merge_address_detail_replacements(prepared_existing, prepared_new)
                 if updated != prepared_existing:
-                    return updated
-            return f"{prepared_existing}{prepared_new}"
+                    return cls._canonicalize_merged_address(updated)
+            return cls._canonicalize_merged_address(f"{prepared_existing}{prepared_new}")
 
         if existing_has_admin_region and not new_has_admin_region and (
             new_components.has_locality or new_has_nonstandard_detail
@@ -2483,7 +2561,7 @@ class ServiceDialoguePolicy:
                 if locality_prefix:
                     merged_with_lane = re.sub(r"\s+", "", f"{locality_prefix}{prepared_new}")
                     if cls._normalize_address_text(merged_with_lane):
-                        return merged_with_lane
+                        return cls._canonicalize_merged_address(merged_with_lane)
             merged_prefix = cls._address_prefix_before_first_locality(
                 existing_components,
                 new_components,
@@ -2492,17 +2570,18 @@ class ServiceDialoguePolicy:
             if new_components.has_precise_detail and not new_has_nonstandard_detail:
                 merged_with_region = re.sub(r"\s+", "", merged_with_region)
             if cls._normalize_address_text(merged_with_region):
-                return merged_with_region
+                return cls._canonicalize_merged_address(merged_with_region)
 
         if (
-            existing_admin_prefix
+            existing_has_admin_region
+            and existing_admin_prefix
             and new_components.district
             and not new_components.province
             and not new_components.city
         ):
             merged_with_region = f"{existing_admin_prefix}{prepared_new}"
             if cls._normalize_address_text(merged_with_region):
-                return merged_with_region
+                return cls._canonicalize_merged_address(merged_with_region)
 
         if (
             existing_components.district
@@ -2521,10 +2600,10 @@ class ServiceDialoguePolicy:
                 trimmed_new = trimmed_new[len(new_components.city) :]
             merged_with_existing_region = f"{existing_region_town_prefix or existing_admin_prefix}{trimmed_new}"
             if cls._normalize_address_text(merged_with_existing_region):
-                return merged_with_existing_region
+                return cls._canonicalize_merged_address(merged_with_existing_region)
 
         if new_has_region and new_has_detail:
-            return prepared_new
+            return cls._canonicalize_merged_address(prepared_new)
 
         if (
             new_has_admin_region
@@ -2542,34 +2621,48 @@ class ServiceDialoguePolicy:
                 existing_suffix = existing_suffix[len(existing_components.district) :]
             merged_with_completed_region = f"{prepared_new}{existing_suffix}"
             if cls._normalize_address_text(merged_with_completed_region):
-                return merged_with_completed_region
+                return cls._canonicalize_merged_address(merged_with_completed_region)
 
         if not new_has_admin_region:
             precise_merged = cls._merge_precise_detail_components(prepared_existing, prepared_new)
             if precise_merged != prepared_existing:
-                return precise_merged
+                return cls._canonicalize_merged_address(precise_merged)
             detail_merged = cls._merge_address_detail_replacements(prepared_existing, prepared_new)
             if detail_merged != prepared_existing:
-                return detail_merged
+                return cls._canonicalize_merged_address(detail_merged)
             if existing_has_admin_region and existing_components.has_precise_detail and new_components.has_precise_detail:
-                return prepared_existing
+                return cls._canonicalize_merged_address(prepared_existing)
 
         if new_has_admin_region and not existing_has_admin_region and existing_has_detail and not new_has_detail:
-            return f"{prepared_new}{prepared_existing}"
+            return cls._canonicalize_merged_address(f"{prepared_new}{prepared_existing}")
         if (
             new_components.province
             and new_components.city
             and not new_components.district
             and not new_has_detail
             and existing_components.district
-            and (existing_components.community or existing_components.road or cls._has_nonstandard_address_detail(prepared_existing))
+            and (
+                existing_components.town
+                or existing_components.community
+                or existing_components.road
+                or cls._has_nonstandard_address_detail(prepared_existing)
+            )
             and not existing_components.province
             and not existing_components.city
         ):
-            return f"{prepared_new}{prepared_existing}"
+            return cls._canonicalize_merged_address(f"{prepared_new}{prepared_existing}")
         if existing_has_admin_region and not new_has_admin_region and new_has_detail and not existing_has_detail:
-            return f"{prepared_existing}{prepared_new}"
-        return f"{prepared_existing}{prepared_new}"
+            return cls._canonicalize_merged_address(f"{prepared_existing}{prepared_new}")
+
+        component_merged = cls._merge_address_components_by_level(
+            existing=prepared_existing,
+            new=prepared_new,
+            existing_components=existing_components,
+            new_components=new_components,
+        )
+        if component_merged:
+            return component_merged
+        return cls._canonicalize_merged_address(f"{prepared_existing}{prepared_new}")
 
     @classmethod
     def _merge_address_with_prefix_rewrite(
@@ -3017,10 +3110,14 @@ class ServiceDialoguePolicy:
         normalized = cls._normalize_address_text(address)
         if not normalized:
             return False
+        landmark_suffix_pattern = "|".join(
+            re.escape(suffix)
+            for suffix in sorted(LANDMARK_LOCALITY_SUFFIXES, key=len, reverse=True)
+        )
         patterns = (
             r"[A-Za-z]?\d+(?:号|栋|座|区)?(?:外卖柜|快递柜|取餐柜)",
             r"(?:外卖柜|快递柜|取餐柜|驿站|代收点|前台|服务台|门岗|保安亭|岗亭|收发室)",
-            r"(?:学校|小学|中学|大学|幼儿园|学生宿舍|宿舍|医院|诊所|卫生院|酒店|宾馆|饭店|餐馆|商场|超市|园区|厂区|写字楼|大厦|市场|门店|店铺)",
+            rf"(?:{landmark_suffix_pattern})",
         )
         return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns)
 
@@ -3033,39 +3130,56 @@ class ServiceDialoguePolicy:
         )
 
     @classmethod
+    def _is_rural_landmark_candidate(cls, candidate: str) -> bool:
+        components = extract_address_components(candidate)
+        return bool(
+            cls._is_rural_address_candidate(candidate)
+            and cls._has_landmark_delivery_detail(candidate)
+            and (components.community or components.road)
+        )
+
+    @classmethod
     def _is_confirmable_address_candidate(cls, candidate: str) -> bool:
         components = extract_address_components(candidate)
+        has_region_context = bool(components.has_admin_region or components.town)
+        has_confirmation_anchor = cls._address_has_confirmation_anchor(candidate, components)
         if cls._is_rural_address_candidate(candidate):
-            return bool(
-                (components.has_admin_region or components.has_locality)
-                and (
-                    components.has_precise_detail
-                    or cls._extract_village_group_token(candidate)
-                    or cls._extract_house_number_token(candidate)
+            if cls._is_rural_landmark_candidate(candidate):
+                return bool(
+                    (components.has_admin_region or components.town)
+                    and (
+                        components.community
+                        or components.road
+                        or components.has_precise_detail
+                        or cls._has_nonstandard_address_detail(candidate)
+                    )
                 )
-            )
+            return has_region_context and has_confirmation_anchor
         has_anchor_detail = bool(
             components.road
             or components.community
             or components.has_precise_detail
             or cls._has_nonstandard_address_detail(candidate)
         )
-        has_region_context = bool(components.has_admin_region or components.town)
         return has_region_context and has_anchor_detail
 
     @classmethod
     def _is_strong_confirmable_address_candidate(cls, candidate: str) -> bool:
         components = extract_address_components(candidate)
-        if cls._is_rural_address_candidate(candidate):
-            return bool(
-                (components.has_admin_region or components.has_locality)
-                and (
-                    components.has_precise_detail
-                    or cls._extract_village_group_token(candidate)
-                    or cls._extract_house_number_token(candidate)
-                )
-            )
         has_region_context = bool(components.has_admin_region or components.town)
+        has_confirmation_anchor = cls._address_has_confirmation_anchor(candidate, components)
+        if cls._is_rural_address_candidate(candidate):
+            if cls._is_rural_landmark_candidate(candidate):
+                return bool(
+                    (components.has_admin_region or components.town)
+                    and (
+                        components.community
+                        or components.road
+                        or components.has_precise_detail
+                        or cls._has_nonstandard_address_detail(candidate)
+                    )
+                )
+            return has_region_context and has_confirmation_anchor
         has_house_number = bool(cls._extract_house_number_token(candidate))
         has_room = bool(components.room)
         has_building_anchor = bool(components.building and (components.community or components.road))
@@ -3476,18 +3590,27 @@ class ServiceDialoguePolicy:
             normalized in cls._prompt_signatures(cls.ADDRESS_PROMPT)
             or normalized.startswith("好的，您是在")
             or normalized.startswith("请问是")
+            or normalized in cls._prompt_signatures(cls.ADDRESS_PROVINCE_CITY_FOLLOWUP_PROMPT)
+            or normalized in cls._prompt_signatures(cls.ADDRESS_FULL_REGION_FOLLOWUP_PROMPT)
+            or normalized in cls._prompt_signatures(cls.ADDRESS_CITY_DISTRICT_ONLY_FOLLOWUP_PROMPT)
+            or normalized in cls._prompt_signatures(cls.ADDRESS_CITY_DISTRICT_INFO_FOLLOWUP_PROMPT)
+            or normalized in cls._prompt_signatures(cls.ADDRESS_CITY_DISTRICT_TOWN_TEMPLATE)
+            or normalized in cls._prompt_signatures(cls.ADDRESS_FULL_REGION_COMPACT_FOLLOWUP_PROMPT)
             or normalized in cls._prompt_signatures(cls.ADDRESS_REGION_STREET_FOLLOWUP_PROMPT)
             or normalized in cls._prompt_signatures(cls.ADDRESS_DISTRICT_STREET_FOLLOWUP_PROMPT)
             or normalized in cls._prompt_signatures(cls.ADDRESS_LOCALITY_FOLLOWUP_PROMPT)
-            or normalized in cls._prompt_signatures(cls.ADDRESS_BUILDING_FOLLOWUP_PROMPT)
-            or normalized in cls._prompt_signatures(cls.ADDRESS_HOUSE_NUMBER_FOLLOWUP_PROMPT)
+            or normalized in cls._prompt_signatures(cls.ADDRESS_LOCALITY_WHICH_FOLLOWUP_PROMPT)
             or normalized in cls._prompt_signatures(cls.ADDRESS_RURAL_DETAIL_FOLLOWUP_PROMPT)
+            or normalized.startswith("好的，请问您是在哪个省哪个市呢")
+            or normalized.startswith("好的，还请您说一下完整的省、市、区")
+            or normalized.startswith("好的，麻烦您再补充一下是在哪个市和哪个区县呢")
+            or normalized.startswith("好的，麻烦您再补充一下城市和区县信息")
+            or normalized.startswith("请您说一下完整的省市区信息")
             or normalized.startswith("好的，请您说一下省、市、区和街道")
             or normalized.startswith("好的，请您继续说一下区和街道")
             or normalized.startswith("请问具体是在哪个小区或村呢？尽量详细到门牌号")
+            or normalized.startswith("请问是在哪个小区或哪个村呢？尽量详细到门牌号")
             or normalized.startswith("好的，请您继续说一下小区、楼栋和门牌号")
-            or normalized.startswith("请问是几栋几单元几楼几号")
-            or normalized.startswith("好的，请您再说一下具体门牌号")
             or normalized.startswith("好的，请您提供一下详细的地址")
         )
 
@@ -3589,6 +3712,28 @@ class ServiceDialoguePolicy:
         )
         return self._choose_prompt_text(prompt_config)
 
+    def _address_province_city_followup_prompt(self) -> str:
+        return self._choose_prompt_text(self.ADDRESS_PROVINCE_CITY_FOLLOWUP_PROMPT)
+
+    def _address_full_region_followup_prompt(self) -> str:
+        return self._choose_prompt_text(self.ADDRESS_FULL_REGION_FOLLOWUP_PROMPT)
+
+    def _address_city_district_only_followup_prompt(self) -> str:
+        return self._choose_prompt_text(self.ADDRESS_CITY_DISTRICT_ONLY_FOLLOWUP_PROMPT)
+
+    def _address_city_district_info_followup_prompt(self) -> str:
+        return self._choose_prompt_text(self.ADDRESS_CITY_DISTRICT_INFO_FOLLOWUP_PROMPT)
+
+    def _address_city_district_town_followup_prompt(self, city: str) -> str:
+        prompt_config = self._format_prompt_config(
+            self.ADDRESS_CITY_DISTRICT_TOWN_TEMPLATE,
+            city=city,
+        )
+        return self._choose_prompt_text(prompt_config)
+
+    def _address_full_region_compact_followup_prompt(self) -> str:
+        return self._choose_prompt_text(self.ADDRESS_FULL_REGION_COMPACT_FOLLOWUP_PROMPT)
+
     def _address_province_city_district_street_followup_prompt(self, province: str) -> str:
         prompt_config = self._format_prompt_config(
             self.ADDRESS_PROVINCE_CITY_DISTRICT_STREET_FOLLOWUP_TEMPLATE,
@@ -3605,11 +3750,8 @@ class ServiceDialoguePolicy:
     def _address_locality_followup_prompt(self) -> str:
         return self._choose_prompt_text(self.ADDRESS_LOCALITY_FOLLOWUP_PROMPT)
 
-    def _address_building_followup_prompt(self) -> str:
-        return self._choose_prompt_text(self.ADDRESS_BUILDING_FOLLOWUP_PROMPT)
-
-    def _address_house_number_followup_prompt(self) -> str:
-        return self._choose_prompt_text(self.ADDRESS_HOUSE_NUMBER_FOLLOWUP_PROMPT)
+    def _address_locality_which_followup_prompt(self) -> str:
+        return self._choose_prompt_text(self.ADDRESS_LOCALITY_WHICH_FOLLOWUP_PROMPT)
 
     def _address_rural_detail_followup_prompt(self) -> str:
         return self._choose_prompt_text(self.ADDRESS_RURAL_DETAIL_FOLLOWUP_PROMPT)
@@ -3617,6 +3759,20 @@ class ServiceDialoguePolicy:
     @staticmethod
     def _address_has_site_locality(components: AddressComponents) -> bool:
         return bool(components.road or components.community)
+
+    @classmethod
+    def _address_has_confirmation_anchor(
+        cls,
+        candidate: str,
+        components: AddressComponents | None = None,
+    ) -> bool:
+        components = components or extract_address_components(candidate)
+        return bool(
+            components.community
+            or components.has_precise_detail
+            or cls._extract_village_group_token(candidate)
+            or cls._has_landmark_delivery_detail(candidate)
+        )
 
     @classmethod
     def _requires_city_level_followup(cls, candidate: str) -> bool:
@@ -3632,8 +3788,172 @@ class ServiceDialoguePolicy:
             )
         )
 
+    @staticmethod
+    def _is_county_district(district: str) -> bool:
+        normalized = normalize_address_text(district)
+        return normalized.endswith("县")
+
+    @staticmethod
+    def _is_noncounty_district(district: str) -> bool:
+        normalized = normalize_address_text(district)
+        return bool(normalized) and normalized.endswith("区") and not normalized.endswith("县")
+
+    @classmethod
+    def _should_use_locality_which_followup(
+        cls,
+        candidate: str,
+        components: AddressComponents | None = None,
+    ) -> bool:
+        components = components or extract_address_components(candidate)
+        if cls._address_has_confirmation_anchor(candidate, components):
+            return False
+
+        normalized_candidate = cls._normalize_address_text(candidate)
+        has_province = bool(components.province)
+        has_city = bool(components.city)
+        has_district = bool(components.district)
+        has_town = bool(components.town)
+        has_road = bool(components.road)
+
+        district_is_county = cls._is_county_district(components.district)
+        district_is_noncounty = cls._is_noncounty_district(components.district)
+        province_only_remainder = normalized_candidate
+        if has_province:
+            normalized_province = cls._normalize_address_text(components.province)
+            if normalized_province and normalized_candidate.startswith(normalized_province):
+                province_only_remainder = normalized_candidate[len(normalized_province) :]
+        matches_province_plus_noncounty_district_only = bool(
+            has_province
+            and not has_town
+            and not has_road
+            and re.fullmatch(r"[\u4e00-\u9fa5]{1,24}(?:(?<!小)区)", province_only_remainder)
+        )
+
+        return bool(
+            matches_province_plus_noncounty_district_only
+            or (has_province and has_district and district_is_noncounty and not has_city and not has_town and not has_road)
+            or (has_province and has_city and has_district and district_is_noncounty and not has_town and not has_road)
+            or (has_city and has_town and not has_province and not has_district and not has_road)
+            or (has_district and district_is_county and not has_province and not has_city and not has_town and not has_road)
+            or (has_district and district_is_county and has_town and not has_province and not has_city and not has_road)
+        )
+
+    def _address_special_followup_prompt(self, candidate: str, actual_address: str = "") -> str:
+        components = extract_address_components(candidate)
+        normalized_candidate = self._normalize_address_text(candidate)
+        has_province = bool(components.province)
+        has_city = bool(components.city)
+        has_district = bool(components.district)
+        has_town = bool(components.town)
+        has_road = bool(components.road)
+        has_community = bool(components.community)
+        has_precise_detail = bool(components.has_precise_detail)
+        has_nonstandard_detail = bool(
+            self._extract_village_group_token(candidate)
+            or self._extract_house_number_token(candidate)
+            or self._has_landmark_delivery_detail(candidate)
+        )
+        has_anchor = bool(has_community or has_precise_detail or has_nonstandard_detail)
+
+        district_is_noncounty = self._is_noncounty_district(components.district)
+        city_for_followup = self._address_city_for_followup(candidate, actual_address)
+        province_tail = normalized_candidate
+        if has_province:
+            normalized_province = self._normalize_address_text(components.province)
+            if normalized_province and normalized_candidate.startswith(normalized_province):
+                province_tail = normalized_candidate[len(normalized_province) :]
+        province_tail_components = extract_address_components(province_tail) if province_tail != normalized_candidate else AddressComponents()
+        province_tail_has_anchor = bool(
+            province_tail_components.community
+            or province_tail_components.has_precise_detail
+            or self._extract_village_group_token(province_tail)
+            or self._extract_house_number_token(province_tail)
+            or self._has_landmark_delivery_detail(province_tail)
+        )
+        matches_province_town_only = bool(
+            has_province
+            and province_tail
+            and province_tail_components.town
+            and not province_tail_components.city
+            and not province_tail_components.district
+            and not province_tail_components.road
+        )
+        matches_province_community_only = bool(
+            has_province
+            and province_tail
+            and province_tail_has_anchor
+            and not province_tail_components.city
+            and not province_tail_components.district
+            and not province_tail_components.town
+            and not province_tail_components.road
+        )
+
+        if has_city and not has_province and not has_district and not has_town and not has_road and not has_anchor:
+            if city_for_followup:
+                return self._address_city_district_followup_prompt(city_for_followup)
+
+        if has_district and district_is_noncounty and not has_province and not has_city:
+            return self._address_province_city_followup_prompt()
+
+        if has_town and not has_province and not has_city and not has_district and not has_road and not has_anchor:
+            return self._address_full_region_followup_prompt()
+
+        if (
+            matches_province_town_only
+            or (
+                has_province
+                and has_town
+                and not has_city
+                and not has_district
+                and not has_road
+            )
+        ):
+            return self._address_city_district_only_followup_prompt()
+
+        if has_anchor and not has_province and not has_city and not has_district and not has_town and not has_road:
+            return self._address_region_street_followup_prompt()
+
+        if (
+            matches_province_community_only
+            or (
+                has_province
+                and has_anchor
+                and not has_city
+                and not has_district
+                and not has_town
+                and not has_road
+            )
+        ):
+            return self._address_city_district_info_followup_prompt()
+
+        if (
+            has_province
+            and has_city
+            and has_anchor
+            and not has_district
+            and not has_town
+            and not has_road
+        ):
+            if city_for_followup:
+                return self._address_city_district_town_followup_prompt(city_for_followup)
+
+        if has_city and has_anchor and not has_province and not has_district and not has_town and not has_road:
+            if city_for_followup:
+                return self._address_city_district_town_followup_prompt(city_for_followup)
+
+        if has_town and has_anchor and not has_province and not has_city and not has_district and not has_road:
+            return self._address_full_region_compact_followup_prompt()
+
+        if self._should_use_locality_which_followup(candidate, components):
+            return self._address_locality_which_followup_prompt()
+        return ""
+
     def _address_followup_prompt(self, candidate: str, actual_address: str) -> str:
         components = extract_address_components(candidate)
+        has_confirmation_anchor = self._address_has_confirmation_anchor(candidate, components)
+        special_prompt = self._address_special_followup_prompt(candidate, actual_address)
+        if special_prompt:
+            return special_prompt
         if self._requires_city_level_followup(candidate):
             return self._address_region_street_followup_prompt()
         if components.province and not components.city:
@@ -3657,15 +3977,18 @@ class ServiceDialoguePolicy:
             return self._address_locality_followup_prompt()
         if components.has_locality and not self._address_has_site_locality(components):
             return self._address_locality_followup_prompt()
-        if components.has_locality and not components.has_precise_detail:
-            return self._address_building_followup_prompt()
+        if components.has_locality and not has_confirmation_anchor:
+            return self._address_locality_followup_prompt()
         if components.has_precise_detail and not components.has_locality:
             return self._address_locality_followup_prompt()
         return self._choose_prompt_text(self.ADDRESS_PROMPT)
 
     def _address_followup_prompt_for_actual(self, *, candidate: str, actual_address: str) -> str:
         components = extract_address_components(candidate)
-        missing_precision = self._missing_required_address_precision(candidate, actual_address)
+        has_confirmation_anchor = self._address_has_confirmation_anchor(candidate, components)
+        special_prompt = self._address_special_followup_prompt(candidate, actual_address)
+        if special_prompt:
+            return special_prompt
         if self._requires_city_level_followup(candidate):
             return self._address_region_street_followup_prompt()
         if not components.district and (
@@ -3674,20 +3997,12 @@ class ServiceDialoguePolicy:
             or self._has_nonstandard_address_detail(candidate)
         ):
             return self._address_followup_prompt(candidate, actual_address)
-        if self._is_rural_address_candidate(candidate) and not components.has_precise_detail:
+        if self._is_rural_address_candidate(candidate) and not has_confirmation_anchor:
             return self._address_rural_detail_followup_prompt()
         if components.has_locality and not self._address_has_site_locality(components):
             return self._address_locality_followup_prompt()
-        if (
-            components.has_locality
-            and "house_number" in missing_precision
-            and not {"building", "unit", "room"} & set(missing_precision)
-        ):
-            return self._address_house_number_followup_prompt()
-        if components.has_locality and missing_precision:
-            return self._address_building_followup_prompt()
-        if components.has_locality and not components.has_precise_detail:
-            return self._address_building_followup_prompt()
+        if components.has_locality and not has_confirmation_anchor:
+            return self._address_locality_followup_prompt()
         if components.has_precise_detail and not components.has_locality:
             return self._address_locality_followup_prompt()
         return self._address_followup_prompt(candidate, actual_address)
@@ -3707,6 +4022,10 @@ class ServiceDialoguePolicy:
 
     def _address_followup_prompt_for_unknown_actual(self, candidate: str) -> str:
         components = extract_address_components(candidate)
+        has_confirmation_anchor = self._address_has_confirmation_anchor(candidate, components)
+        special_prompt = self._address_special_followup_prompt(candidate)
+        if special_prompt:
+            return special_prompt
         if self._requires_city_level_followup(candidate):
             return self._address_region_street_followup_prompt()
         if components.province and not components.city:
@@ -3722,20 +4041,12 @@ class ServiceDialoguePolicy:
                 or self._has_nonstandard_address_detail(candidate)
             ):
                 return self._address_region_street_followup_prompt()
-        if self._is_rural_address_candidate(candidate):
+        if self._is_rural_address_candidate(candidate) and not has_confirmation_anchor:
             return self._address_rural_detail_followup_prompt()
         if components.has_locality and not self._address_has_site_locality(components):
             return self._address_locality_followup_prompt()
-        if (
-            components.road
-            and not components.community
-            and not components.building
-            and not self._extract_house_number_token(candidate)
-            and not components.room
-        ):
-            return self._address_house_number_followup_prompt()
-        if components.has_locality:
-            return self._address_building_followup_prompt()
+        if components.has_locality and not has_confirmation_anchor:
+            return self._address_locality_followup_prompt()
         if components.has_precise_detail and not components.has_locality:
             return self._address_locality_followup_prompt()
         return self._address_followup_prompt(candidate, "")
@@ -3744,15 +4055,7 @@ class ServiceDialoguePolicy:
     def _address_city_for_followup(candidate: str, actual_address: str) -> str:
         candidate_components = extract_address_components(candidate)
         actual_components = extract_address_components(actual_address)
-        if actual_components.city:
-            if not candidate_components.city:
-                city = actual_components.city
-            elif normalize_address_text(candidate_components.city) != normalize_address_text(actual_components.city):
-                city = actual_components.city
-            else:
-                city = candidate_components.city
-        else:
-            city = candidate_components.city
+        city = candidate_components.city or actual_components.city
         if city:
             return city if city.endswith("市") else f"{city}市"
         return ""
@@ -3946,6 +4249,71 @@ class ServiceDialoguePolicy:
     @staticmethod
     def _sanitize_address_for_confirmation_display(address: str) -> str:
         return re.sub(r"[，,。！？!?；;：:、]", "", str(address or "")).strip()
+
+    @classmethod
+    def _address_candidate_meets_ie_trigger_threshold(cls, candidate: str) -> bool:
+        normalized_candidate = cls._normalize_address_text(candidate)
+        if not normalized_candidate:
+            return False
+
+        components = extract_address_components(normalized_candidate)
+        admin_level_count = sum(
+            1
+            for value in (
+                components.province,
+                components.city,
+                components.district,
+                components.town,
+            )
+            if value
+        )
+        city_name = comparable_component("city", components.city)
+        required_admin_level_count = 2 if city_name in MUNICIPALITY_PREFIXES else 3
+        has_locality_or_finer = bool(
+            components.community
+            or components.has_precise_detail
+            or cls._has_nonstandard_address_detail(normalized_candidate)
+        )
+        has_county_short_path = bool(
+            cls._is_county_district(components.district)
+            and not components.province
+            and not components.city
+            and not components.road
+        )
+        return has_locality_or_finer and (
+            admin_level_count >= required_admin_level_count or has_county_short_path
+        )
+
+    def should_insert_address_ie_function_call(
+        self,
+        *,
+        user_text: str,
+        transcript: list[DialogueTurn],
+        runtime_state: ServiceRuntimeState,
+    ) -> bool:
+        if not runtime_state.awaiting_full_address:
+            return False
+        previous_service_text = self._previous_service_text(transcript)
+        normalized_previous_service_text = self._normalize_prompt_text(previous_service_text)
+        if not (
+            self.is_address_collection_prompt(previous_service_text)
+            or normalized_previous_service_text.startswith("您是在")
+            or normalized_previous_service_text.startswith("请问是")
+        ):
+            return False
+
+        previous_candidate = runtime_state.partial_address_candidate
+        prepared_user_address = self._prepare_address_for_confirmation(user_text)
+        if not prepared_user_address:
+            return False
+
+        merged_candidate = self._merge_address_candidate(previous_candidate, prepared_user_address)
+        if not merged_candidate:
+            return False
+        return (
+            self._address_candidate_meets_ie_trigger_threshold(merged_candidate)
+            and not self._address_candidate_meets_ie_trigger_threshold(previous_candidate)
+        )
 
     def _product_arrival_prompt(self, scenario: Scenario) -> str:
         prompt_config = self._format_prompt_config(self.PRODUCT_ARRIVAL_PROMPT, product=self._product_name(scenario))

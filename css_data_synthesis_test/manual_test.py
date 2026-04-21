@@ -15,10 +15,12 @@ from css_data_synthesis_test.schemas import (
     SUPPLEMENTARY_COLLECTED_SLOTS,
     SERVICE_SPEAKER,
     USER_SPEAKER,
+    build_display_transcript,
     display_speaker,
     effective_required_slots,
 )
 from css_data_synthesis_test.scenario_factory import ScenarioFactory
+from css_data_synthesis_test.function_call import format_address_observation_line
 from css_data_synthesis_test.service_policy import ServiceDialoguePolicy, ServiceRuntimeState
 from css_data_synthesis_test.validator import validate_dialogue
 
@@ -156,6 +158,19 @@ def run_manual_test_session(
                 round_index=round_index,
             )
         )
+        if resolved_policy.should_insert_address_ie_function_call(
+            user_text=user_text,
+            transcript=transcript,
+            runtime_state=runtime_state,
+        ):
+            transcript[-1].post_display_lines.append(
+                resolved_policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY
+            )
+            transcript[-1].post_display_lines.append(
+                format_address_observation_line(transcript)
+            )
+            for line in transcript[-1].post_display_lines:
+                print_func(line)
 
         service_result = resolved_policy.respond(
             scenario=scenario,
@@ -246,9 +261,17 @@ def run_manual_test_session(
         "rounds_limit": rounds_limit,
         "scenario_id": scenario.scenario_id,
         "scenario": scenario.to_dict(),
-        "transcript": [turn.to_display_dict() for turn in transcript],
+        "transcript": build_display_transcript(transcript),
         "dialogue_text": "\n".join(
-            f"{display_speaker(turn.speaker)}: {turn.text}" for turn in transcript
+            (
+                line
+                for turn in build_display_transcript(transcript)
+                for line in [
+                    turn["text"]
+                    if turn.get("display_kind") == "function_call"
+                    else f"{turn['speaker']}: {turn['text']}"
+                ]
+            )
         ),
         "collected_slots": collected_slots,
         "missing_slots": missing_slots,

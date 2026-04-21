@@ -108,6 +108,32 @@ LANDMARK_LOCALITY_SUFFIXES = (
     "市场",
     "门店",
     "店铺",
+    "餐厅",
+    "咖啡馆",
+    "奶茶店",
+    "药店",
+    "公司",
+    "有限公司",
+    "有限责任公司",
+    "集团",
+    "工厂",
+    "厂",
+    "办公楼",
+    "产业园",
+    "科技园",
+    "政府",
+    "街道办",
+    "办事处",
+    "派出所",
+    "公安局",
+    "法院",
+    "检察院",
+    "税务局",
+    "管委会",
+    "居委会",
+    "村委会",
+    "政务服务中心",
+    "行政服务中心",
 )
 ROAD_LOCALITY_SUFFIXES = ("路", "街", "大道", "巷", "弄", "胡同")
 BUILDING_SUFFIXES = ("号楼", "栋", "幢", "座", "楼")
@@ -332,11 +358,12 @@ def extract_address_components(text: str) -> AddressComponents:
             city = city_match.group(0)
             remainder = remainder[city_match.end() :]
         elif province_prefix:
+            district_only_match = re.fullmatch(r"[\u4e00-\u9fa5]{1,24}(?:(?<!小)区|县|旗)", remainder)
             district_leading_match = re.match(
                 r"^([\u4e00-\u9fa5]{1,24}(?:(?<!小)区|县|旗))(.+)$",
                 remainder,
             )
-            if district_leading_match:
+            if district_only_match or district_leading_match:
                 city = ""
             else:
                 # Support colloquial province+city forms like "甘肃兰州七里河区".
@@ -382,6 +409,8 @@ def extract_address_components(text: str) -> AddressComponents:
             re.search(r"(?:街道|镇|乡).+(?:(?<!小)(?<!社)区)$", candidate_district)
         )
         if (
+            not is_numbered_section
+            and
             not is_community_like
             and not contains_town_then_locality
             and not (is_numbered_section and trailing_remainder)

@@ -147,6 +147,7 @@ class DialogueTurn:
     round_index: int
     model_intent_inference_used: bool = False
     previous_user_intent_model_inference_used: bool | None = None
+    post_display_lines: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -166,6 +167,7 @@ class DialogueTurn:
         if normalize_speaker(self.speaker) == SERVICE_SPEAKER and effective_used:
             round_label = f"{round_label}*"
         return {
+            "display_kind": "turn",
             "speaker": display_speaker(self.speaker),
             "text": self.text,
             "round_index": self.round_index,
@@ -174,7 +176,29 @@ class DialogueTurn:
             "previous_user_intent_model_inference_used": (
                 effective_used if normalize_speaker(self.speaker) == SERVICE_SPEAKER else None
             ),
+            "post_display_lines": list(self.post_display_lines),
         }
+
+
+def build_display_transcript(transcript: list[DialogueTurn]) -> list[dict[str, Any]]:
+    display_transcript: list[dict[str, Any]] = []
+    for turn in transcript:
+        display_turn = turn.to_display_dict()
+        post_display_lines = list(display_turn.pop("post_display_lines", []))
+        display_transcript.append(display_turn)
+        for line in post_display_lines:
+            display_transcript.append(
+                {
+                    "display_kind": "function_call",
+                    "speaker": "",
+                    "text": str(line),
+                    "round_index": turn.round_index,
+                    "round_label": "",
+                    "model_intent_inference_used": False,
+                    "previous_user_intent_model_inference_used": None,
+                }
+            )
+    return display_transcript
 
 
 @dataclass
@@ -190,11 +214,16 @@ class DialogueSample:
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        display_transcript = [turn.to_display_dict() for turn in self.transcript]
+        display_transcript = build_display_transcript(self.transcript)
         data["transcript"] = display_transcript
         data["dialogue_process"] = display_transcript
         data["dialogue_text"] = "\n".join(
-            f"[{turn['round_label']}] {turn['speaker']}: {turn['text']}" for turn in display_transcript
+            (
+                turn["text"]
+                if turn.get("display_kind") == "function_call"
+                else f"[{turn['round_label']}] {turn['speaker']}: {turn['text']}"
+            )
+            for turn in display_transcript
         )
         data["related_info"] = {
             "product": data["scenario"]["product"],

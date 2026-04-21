@@ -48,7 +48,7 @@
                     <p class="eyebrow">Manual Mode</p>
                     <h1>CLI 手工对话测试台</h1>
                 </div>
-                <p class="section-copy">仅保留与 `interactive-test` 一致的手工输入模式，支持 `/help`、`/slots`、`/state`、`/quit`，点击任意用户行可删除该行及其下方所有内容。</p>
+                <p class="section-copy">仅保留与 `interactive-test` 一致的手工输入模式，支持 `/help`、`/slots`、`/state`、`/quit`，点击用户轮次标签可删除该行及其下方所有内容，右键用户文本可手动插入或移除 function_call 展示。</p>
             </section>
 
             <section class="panel-section left-panel-account">
@@ -160,7 +160,7 @@
                 <section class="terminal-guide">
                     <div class="terminal-guide-copy">
                         <p>登录并启动会话后，这里会按 CLI 方式逐行输出会话内容。</p>
-                        <p>第一轮由你先输入用户话术，点击任意用户行可删除该行及其下方所有内容。</p>
+                        <p>第一轮由你先输入用户话术，点击用户轮次标签可删除该行及其下方所有内容，右键用户文本可控制 function_call 展示。</p>
                         <button
                             id="session-id-copy-btn"
                             class="session-id-copy-btn"
@@ -244,6 +244,9 @@
     <div id="chat-mention-dropdown" class="chat-mention-dropdown hidden" aria-hidden="true"></div>
     <div id="chat-message-menu" class="chat-message-menu hidden" aria-hidden="true">
         <button id="chat-recall-btn" class="chat-message-menu-btn" type="button">撤回这条消息</button>
+    </div>
+    <div id="terminal-turn-menu" class="chat-message-menu hidden" aria-hidden="true">
+        <button id="terminal-toggle-address-ie-btn" class="chat-message-menu-btn" type="button">插入 function_call 与 observation</button>
     </div>
 
     <aside id="chat-window" class="chat-window hidden" aria-hidden="true">

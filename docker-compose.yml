@@ -16,8 +16,11 @@ services:
       - .env
     environment:
       FRONTEND_SESSION_REDIS_URL: redis://redis:6379/0
+      PUNCT_BACKEND: ${PUNCT_BACKEND:-local}
+      PUNCT_MODEL_DIR: /app/models/punc_ct-transformer_zh-cn-common-vocab272727-pytorch
     depends_on:
       - redis
     volumes:
       - ./outputs:/app/outputs
       - ./data:/app/data
+      - /Users/gj/Documents/vsfile/customer-data-process/models/punc_ct-transformer_zh-cn-common-vocab272727-pytorch:/app/models/punc_ct-transformer_zh-cn-common-vocab272727-pytorch:ro

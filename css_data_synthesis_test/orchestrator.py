@@ -4,6 +4,7 @@ import asyncio
 
 from css_data_synthesis_test.agents import ServiceAgent, UserAgent
 from css_data_synthesis_test.config import AppConfig
+from css_data_synthesis_test.function_call import format_address_observation_line
 from css_data_synthesis_test.hidden_settings_tool import HiddenSettingsTool
 from css_data_synthesis_test.llm import OpenAIChatClient
 from css_data_synthesis_test.schemas import (
@@ -137,8 +138,24 @@ class DialogueOrchestrator:
                         round_index=round_index,
                     )
                 )
+                if self.service_agent.policy.should_insert_address_ie_function_call(
+                    user_text=user_action["reply"],
+                    transcript=transcript,
+                    runtime_state=runtime_state,
+                ):
+                    transcript[-1].post_display_lines.append(
+                        self.service_agent.policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY
+                    )
+                    transcript[-1].post_display_lines.append(
+                        format_address_observation_line(
+                            transcript,
+                            client=self.client,
+                        )
+                    )
                 if self.show_dialogue_progress:
                     await self._print_turn_async(USER_SPEAKER, round_index, user_action["reply"])
+                    for line in transcript[-1].post_display_lines:
+                        await self._print_raw_line_async(line)
 
                 service_action = self.service_agent.respond(
                     scenario=scenario,
@@ -288,3 +305,7 @@ class DialogueOrchestrator:
     async def _print_dialogue_footer_async(self, sample: DialogueSample) -> None:
         async with self._print_lock:
             self._print_dialogue_footer(sample)
+
+    async def _print_raw_line_async(self, text: str) -> None:
+        async with self._print_lock:
+            print(text)

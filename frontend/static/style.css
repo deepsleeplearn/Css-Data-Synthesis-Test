@@ -880,6 +880,15 @@ select:focus {
     text-decoration: none;
 }
 
+.terminal-turn-rewind-trigger {
+    font-weight: 700;
+}
+
+.terminal-user-text {
+    display: inline;
+    cursor: context-menu;
+}
+
 .terminal-reference-trigger {
     border: none;
     display: inline;

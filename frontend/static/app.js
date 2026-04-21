@@ -61,6 +61,10 @@ let chatMessageHoldPointerId = null;
 let chatMessageHoldStartPoint = null;
 let chatMessageHoldMessageId = 0;
 let chatContextMenuMessageId = 0;
+let sessionInputHistory = [];
+let sessionInputHistoryIndex = -1;
+let sessionInputDraft = '';
+let terminalTurnMenuState = null;
 
 const authGate = document.getElementById('auth-gate');
 const appShell = document.getElementById('app-shell');
@@ -92,6 +96,8 @@ const reviewPersistCheckbox = document.getElementById('review-persist-to-db');
 const reviewSubmitButton = document.getElementById('review-submit-btn');
 const terminalScrollRegion = document.getElementById('terminal-scroll-region');
 const terminalOutput = document.getElementById('terminal-output');
+const userInput = document.getElementById('user-input');
+const sendButton = document.getElementById('send-btn');
 const addressSlotsContainer = document.getElementById('address-slots-container');
 const sessionContextPanel = document.getElementById('session-context-panel');
 const sessionContextTitle = document.getElementById('session-context-title');
@@ -119,6 +125,8 @@ const chatLauncherUnread = document.getElementById('chat-launcher-unread');
 const chatMentionDropdown = document.getElementById('chat-mention-dropdown');
 const chatMessageMenu = document.getElementById('chat-message-menu');
 const chatRecallButton = document.getElementById('chat-recall-btn');
+const terminalTurnMenu = document.getElementById('terminal-turn-menu');
+const terminalToggleAddressIeButton = document.getElementById('terminal-toggle-address-ie-btn');
 const chatWindow = document.getElementById('chat-window');
 const chatWindowHeader = document.getElementById('chat-window-header');
 const chatHideButton = document.getElementById('chat-hide-btn');
@@ -176,6 +184,7 @@ const CHAT_UNREAD_CAP = 99;
 const CHAT_MESSAGE_HOLD_MS = 420;
 const CHAT_MESSAGE_HOLD_MOVE_TOLERANCE = 10;
 const CHAT_MENTION_OPTION_LIMIT = 12;
+const SESSION_INPUT_HISTORY_LIMIT = 50;
 const DEFAULT_DOCUMENT_TITLE = document.title;
 const CHAT_FAVICON_SIZE = 64;
 
@@ -683,12 +692,36 @@ function hideIssueReferencePopover() {
     issueReferencePopover.style.top = '';
 }
 
+function closeTerminalTurnMenu() {
+    terminalTurnMenuState = null;
+    terminalTurnMenu.classList.add('hidden');
+    terminalTurnMenu.setAttribute('aria-hidden', 'true');
+    terminalTurnMenu.style.left = '';
+    terminalTurnMenu.style.top = '';
+}
+
+function openTerminalTurnMenu({ roundIndex, hasAddressIeDisplay, clientX, clientY }) {
+    if (!terminalTurnMenu || !terminalToggleAddressIeButton) return;
+    terminalTurnMenuState = {
+        roundIndex: Number(roundIndex || 0),
+        hasAddressIeDisplay: Boolean(hasAddressIeDisplay),
+    };
+    terminalToggleAddressIeButton.textContent = hasAddressIeDisplay
+        ? '移除 function_call 与 observation'
+        : '插入 function_call 与 observation';
+    terminalTurnMenu.style.left = `${Math.max(16, Math.min(clientX, window.innerWidth - 252))}px`;
+    terminalTurnMenu.style.top = `${Math.max(16, Math.min(clientY, window.innerHeight - 72))}px`;
+    terminalTurnMenu.classList.remove('hidden');
+    terminalTurnMenu.setAttribute('aria-hidden', 'false');
+}
+
 function handleDocumentScroll(event) {
     const scrollTarget = event.target;
     if (scrollTarget instanceof Element && scrollTarget.closest('#issue-reference-popover')) {
         return;
     }
     hideIssueReferencePopover();
+    closeTerminalTurnMenu();
     if (magnifierActive && magnifierLastPoint) {
         syncTextMagnifierClone(magnifierLastPoint.x, magnifierLastPoint.y);
     }
@@ -1066,37 +1099,44 @@ function renderTerminalEntries(entries = []) {
         line.className = `terminal-line ${entry.tone || 'system'}`;
 
         if (entry.entry_type === 'turn') {
-            const contentText = `[${entry.round_label}] ${entry.speaker}: ${entry.text}`;
             const canRewind = entry.tone === 'user'
                 && Boolean(currentSessionId)
                 && !sessionBusy
                 && !sessionReviewLocked
                 && Number(entry.round_index) > 0;
             if (entry.tone === 'user') {
-                const trigger = document.createElement('button');
-                trigger.type = 'button';
-                trigger.className = 'terminal-turn-trigger';
-                trigger.textContent = contentText;
-                trigger.title = '删除该用户行及其下方所有内容';
-                trigger.dataset.roundIndex = String(entry.round_index || '');
-                trigger.dataset.restoreCheckpointIndex = String(
+                const labelTrigger = document.createElement('button');
+                labelTrigger.type = 'button';
+                labelTrigger.className = 'terminal-turn-trigger';
+                labelTrigger.textContent = `[${entry.round_label}]`;
+                labelTrigger.title = '删除该用户行及其下方所有内容';
+                labelTrigger.dataset.roundIndex = String(entry.round_index || '');
+                labelTrigger.dataset.restoreCheckpointIndex = String(
                     Number.isFinite(Number(entry.restore_checkpoint_index))
                         ? Number(entry.restore_checkpoint_index)
                         : Math.max(Number(entry.round_index || 0) - 1, 0),
                 );
-                trigger.dataset.rewindEnabled = canRewind ? 'true' : 'false';
-                trigger.classList.toggle('is-disabled', !canRewind);
+                labelTrigger.dataset.rewindEnabled = canRewind ? 'true' : 'false';
+                labelTrigger.classList.toggle('is-disabled', !canRewind);
+                labelTrigger.classList.add('terminal-turn-rewind-trigger');
                 line.classList.add('rewindable');
-                line.appendChild(trigger);
+                line.appendChild(labelTrigger);
+
+                const textNode = document.createElement('span');
+                textNode.className = 'terminal-user-text';
+                textNode.textContent = ` ${entry.speaker}: ${entry.text}`;
+                textNode.dataset.roundIndex = String(entry.round_index || '');
+                textNode.dataset.hasAddressIeDisplay = entry.has_address_ie_display ? 'true' : 'false';
+                line.appendChild(textNode);
             } else if (shouldOfferIssueReference(entry)) {
                 const trigger = document.createElement('button');
                 trigger.type = 'button';
                 trigger.className = 'terminal-reference-trigger';
-                trigger.textContent = contentText;
+                trigger.textContent = `[${entry.round_label}] ${entry.speaker}: ${entry.text}`;
                 trigger.dataset.referenceTrigger = 'fault-issue-categories';
                 line.appendChild(trigger);
             } else {
-                line.textContent = contentText;
+                line.textContent = `[${entry.round_label}] ${entry.speaker}: ${entry.text}`;
             }
         } else {
             line.textContent = entry.text || '';
@@ -1171,8 +1211,6 @@ async function copyCurrentSessionId() {
 }
 
 function updateInputAvailability(enabled) {
-    const input = document.getElementById('user-input');
-    const button = document.getElementById('send-btn');
     const endButton = document.getElementById('end-session-btn');
     const canInteract = enabled
         && !sessionBusy
@@ -1180,10 +1218,10 @@ function updateInputAvailability(enabled) {
         && !isReviewModalVisible()
         && Boolean(authenticatedUser)
         && !sessionReviewLocked;
-    input.disabled = !canInteract;
-    button.disabled = !canInteract;
+    userInput.disabled = !canInteract;
+    sendButton.disabled = !canInteract;
     endButton.disabled = !currentSessionId || sessionClosed || !authenticatedUser || sessionBusy || sessionReviewLocked;
-    if (canInteract) input.focus();
+    if (canInteract) userInput.focus();
 }
 
 function isReviewModalVisible() {
@@ -1289,6 +1327,7 @@ function applySessionView(data) {
     updateInspector(data.collected_slots, data.runtime_state, data.scenario);
     renderTerminalEntries(sessionTerminalEntries);
     hideIssueReferencePopover();
+    closeTerminalTurnMenu();
     syncSessionTimer();
 
     if (sessionClosed) {
@@ -2531,12 +2570,19 @@ async function forceEndSession() {
 }
 
 async function sendMessage() {
-    const input = document.getElementById('user-input');
-    const rawText = input.value;
+    const rawText = userInput.value;
     const text = rawText.trim();
     if (!text || !currentSessionId || sessionClosed) return;
 
-    input.value = '';
+    if (sessionInputHistory.length === 0 || sessionInputHistory[sessionInputHistory.length - 1] !== rawText) {
+        sessionInputHistory.push(rawText);
+        if (sessionInputHistory.length > SESSION_INPUT_HISTORY_LIMIT) {
+            sessionInputHistory = sessionInputHistory.slice(-SESSION_INPUT_HISTORY_LIMIT);
+        }
+    }
+    sessionInputHistoryIndex = -1;
+    sessionInputDraft = '';
+    userInput.value = '';
     setSessionBusyState(true);
     let errorMessage = '';
     try {
@@ -2579,6 +2625,40 @@ async function rewindFromUserRound(roundIndex, restoreCheckpointIndex) {
         }
     } finally {
         setSessionBusyState(false);
+        if (sessionReviewLocked) {
+            renderTerminalEntries(sessionTerminalEntries);
+            updateInputAvailability(false);
+        }
+        if (errorMessage) {
+            appendTerminalLine(`[系统错误] ${errorMessage}`, 'error');
+        }
+    }
+}
+
+async function toggleAddressIeDisplayForRound(roundIndex, enabled) {
+    if (!currentSessionId || sessionBusy || roundIndex < 1) return;
+
+    setSessionBusyState(true);
+    let errorMessage = '';
+    try {
+        const data = await apiFetch('/api/session/address-ie-display', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: currentSessionId,
+                round_index: roundIndex,
+                enabled: Boolean(enabled),
+            }),
+        });
+        applySessionView(data);
+    } catch (error) {
+        errorMessage = error.message;
+        if (errorMessage.includes('评审已提交')) {
+            sessionReviewLocked = true;
+        }
+    } finally {
+        setSessionBusyState(false);
+        closeTerminalTurnMenu();
         if (sessionReviewLocked) {
             renderTerminalEntries(sessionTerminalEntries);
             updateInputAvailability(false);
@@ -2742,7 +2822,7 @@ terminalOutput.addEventListener('click', (event) => {
         openIssueReferencePopover(referenceButton);
         return;
     }
-    const button = event.target.closest('.terminal-turn-trigger');
+    const button = event.target.closest('.terminal-turn-rewind-trigger');
     if (!button) return;
     event.preventDefault();
     if (button.dataset.rewindEnabled !== 'true') return;
@@ -2751,7 +2831,37 @@ terminalOutput.addEventListener('click', (event) => {
     if (!roundIndex) return;
     rewindFromUserRound(roundIndex, restoreCheckpointIndex);
 });
+terminalOutput.addEventListener('contextmenu', (event) => {
+    const userTextNode = event.target.closest('.terminal-user-text');
+    if (!userTextNode) {
+        closeTerminalTurnMenu();
+        return;
+    }
+    event.preventDefault();
+    if (!currentSessionId || sessionBusy || sessionReviewLocked) {
+        closeTerminalTurnMenu();
+        return;
+    }
+    const roundIndex = Number(userTextNode.dataset.roundIndex || '0');
+    if (!roundIndex) {
+        closeTerminalTurnMenu();
+        return;
+    }
+    openTerminalTurnMenu({
+        roundIndex,
+        hasAddressIeDisplay: userTextNode.dataset.hasAddressIeDisplay === 'true',
+        clientX: event.clientX,
+        clientY: event.clientY,
+    });
+});
 issueReferenceCloseButton.addEventListener('click', hideIssueReferencePopover);
+terminalToggleAddressIeButton.addEventListener('click', () => {
+    if (!terminalTurnMenuState) return;
+    toggleAddressIeDisplayForRound(
+        Number(terminalTurnMenuState.roundIndex || 0),
+        !terminalTurnMenuState.hasAddressIeDisplay,
+    ).catch(() => {});
+});
 document.addEventListener('click', (event) => {
     if (issueReferencePopover.classList.contains('hidden')) return;
     const clickedInsidePopover = event.target.closest('#issue-reference-popover');
@@ -2759,6 +2869,11 @@ document.addEventListener('click', (event) => {
     if (!clickedInsidePopover && !clickedTrigger) {
         hideIssueReferencePopover();
     }
+});
+document.addEventListener('click', (event) => {
+    if (!terminalTurnMenu || terminalTurnMenu.classList.contains('hidden')) return;
+    if (event.target.closest('#terminal-turn-menu')) return;
+    closeTerminalTurnMenu();
 });
 document.addEventListener('click', (event) => {
     if (!chatOnlineDrawerOpen) return;
@@ -2809,6 +2924,9 @@ window.addEventListener('resize', () => {
     if (!chatMessageMenu.classList.contains('hidden')) {
         closeChatMessageMenu();
     }
+    if (!terminalTurnMenu.classList.contains('hidden')) {
+        closeTerminalTurnMenu();
+    }
 });
 window.addEventListener('pointermove', updateCursorGlow, { passive: true });
 window.addEventListener('pointermove', handleChatLauncherDrag);
@@ -2836,6 +2954,7 @@ window.addEventListener('blur', () => {
     endChatMessageHold();
     endChatDrag();
     closeChatMessageMenu();
+    closeTerminalTurnMenu();
     hideTextMagnifier();
 });
 document.addEventListener('pointerleave', hideCursorGlow, true);
@@ -2854,7 +2973,39 @@ document.addEventListener('scroll', handleDocumentScroll, true);
 sessionContextDetails.forEach((detail) => {
     detail.addEventListener('toggle', updateSessionContextDensity);
 });
-document.getElementById('user-input').addEventListener('keydown', (event) => {
+userInput.addEventListener('input', () => {
+    if (sessionInputHistoryIndex !== -1) {
+        sessionInputHistoryIndex = -1;
+    }
+    sessionInputDraft = userInput.value;
+});
+userInput.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowUp') {
+        if (!sessionInputHistory.length) return;
+        event.preventDefault();
+        if (sessionInputHistoryIndex === -1) {
+            sessionInputDraft = userInput.value;
+            sessionInputHistoryIndex = sessionInputHistory.length - 1;
+        } else if (sessionInputHistoryIndex > 0) {
+            sessionInputHistoryIndex -= 1;
+        }
+        userInput.value = sessionInputHistory[sessionInputHistoryIndex] || '';
+        userInput.setSelectionRange(userInput.value.length, userInput.value.length);
+        return;
+    }
+    if (event.key === 'ArrowDown') {
+        if (sessionInputHistoryIndex === -1) return;
+        event.preventDefault();
+        if (sessionInputHistoryIndex < sessionInputHistory.length - 1) {
+            sessionInputHistoryIndex += 1;
+            userInput.value = sessionInputHistory[sessionInputHistoryIndex] || '';
+        } else {
+            sessionInputHistoryIndex = -1;
+            userInput.value = sessionInputDraft;
+        }
+        userInput.setSelectionRange(userInput.value.length, userInput.value.length);
+        return;
+    }
     if (event.key === 'Enter') {
         event.preventDefault();
         sendMessage();

@@ -120,6 +120,14 @@ def create_jwt(key: str, secret: str) -> str:
 def _normalize_turn_text(turn: Any) -> str:
     if isinstance(turn, str):
         return turn.strip()
+    speaker_attr = getattr(turn, "speaker", None)
+    text_attr = getattr(turn, "text", None)
+    if speaker_attr is not None or text_attr is not None:
+        speaker = str(speaker_attr or "").strip()
+        text = str(text_attr or "").strip()
+        if speaker and text:
+            return f"{speaker}：{text}"
+        return text
     if isinstance(turn, Mapping):
         speaker = str(
             turn.get("speaker")
@@ -651,6 +659,43 @@ def get_last_assistant_turn(dialogue: Sequence[Any] | str) -> str:
     return ""
 
 
+def build_address_model_observation(
+    dialogue: Sequence[Any] | str,
+    *,
+    client: OpenAIChatClient | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    try:
+        extracted = ie(dialogue, "address", client=client, model=model)
+        extracted_address = str(extracted.get("address") or "").strip()
+        if not extracted_address:
+            return convert_address_info_to_model_dict(build_address_info("", None))
+        normalized_result = call_address_normalize(extracted_address)
+        address_info = build_address_info(extracted_address, normalized_result)
+        return convert_address_info_to_model_dict(address_info)
+    except Exception as exc:
+        logger.exception("构造地址 observation 失败: %s", exc)
+        return {
+            "address": "",
+            "error_code": 1,
+            "error_msg": str(exc) or "failed to build address observation",
+        }
+
+
+def format_address_observation_line(
+    dialogue: Sequence[Any] | str,
+    *,
+    client: OpenAIChatClient | None = None,
+    model: str | None = None,
+) -> str:
+    observation = build_address_model_observation(
+        dialogue,
+        client=client,
+        model=model,
+    )
+    return f"observation: {json.dumps(observation, ensure_ascii=False)}"
+
+
 def suggest_address_collection_reply(
     address_info: Mapping[str, Any] | None,
     *,
@@ -743,6 +788,9 @@ def run_function_call_for_text(
 
 
 if __name__ == "__main__":
+    """
+    [{"name": "ie", "arguments": {"entity_type": "addressInfo"}}]
+    """
     sample_dialogue = [
         "用户：空气能热水器需要维修",
         "客服：您好，很高兴为您服务，请问是美的空气能热水机需要维修吗？",
@@ -754,11 +802,11 @@ if __name__ == "__main__":
         "客服：请问您当前这个来电号码能联系到您吗？",
         "用户：可以的",
         "客服：您的地址是重庆市渝中区上清寺街道康乐社区3号楼1单元2104室，对吗？",
-        "用户：我在上海市",
-        "客服：好的，您是在上海市的哪个区县呢？具体小区门牌号也提供一下呢？",
-        "用户：青浦区徐泾镇",
-        "客服：请问具体是在哪个小区或村呢？尽量详细到门牌号。",
-        "用户：西郊一区40号楼 402 室",
+        "用户：我在沧浪街道三多巷小区",
+        "客服：好的，请您说一下完整的省市区信息。",
+        "用户：姑苏区",
+        # "客服：请问具体是在哪个小区或村呢？尽量详细到门牌号。",
+        # "用户：西郊一区40号楼 402 室",
     ]
     sample_address = os.environ.get("ADDRESS_TEST_INPUT", "").strip()
     sample_dialogue_text = os.environ.get("DIALOGUE_TEXT_INPUT", "").strip()
