@@ -1,0 +1,40 @@
+{
+  "date": "2026-04-22",
+  "url": "http://127.0.0.1:8000",
+  "healthScore": 88,
+  "issues": [
+    {
+      "id": "ISSUE-001",
+      "title": "登录门禁只遮住视觉层，没有遮住页面语义层",
+      "severity": "high",
+      "category": "accessibility"
+    },
+    {
+      "id": "ISSUE-002",
+      "title": "登录页首次打开固定报 401 控制台错误",
+      "severity": "medium",
+      "category": "console"
+    },
+    {
+      "id": "ISSUE-003",
+      "title": "登录后群聊窗默认展开并挡住右侧诊断区",
+      "severity": "medium",
+      "category": "ux"
+    },
+    {
+      "id": "ISSUE-004",
+      "title": "改写模式底部聊天悬浮入口会压到右下工作区",
+      "severity": "low",
+      "category": "visual"
+    }
+  ],
+  "categoryScores": {
+    "console": 70,
+    "links": 100,
+    "visual": 89,
+    "functional": 92,
+    "ux": 81,
+    "performance": 100,
+    "accessibility": 85
+  }
+}

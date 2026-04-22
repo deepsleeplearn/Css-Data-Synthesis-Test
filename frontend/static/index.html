@@ -41,7 +41,7 @@
         </div>
     </section>
 
-    <div id="app-shell" class="app-shell hidden">
+    <div id="app-shell" class="app-shell hidden" hidden aria-hidden="true">
         <aside id="rewrite-left-panel" class="left-panel">
             <section class="panel-section left-panel-hero">
                 <div class="section-heading">
@@ -237,7 +237,7 @@
         </aside>
     </div>
 
-    <div id="rewrite-shell" class="app-shell rewrite-shell hidden">
+    <div id="rewrite-shell" class="app-shell rewrite-shell hidden" hidden aria-hidden="true">
         <aside id="rewrite-left-panel" class="left-panel">
             <section class="panel-section left-panel-hero">
                 <div class="section-heading">
@@ -394,28 +394,28 @@
         </aside>
     </div>
 
-    <div id="rewrite-transfer-notice" class="rewrite-transfer-notice hidden" aria-live="polite"></div>
+    <div id="rewrite-transfer-notice" class="rewrite-transfer-notice hidden" hidden aria-hidden="true" aria-live="polite"></div>
 
-    <button id="chat-launcher" class="chat-launcher hidden" type="button" aria-expanded="false">
+    <button id="chat-launcher" class="chat-launcher hidden" hidden aria-hidden="true" type="button" aria-expanded="false">
         <span>群聊</span>
         <span id="chat-launcher-online" class="chat-launcher-online">0 人在线</span>
         <span id="chat-launcher-unread" class="chat-launcher-unread hidden">0</span>
     </button>
 
-    <div id="chat-mention-dropdown" class="chat-mention-dropdown hidden" aria-hidden="true"></div>
-    <div id="chat-message-menu" class="chat-message-menu hidden" aria-hidden="true">
+    <div id="chat-mention-dropdown" class="chat-mention-dropdown hidden" hidden aria-hidden="true"></div>
+    <div id="chat-message-menu" class="chat-message-menu hidden" hidden aria-hidden="true">
         <button id="chat-reply-btn" class="chat-message-menu-btn" type="button">回复</button>
         <button id="chat-edit-btn" class="chat-message-menu-btn" type="button">编辑</button>
         <button id="chat-recall-btn" class="chat-message-menu-btn chat-message-menu-btn-danger" type="button">撤回</button>
     </div>
-    <div id="rewrite-record-menu" class="chat-message-menu hidden" aria-hidden="true">
+    <div id="rewrite-record-menu" class="chat-message-menu hidden" hidden aria-hidden="true">
         <button id="rewrite-record-delete-btn" class="chat-message-menu-btn chat-message-menu-btn-danger" type="button">删除该条记录</button>
     </div>
-    <div id="terminal-turn-menu" class="chat-message-menu hidden" aria-hidden="true">
+    <div id="terminal-turn-menu" class="chat-message-menu hidden" hidden aria-hidden="true">
         <button id="terminal-toggle-address-ie-btn" class="chat-message-menu-btn" type="button">插入 function_call 与 observation</button>
     </div>
 
-    <aside id="chat-window" class="chat-window hidden" aria-hidden="true">
+    <aside id="chat-window" class="chat-window hidden" hidden aria-hidden="true">
         <header id="chat-window-header" class="chat-window-header">
             <div>
                 <p class="eyebrow">Group Chat</p>
@@ -481,7 +481,7 @@
         </footer>
     </aside>
 
-    <div id="review-modal" class="modal-shell hidden" aria-hidden="true">
+    <div id="review-modal" class="modal-shell hidden" hidden aria-hidden="true">
         <div class="modal-backdrop"></div>
         <section class="modal-card" role="dialog" aria-modal="true" aria-labelledby="review-title">
             <div class="modal-header">
@@ -528,7 +528,7 @@
             </div>
         </section>
     </div>
-    <div id="rewrite-export-modal" class="modal-shell hidden" aria-hidden="true">
+    <div id="rewrite-export-modal" class="modal-shell hidden" hidden aria-hidden="true">
         <div class="modal-backdrop"></div>
         <section class="modal-card rewrite-export-modal-card" role="dialog" aria-modal="true" aria-labelledby="rewrite-export-title">
             <div class="modal-header">
@@ -546,7 +546,7 @@
             </div>
         </section>
     </div>
-    <div id="rewrite-key-modal" class="modal-shell hidden" aria-hidden="true">
+    <div id="rewrite-key-modal" class="modal-shell hidden" hidden aria-hidden="true">
         <div class="modal-backdrop"></div>
         <section class="modal-card rewrite-export-modal-card" role="dialog" aria-modal="true" aria-labelledby="rewrite-key-title">
             <div class="modal-header">
@@ -570,14 +570,14 @@
         </section>
     </div>
     <canvas id="cursor-trail-canvas" class="cursor-trail-canvas" aria-hidden="true"></canvas>
-    <aside id="issue-reference-popover" class="issue-reference-popover hidden" aria-hidden="true">
+    <aside id="issue-reference-popover" class="issue-reference-popover hidden" hidden aria-hidden="true">
         <div class="issue-reference-header">
             <span>报修问题参考</span>
             <button id="issue-reference-close-btn" class="issue-reference-close-btn" type="button" aria-label="关闭参考列表">×</button>
         </div>
         <div id="issue-reference-list" class="issue-reference-list"></div>
     </aside>
-    <div id="text-magnifier" class="text-magnifier hidden" aria-hidden="true">
+    <div id="text-magnifier" class="text-magnifier hidden" hidden aria-hidden="true">
         <div id="text-magnifier-viewport" class="text-magnifier-viewport"></div>
     </div>
     <script src="/static/app.js"></script>

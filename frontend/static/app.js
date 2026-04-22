@@ -336,6 +336,23 @@ const REWRITE_SHELL_CENTER_MIN_PX = 420;
 const REWRITE_FUNCTION_CALL_ADDRESS_TARGET = 'addressInfo';
 const REWRITE_FUNCTION_CALL_ADDRESS_LABEL = '地址';
 const REWRITE_FUNCTION_CALL_ADDRESS_PAYLOAD = '[{"name": "ie", "arguments": {"entity_type": "addressInfo"}}]';
+const AUTHENTICATED_ONLY_ROOTS = [
+    appShell,
+    rewriteShell,
+    rewriteTransferNotice,
+    chatLauncher,
+    chatMentionDropdown,
+    chatMessageMenu,
+    rewriteRecordMenu,
+    terminalTurnMenu,
+    chatWindow,
+    reviewModal,
+    rewriteExportModal,
+    rewriteKeyModal,
+    issueReferencePopover,
+    textMagnifier,
+].filter(Boolean);
+const authenticatedUiAnchors = new Map();
 
 function formatDisplayTimestamp(date) {
     const year = date.getFullYear();
@@ -377,13 +394,13 @@ function escapeHtml(value) {
 }
 
 function loadChatWindowState() {
-    const fallback = { visible: true, width: 384, height: 544, left: null, top: null, launcher_left: null, launcher_top: null };
+    const fallback = { visible: false, width: 384, height: 544, left: null, top: null, launcher_left: null, launcher_top: null };
     const raw = safeLocalStorageGet(CHAT_WINDOW_STORAGE_KEY);
     if (!raw) return fallback;
     try {
         const parsed = JSON.parse(raw);
         return {
-            visible: parsed.visible !== false,
+            visible: parsed.visible === true,
             width: Number(parsed.width) || fallback.width,
             height: Number(parsed.height) || fallback.height,
             left: Number.isFinite(Number(parsed.left)) ? Number(parsed.left) : null,
@@ -399,6 +416,38 @@ function loadChatWindowState() {
 function persistChatWindowState() {
     if (!chatWindowState) return;
     safeLocalStorageSet(CHAT_WINDOW_STORAGE_KEY, JSON.stringify(chatWindowState));
+}
+
+function setElementInertState(element, inert) {
+    if (!element) return;
+    if ('inert' in element) {
+        element.inert = Boolean(inert);
+    }
+}
+
+function setAuthenticatedUiMounted(mounted) {
+    AUTHENTICATED_ONLY_ROOTS.forEach((element, index) => {
+        if (!authenticatedUiAnchors.has(element)) {
+            authenticatedUiAnchors.set(element, document.createComment(`authenticated-ui-anchor-${index + 1}`));
+        }
+        const anchor = authenticatedUiAnchors.get(element);
+        if (mounted) {
+            if (!element.isConnected && anchor?.parentNode) {
+                anchor.parentNode.insertBefore(element, anchor);
+            }
+            element.removeAttribute('hidden');
+            element.removeAttribute('aria-hidden');
+            setElementInertState(element, false);
+            return;
+        }
+        if (element.isConnected && element.parentNode) {
+            element.parentNode.insertBefore(anchor, element);
+            element.remove();
+        }
+        element.setAttribute('hidden', 'hidden');
+        element.setAttribute('aria-hidden', 'true');
+        setElementInertState(element, true);
+    });
 }
 
 function clearChatMentionDropdown() {
@@ -1043,12 +1092,17 @@ function updateAutoModeButtonState() {
 }
 
 function syncAppModeView() {
-    const showManual = Boolean(authenticatedUser) && activeAppMode === 'manual';
-    const showRewrite = Boolean(authenticatedUser) && activeAppMode === 'rewrite';
+    const authenticated = Boolean(authenticatedUser);
+    const showManual = authenticated && activeAppMode === 'manual';
+    const showRewrite = authenticated && activeAppMode === 'rewrite';
+    setAuthenticatedUiMounted(authenticated);
+    authGate.classList.toggle('hidden', authenticated);
+    authGate.toggleAttribute('hidden', authenticated);
+    authGate.setAttribute('aria-hidden', authenticated ? 'true' : 'false');
     appShell.classList.toggle('hidden', !showManual);
     rewriteShell.classList.toggle('hidden', !showRewrite);
 
-    const showChatWindow = Boolean(authenticatedUser) && chatWindowState?.visible !== false;
+    const showChatWindow = authenticated && chatWindowState?.visible !== false;
     chatWindow.classList.toggle('hidden', !showChatWindow);
     chatWindow.setAttribute('aria-hidden', showChatWindow ? 'false' : 'true');
     if (showChatWindow) {
@@ -5136,7 +5190,6 @@ function applyAuthenticatedState(user) {
     authenticatedUser = user;
     authUserName.textContent = user.display_name || user.username;
     authUserMeta.textContent = `备案账号：${user.username}`;
-    authGate.classList.add('hidden');
     setAuthError('');
     updateCallStartTimeValidationState();
     updateStartSessionButtonState();
@@ -5150,14 +5203,8 @@ function applyLoggedOutState(message = '') {
     stopAutoModePolling();
     authUserName.textContent = '未登录';
     authUserMeta.textContent = '只有备案账号可访问测试台。';
-    appShell.classList.add('hidden');
-    rewriteShell.classList.add('hidden');
-    authGate.classList.remove('hidden');
     stopChatPolling();
     resetChatRuntime();
-    chatLauncher.classList.add('hidden');
-    chatWindow.classList.add('hidden');
-    chatWindow.setAttribute('aria-hidden', 'true');
     setPasswordVisibility(false);
     loginPassword.value = '';
     setAuthError(message);
