@@ -6,6 +6,7 @@ let sessionClosed = true;
 let sessionBusy = false;
 let sessionReviewLocked = false;
 let sessionTerminalEntries = [];
+let terminalProcessingState = null;
 let reviewPending = false;
 let reviewAvailable = false;
 let reviewContext = null;
@@ -786,6 +787,17 @@ function appendTerminalLine(text, tone = 'system') {
     line.textContent = normalizedText;
     terminalOutput.appendChild(line);
     terminalScrollRegion.scrollTop = terminalScrollRegion.scrollHeight;
+}
+
+function setTerminalProcessingState(state = null) {
+    terminalProcessingState = state && state.active
+        ? {
+            active: true,
+            title: String(state.title || '').trim() || '处理中',
+            detail: String(state.detail || '').trim(),
+        }
+        : null;
+    renderTerminalEntries(sessionTerminalEntries);
 }
 
 function clearElement(element) {
@@ -3711,6 +3723,7 @@ function updateSessionContext(scenario, sessionConfig = {}) {
 
 function renderTerminalEntries(entries = []) {
     terminalOutput.innerHTML = '';
+    terminalOutput.classList.toggle('is-processing-only', Boolean(terminalProcessingState?.active) && entries.length === 0);
     entries.forEach((entry) => {
         const line = document.createElement('div');
         line.className = `terminal-line ${entry.tone || 'system'}`;
@@ -3761,6 +3774,37 @@ function renderTerminalEntries(entries = []) {
 
         terminalOutput.appendChild(line);
     });
+
+    if (terminalProcessingState?.active) {
+        const card = document.createElement('section');
+        card.className = 'terminal-processing-card';
+
+        const wave = document.createElement('div');
+        wave.className = 'terminal-processing-wave';
+        for (let index = 0; index < 3; index += 1) {
+            const band = document.createElement('span');
+            band.className = 'terminal-processing-wave-band';
+            wave.appendChild(band);
+        }
+
+        const content = document.createElement('div');
+        content.className = 'terminal-processing-copy';
+
+        const title = document.createElement('h3');
+        title.className = 'terminal-processing-title';
+        title.textContent = terminalProcessingState.title;
+
+        const detail = document.createElement('p');
+        detail.className = 'terminal-processing-detail';
+        detail.textContent = terminalProcessingState.detail || '请稍候，系统正在准备本次测试所需设定。';
+
+        content.appendChild(title);
+        content.appendChild(detail);
+        card.appendChild(wave);
+        card.appendChild(content);
+        terminalOutput.appendChild(card);
+    }
+
     terminalScrollRegion.scrollTop = terminalScrollRegion.scrollHeight;
     if (magnifierActive && magnifierLastPoint) {
         showTextMagnifier(magnifierLastPoint.x, magnifierLastPoint.y);
@@ -3927,14 +3971,14 @@ function openReviewModal(data, { blocking = true } = {}) {
     syncReviewModalMode(data);
     const isAutoModeReview = String(data?.mode || '').trim() === 'auto_mode';
     if (isAutoModeReview) {
-        reviewSummary.textContent = `自动模式已结束。Auto ID: ${reviewIdentifier}。如需继续处理这段对话，请点击下方“转到改写模式继续编辑”。`;
+        reviewSummary.textContent = `自动模式已结束。Auto ID: ${reviewIdentifier}。如需继续处理这段对话，请点击下方“提交改写模式”。`;
     } else {
         reviewSummary.textContent = data.status === 'completed'
-            ? `会话已正常结束。Session ID: ${currentSessionId}。如需继续处理这段对话，可点击下方“转到改写模式继续编辑”；否则请标记当前测试流程是否正确。`
-            : `会话已结束。Session ID: ${currentSessionId}。如需继续处理这段对话，可点击下方“转到改写模式继续编辑”；否则请标记当前测试流程是否正确，并在有问题时指出出错流程。`;
+            ? `会话已正常结束。Session ID: ${currentSessionId}。如需继续处理这段对话，可点击下方“提交改写模式”；否则请标记当前测试流程是否正确。`
+            : `会话已结束。Session ID: ${currentSessionId}。如需继续处理这段对话，可点击下方“提交改写模式”；否则请标记当前测试流程是否正确，并在有问题时指出出错流程。`;
     }
     if (reviewToRewriteButton) {
-        reviewToRewriteButton.textContent = '转到改写模式继续编辑';
+        reviewToRewriteButton.textContent = '提交改写模式';
         reviewToRewriteButton.title = '将当前测试生成的对话直接送到改写模式继续编辑';
     }
     failedFlowStageSelect.innerHTML = '<option value="">请选择出错流程</option>';
@@ -5059,6 +5103,7 @@ function resetWorkspace() {
     sessionBusy = false;
     sessionReviewLocked = false;
     sessionTerminalEntries = [];
+    terminalProcessingState = null;
     sessionStartedAt = '';
     sessionEndedAt = '';
     autoKnownAddressValue = '';
@@ -5359,7 +5404,15 @@ async function startSession() {
 
     const output = document.getElementById('terminal-output');
     output.innerHTML = '';
-    appendTerminalLine('正在初始化手工测试会话...', 'system');
+    if (payload.auto_generate_hidden_settings) {
+        setTerminalProcessingState({
+            active: true,
+            title: '正在生成隐藏设定',
+            detail: '系统正在构建本次会话的人设、地址计划和隐藏上下文，请稍候。',
+        });
+    } else {
+        appendTerminalLine('正在初始化手工测试会话...', 'system');
+    }
     sessionBusy = true;
     updateInputAvailability(false);
     updateStartSessionButtonState();
@@ -5371,8 +5424,10 @@ async function startSession() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
+        setTerminalProcessingState(null);
         applySessionView(data);
     } catch (error) {
+        setTerminalProcessingState(null);
         currentSessionId = null;
         currentSlotKeys = [];
         sessionClosed = true;
@@ -5509,7 +5564,15 @@ async function runAutoMode() {
 
     stopAutoModePolling();
     terminalOutput.innerHTML = '';
-    appendTerminalLine('正在执行自动模式...', 'system');
+    if (payload.auto_generate_hidden_settings) {
+        setTerminalProcessingState({
+            active: true,
+            title: '正在生成隐藏设定',
+            detail: '自动模式正在准备用户画像、地址回答计划和隐藏上下文，随后将开始逐轮生成。',
+        });
+    } else {
+        appendTerminalLine('正在执行自动模式...', 'system');
+    }
     setSessionBusyState(true);
     let errorMessage = '';
     try {
@@ -5518,6 +5581,7 @@ async function runAutoMode() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
+        setTerminalProcessingState(null);
         applyAutoModeView(data);
         if (data?.job_done) {
             stopAutoModePolling();
@@ -5527,6 +5591,7 @@ async function runAutoMode() {
             scheduleAutoModePoll();
         }
     } catch (error) {
+        setTerminalProcessingState(null);
         errorMessage = error.message;
         stopAutoModePolling();
         setSessionBusyState(false);
