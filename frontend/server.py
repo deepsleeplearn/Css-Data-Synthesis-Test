@@ -1463,6 +1463,7 @@ def _build_auto_address_confirmation_result(
 
     runtime_state.expected_address_confirmation = True
     runtime_state.address_confirmation_triggered_by_observation = True
+    runtime_state.address_confirmation_started_from_known_address = False
     runtime_state.awaiting_full_address = False
     runtime_state.pending_address_confirmation = confirmed_address
     runtime_state.partial_address_candidate = ""

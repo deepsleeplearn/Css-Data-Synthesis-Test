@@ -63,6 +63,7 @@ class ServiceRuntimeState:
     expected_product_arrival_confirmation: bool = False
     product_arrival_checked: bool = False
     pending_address_confirmation: str = ""
+    address_confirmation_started_from_known_address: bool = False
     awaiting_full_address: bool = False
     address_input_attempts: int = 0
     partial_address_candidate: str = ""
@@ -110,6 +111,7 @@ class ServiceDialoguePolicy:
     ADDRESS_LOCALITY_FOLLOWUP_PROMPT = "请问具体是在哪个小区或村呢？尽量详细到门牌号。"
     ADDRESS_LOCALITY_WHICH_FOLLOWUP_PROMPT = "请问是在哪个小区或哪个村呢？尽量详细到门牌号。"
     ADDRESS_RURAL_DETAIL_FOLLOWUP_PROMPT = "好的，请您提供一下详细的地址，具体到门牌号。"
+    ADDRESS_RECOLLECTION_PROMPT = "了解了，麻烦您重新提供一下地址，包括省、市、区、乡镇。"
     ADDRESS_CONFIRMATION_TEMPLATE = "跟您确认一下，地址是{address}，对吗？"
     KNOWN_ADDRESS_CONFIRMATION_TEMPLATE = "您的地址是{address}，对吗？"
     PRODUCT_ARRIVAL_PROMPT = "请问{product}已经送到了吗？"
@@ -141,6 +143,7 @@ class ServiceDialoguePolicy:
     ADDRESS_LOCALITY_FOLLOWUP_PROMPT: PromptConfig = [("请问具体是在哪个小区或村呢？尽量详细到门牌号。", 1.0)]
     ADDRESS_LOCALITY_WHICH_FOLLOWUP_PROMPT: PromptConfig = [("请问是在哪个小区或哪个村呢？尽量详细到门牌号。", 1.0)]
     ADDRESS_RURAL_DETAIL_FOLLOWUP_PROMPT: PromptConfig = [("好的，请您提供一下详细的地址，具体到门牌号。", 1.0)]
+    ADDRESS_RECOLLECTION_PROMPT: PromptConfig = [("了解了，麻烦您重新提供一下地址，包括省、市、区、乡镇。", 1.0)]
     ADDRESS_CONFIRMATION_TEMPLATE: PromptConfig = [("跟您确认一下，地址是{address}，对吗？", 1.0)]
     KNOWN_ADDRESS_CONFIRMATION_TEMPLATE: PromptConfig = [("您的地址是{address}，对吗？", 1.0)]
     PRODUCT_ARRIVAL_PROMPT: PromptConfig = [("请问{product}已经送到了吗？", 1.0)]
@@ -535,13 +538,24 @@ class ServiceDialoguePolicy:
             prompt_kind="address_confirmation",
             user_round_index=user_round_index,
         )
-        runtime_state.expected_address_confirmation = False
-        runtime_state.address_confirmation_triggered_by_observation = False
         confirmation_address = (
             runtime_state.pending_address_confirmation
             or self._service_known_address_value(scenario)
             or scenario.customer.address
         )
+        started_from_known_address = runtime_state.address_confirmation_started_from_known_address
+        triggered_by_observation = runtime_state.address_confirmation_triggered_by_observation
+        previous_service_text = self._previous_service_text(transcript)
+        if (
+            not started_from_known_address
+            and not triggered_by_observation
+            and self.is_address_confirmation_prompt(previous_service_text)
+            and self._normalize_prompt_text(previous_service_text).startswith("您的地址是")
+        ):
+            started_from_known_address = True
+        runtime_state.expected_address_confirmation = False
+        runtime_state.address_confirmation_triggered_by_observation = False
+        runtime_state.address_confirmation_started_from_known_address = False
 
         if intent == "yes":
             slot_updates = dict(slot_updates)
@@ -607,7 +621,12 @@ class ServiceDialoguePolicy:
             runtime_state.partial_address_candidate = ""
             runtime_state.address_vague_retry_count = 0
             return ServicePolicyResult(
-                reply=self._remember_address_followup_prompt(runtime_state, self._address_prompt()),
+                reply=self._remember_address_followup_prompt(
+                    runtime_state,
+                    self._address_recollection_prompt()
+                    if started_from_known_address or triggered_by_observation
+                    else self._address_prompt(),
+                ),
                 slot_updates=slot_updates,
                 is_ready_to_close=False,
             )
@@ -1499,6 +1518,50 @@ class ServiceDialoguePolicy:
         confirmation_address: str,
         user_round_index: int = 0,
     ) -> str:
+        def _rule_evidence_intent() -> str:
+            confirmation_intent = self._classify_confirmation_intent(
+                text,
+                prompt_kind="address_confirmation",
+                user_round_index=user_round_index,
+            )
+            if confirmation_intent == "yes":
+                residual_text = self._strip_address_confirmation_affirmation_prefix(text)
+                prepared_user_address = self._prepare_address_for_confirmation(residual_text)
+                if prepared_user_address:
+                    merged_candidate = self._merge_address_candidate(
+                        confirmation_address,
+                        prepared_user_address,
+                    )
+                    if merged_candidate and self._address_input_makes_progress(
+                        existing=confirmation_address,
+                        incoming=prepared_user_address,
+                        merged=merged_candidate,
+                    ):
+                        return "add"
+                return "confirm_only"
+            denial_address, _ = self._resolve_confirmation_denial_address_candidate(
+                transcript=[],
+                user_text=text,
+                confirmation_address=confirmation_address,
+            )
+            if denial_address:
+                return "modify"
+            if confirmation_intent == "no":
+                return "unknown"
+            prepared_user_address = self._prepare_address_for_confirmation(text)
+            if prepared_user_address:
+                merged_candidate = self._merge_address_candidate(
+                    confirmation_address,
+                    prepared_user_address,
+                )
+                if merged_candidate and self._address_input_makes_progress(
+                    existing=confirmation_address,
+                    incoming=prepared_user_address,
+                    merged=merged_candidate,
+                ):
+                    return "add"
+            return "unknown"
+
         if self.confirmation_intent_inference_callback is not None:
             try:
                 payload = self._invoke_inference_callback(
@@ -1513,39 +1576,37 @@ class ServiceDialoguePolicy:
             if isinstance(payload, dict):
                 intent = str(payload.get("intent", "")).strip().lower()
                 if intent in {"confirm_only", "modify", "add", "delete", "unknown"}:
+                    rule_intent = _rule_evidence_intent()
+                    if intent == "confirm_only":
+                        self.last_used_model_intent_inference = True
+                        return "confirm_only" if rule_intent != "add" else "add"
+                    if intent in {"add", "modify", "delete"}:
+                        self.last_used_model_intent_inference = True
+                        if rule_intent in {"add", "modify", "delete"}:
+                            return rule_intent
+                        return "confirm_only" if rule_intent == "confirm_only" else "unknown"
                     self.last_used_model_intent_inference = True
-                    return intent
+                    return rule_intent
 
-        prepared_user_address = self._prepare_address_for_confirmation(text)
-        if prepared_user_address:
-            merged_candidate = self._merge_address_candidate(
-                confirmation_address,
-                prepared_user_address,
-            )
-            if merged_candidate and self._address_input_makes_progress(
-                existing=confirmation_address,
-                incoming=prepared_user_address,
-                merged=merged_candidate,
-            ):
-                return "add"
-        compact_user_text = re.sub(r"[，。！？、,.!\s]", "", str(text or ""))
-        if self._classify_yes_no(text) == "yes" and not self._strip_opening_affirmation_noise(compact_user_text):
-            return "confirm_only"
-        intent = self._classify_confirmation_intent(
-            text,
-            prompt_kind="address_confirmation",
-            user_round_index=user_round_index,
+        return _rule_evidence_intent()
+
+    @classmethod
+    def _strip_address_confirmation_affirmation_prefix(cls, text: str) -> str:
+        cleaned = str(text or "").strip()
+        patterns = (
+            r"^(?:啊|嗯|额|呃|诶|欸|哎|哦|喔|哈)[，,\s]*",
+            r"^(?:对(?:的|滴)?|是(?:的|滴)?|嗯(?:嗯|呐)?|没错|正确|就是这个|就这个)[，,\s]*",
+            r"^(?:就是|按你刚核对那个|按刚才那个|按这个地址)[，,\s]*",
         )
-        if intent == "yes":
-            return "confirm_only"
-        denial_address, _ = self._resolve_confirmation_denial_address_candidate(
-            transcript=[],
-            user_text=text,
-            confirmation_address=confirmation_address,
-        )
-        if denial_address:
-            return "modify"
-        return "unknown"
+        updated = True
+        while cleaned and updated:
+            updated = False
+            for pattern in patterns:
+                next_cleaned = re.sub(pattern, "", cleaned)
+                if next_cleaned != cleaned:
+                    cleaned = next_cleaned.strip()
+                    updated = True
+        return cleaned
 
     def _classify_product_routing_answer_key(
         self,
@@ -1933,6 +1994,7 @@ class ServiceDialoguePolicy:
         )
         runtime_state.expected_address_confirmation = True
         runtime_state.address_confirmation_triggered_by_observation = False
+        runtime_state.address_confirmation_started_from_known_address = use_known_address_prompt
         runtime_state.awaiting_full_address = False
         runtime_state.pending_address_confirmation = confirmation_address
         runtime_state.partial_address_candidate = ""
@@ -3680,6 +3742,7 @@ class ServiceDialoguePolicy:
         normalized = cls._normalize_prompt_text(text)
         return (
             normalized in cls._prompt_signatures(cls.ADDRESS_PROMPT)
+            or normalized in cls._prompt_signatures(cls.ADDRESS_RECOLLECTION_PROMPT)
             or normalized.startswith("好的，您是在")
             or normalized.startswith("请问是")
             or normalized in cls._prompt_signatures(cls.ADDRESS_PROVINCE_CITY_FOLLOWUP_PROMPT)
@@ -4339,6 +4402,9 @@ class ServiceDialoguePolicy:
             self._choose_prompt_text(prompt_config, address=display_address)
         )
 
+    def _address_recollection_prompt(self) -> str:
+        return self._choose_prompt_text(self.ADDRESS_RECOLLECTION_PROMPT)
+
     @staticmethod
     def _sanitize_address_for_confirmation_display(address: str) -> str:
         return re.sub(r"[，,。！？!?；;：:、]", "", str(address or "")).strip()
@@ -4430,6 +4496,13 @@ class ServiceDialoguePolicy:
         if followup_intent in {"modify", "add", "delete"}:
             return True
         if followup_intent == "confirm_only":
+            return False
+        confirmation_intent = self._classify_confirmation_intent(
+            user_text,
+            prompt_kind="address_confirmation",
+            user_round_index=user_round_index,
+        )
+        if confirmation_intent in {"yes", "no"}:
             return False
         prepared_user_address = self._prepare_address_for_confirmation(user_text)
         if prepared_user_address:
@@ -4754,6 +4827,7 @@ class ServiceDialoguePolicy:
         runtime_state.pending_phone_number_confirmation = ""
         runtime_state.expected_address_confirmation = False
         runtime_state.address_confirmation_triggered_by_observation = False
+        runtime_state.address_confirmation_started_from_known_address = False
         runtime_state.expected_product_arrival_confirmation = False
         runtime_state.pending_address_confirmation = ""
         runtime_state.awaiting_full_address = False

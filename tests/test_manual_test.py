@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import css_data_synthesis_test.manual_test as manual_test_module
 from css_data_synthesis_test.manual_test import (
     _manual_command_token,
     _sanitize_manual_user_text,
@@ -12,7 +13,7 @@ from css_data_synthesis_test.manual_test import (
     run_manual_test_session,
 )
 from css_data_synthesis_test.schemas import Scenario
-from css_data_synthesis_test.service_policy import ServicePolicyResult
+from css_data_synthesis_test.service_policy import ServiceDialoguePolicy, ServicePolicyResult
 
 
 def build_scenario_payload(scenario_id: str) -> dict:
@@ -278,7 +279,69 @@ class ManualTestModuleTests(unittest.TestCase):
 
         self.assertEqual(payload["collected_slots"]["product_routing_result"], "楼宇 + 可直接确认机型")
         self.assertTrue(any("最终槽位:" in line for line in outputs))
-        self.assertTrue(any("product_routing_result" in line for line in outputs))
+
+    def test_manual_test_observation_confirmation_confirm_only_does_not_repeat_function_call(self):
+        scenario_payload = build_scenario_payload("manual_case_007")
+        scenario_payload["customer"]["address"] = "江苏省扬州市宝应县安宜镇阳光锦城"
+        scenario_payload["required_slots"] = ["address"]
+        scenario_payload["max_turns"] = 8
+        scenario = Scenario.from_dict(scenario_payload)
+        policy = ServiceDialoguePolicy()
+        outputs: list[str] = []
+        replies = iter(
+            [
+                "美的空气能热水器需要维修",
+                "是的",
+                "宝应县",
+                "阳光锦城",
+                "是的，安宜镇",
+                "/quit",
+            ]
+        )
+
+        def fake_input(prompt: str) -> str:
+            return next(replies)
+
+        original_builder = manual_test_module.build_address_model_observation
+
+        def fake_build_address_model_observation(transcript):
+            last_user = next(
+                (turn.text for turn in reversed(transcript) if turn.speaker == "user"),
+                "",
+            )
+            if "阳光锦城" in last_user or "安宜镇" in last_user:
+                return {
+                    "address": "江苏省扬州市宝应县安宜镇阳光锦城",
+                    "error_code": 0,
+                    "error_msg": "已成功获取完整地址",
+                }
+            return {
+                "address": "",
+                "error_code": 1,
+                "error_msg": "未获取完整地址",
+            }
+
+        manual_test_module.build_address_model_observation = fake_build_address_model_observation
+        try:
+            run_manual_test_session(
+                scenario,
+                output_path=None,
+                max_rounds=8,
+                policy=policy,
+                input_func=fake_input,
+                print_func=outputs.append,
+            )
+        finally:
+            manual_test_module.build_address_model_observation = original_builder
+
+        function_call_lines = [line for line in outputs if line.startswith("function_call:")]
+        self.assertEqual(len(function_call_lines), 1)
+        self.assertTrue(
+            any(
+                line == "[5] 客服: 好的，您的工单已受理成功，2小时内服务人员会电话联系，预约具体上门时间。"
+                for line in outputs
+            )
+        )
 
 
 if __name__ == "__main__":

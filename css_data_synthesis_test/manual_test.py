@@ -20,8 +20,14 @@ from css_data_synthesis_test.schemas import (
     effective_required_slots,
 )
 from css_data_synthesis_test.scenario_factory import ScenarioFactory
-from css_data_synthesis_test.function_call import format_address_observation_line
-from css_data_synthesis_test.service_policy import ServiceDialoguePolicy, ServiceRuntimeState
+from css_data_synthesis_test.function_call import (
+    build_address_model_observation,
+)
+from css_data_synthesis_test.service_policy import (
+    ServiceDialoguePolicy,
+    ServicePolicyResult,
+    ServiceRuntimeState,
+)
 from css_data_synthesis_test.validator import validate_dialogue
 
 
@@ -31,6 +37,40 @@ MANUAL_TEST_EXIT_COMMANDS = {"/quit", "/exit"}
 MANUAL_TEST_SHOW_SLOTS_COMMAND = "/slots"
 MANUAL_TEST_SHOW_STATE_COMMAND = "/state"
 MANUAL_TEST_HELP_COMMAND = "/help"
+
+
+def _build_auto_address_confirmation_result(
+    *,
+    policy: ServiceDialoguePolicy,
+    runtime_state: ServiceRuntimeState,
+    observation: dict[str, Any] | None,
+) -> ServicePolicyResult | None:
+    if not isinstance(observation, dict):
+        return None
+    error_code = observation.get("error_code", 1)
+    try:
+        normalized_error_code = int(error_code)
+    except (TypeError, ValueError):
+        normalized_error_code = 1
+    if normalized_error_code != 0:
+        return None
+    confirmed_address = str(observation.get("address") or "").strip()
+    if not confirmed_address:
+        return None
+
+    runtime_state.expected_address_confirmation = True
+    runtime_state.address_confirmation_triggered_by_observation = True
+    runtime_state.address_confirmation_started_from_known_address = False
+    runtime_state.awaiting_full_address = False
+    runtime_state.pending_address_confirmation = confirmed_address
+    runtime_state.partial_address_candidate = ""
+    runtime_state.address_vague_retry_count = 0
+    runtime_state.last_address_followup_prompt = ""
+    return ServicePolicyResult(
+        reply=policy._address_confirmation_prompt(confirmed_address),
+        slot_updates={},
+        is_ready_to_close=False,
+    )
 
 
 def _sanitize_manual_user_text(raw: str) -> str:
@@ -158,26 +198,51 @@ def run_manual_test_session(
                 round_index=round_index,
             )
         )
-        if resolved_policy.should_insert_address_ie_function_call(
-            user_text=user_text,
-            transcript=transcript,
-            runtime_state=runtime_state,
-        ):
+        should_insert_for_collection = False
+        if hasattr(resolved_policy, "should_insert_address_ie_function_call"):
+            should_insert_for_collection = bool(
+                resolved_policy.should_insert_address_ie_function_call(
+                    user_text=user_text,
+                    transcript=transcript,
+                    runtime_state=runtime_state,
+                )
+            )
+        should_insert_for_confirmation_correction = (
+            not should_insert_for_collection
+            and hasattr(resolved_policy, "should_insert_address_ie_after_observation_confirmation")
+            and bool(
+                resolved_policy.should_insert_address_ie_after_observation_confirmation(
+                    user_text=user_text,
+                    user_round_index=round_index,
+                    transcript=transcript,
+                    runtime_state=runtime_state,
+                )
+            )
+        )
+        auto_address_observation: dict[str, Any] | None = None
+        if should_insert_for_collection or should_insert_for_confirmation_correction:
+            auto_address_observation = build_address_model_observation(transcript)
             transcript[-1].post_display_lines.append(
                 resolved_policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY
             )
             transcript[-1].post_display_lines.append(
-                format_address_observation_line(transcript)
+                f"observation: {json.dumps(auto_address_observation, ensure_ascii=False)}"
             )
             for line in transcript[-1].post_display_lines:
                 print_func(line)
 
-        service_result = resolved_policy.respond(
-            scenario=scenario,
-            transcript=transcript,
-            collected_slots=collected_slots,
+        service_result = _build_auto_address_confirmation_result(
+            policy=resolved_policy,
             runtime_state=runtime_state,
+            observation=auto_address_observation,
         )
+        if service_result is None:
+            service_result = resolved_policy.respond(
+                scenario=scenario,
+                transcript=transcript,
+                collected_slots=collected_slots,
+                runtime_state=runtime_state,
+            )
         _merge_slots(collected_slots, service_result.slot_updates, required_slots)
         _merge_slots(
             collected_slots,

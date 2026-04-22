@@ -3027,10 +3027,71 @@ class ServicePolicyTests(unittest.TestCase):
 
         self.assertEqual(
             result.reply,
-            "好的，需要登记下您的地址，麻烦您完整的说下省、市、区、乡镇，精确到门牌号。",
+            "了解了，麻烦您重新提供一下地址，包括省、市、区、乡镇。",
         )
         self.assertEqual(state.partial_address_candidate, "")
         self.assertTrue(state.awaiting_full_address)
+
+    def test_known_address_confirmation_plain_no_restarts_collection_with_fixed_prompt_and_keeps_ie_entry(self):
+        policy = ServiceDialoguePolicy()
+        state = ServiceRuntimeState(
+            expected_address_confirmation=True,
+            pending_address_confirmation="四川省南充市顺庆区中城街道碧桂园15座903室",
+            address_confirmation_started_from_known_address=True,
+        )
+        scenario = build_scenario(
+            service_known_address=True,
+            service_known_address_value="四川省南充市顺庆区中城街道碧桂园15座903室",
+            service_known_address_matches_actual=False,
+        )
+        transcript = [
+            DialogueTurn(
+                speaker="service",
+                text="好的，您的地址是四川省南充市顺庆区中城街道碧桂园15座903室，对吗？",
+                round_index=6,
+            ),
+            DialogueTurn(speaker="user", text="不是", round_index=6),
+        ]
+        collected_slots = {
+            "issue_description": "不制热。",
+            "surname": "张",
+            "phone": "13800138001",
+            "address": "",
+            "product_model": "",
+            "request_type": "fault",
+            "availability": "",
+            "phone_contactable": "yes",
+            "phone_contact_owner": "本人当前来电",
+            "phone_collection_attempts": "0",
+        }
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots=collected_slots,
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "了解了，麻烦您重新提供一下地址，包括省、市、区、乡镇。")
+        self.assertTrue(state.awaiting_full_address)
+        self.assertTrue(
+            policy.should_insert_address_ie_function_call(
+                user_text="四川省南充市顺庆区中城街道碧桂园15座903室",
+                transcript=[
+                    DialogueTurn(
+                        speaker="service",
+                        text=result.reply,
+                        round_index=7,
+                    ),
+                    DialogueTurn(
+                        speaker="user",
+                        text="四川省南充市顺庆区中城街道碧桂园15座903室",
+                        round_index=8,
+                    ),
+                ],
+                runtime_state=state,
+            )
+        )
 
     def test_corrected_address_confirmation_yes_uses_pending_confirmation_address(self):
         policy = ServiceDialoguePolicy()
@@ -3077,6 +3138,147 @@ class ServicePolicyTests(unittest.TestCase):
         self.assertEqual(
             result.slot_updates["address"],
             "浙江省衢州市柯城区绿茵名都小区21号楼2单元1403室",
+        )
+
+    def test_observation_address_confirmation_plain_no_restarts_collection_with_fixed_prompt(self):
+        policy = ServiceDialoguePolicy()
+        state = ServiceRuntimeState(
+            expected_address_confirmation=True,
+            address_confirmation_triggered_by_observation=True,
+            pending_address_confirmation="江苏省扬州市宝应县御景豪庭10号楼401室",
+        )
+        transcript = [
+            DialogueTurn(
+                speaker="service",
+                text="好的，跟您确认一下，地址是江苏省扬州市宝应县御景豪庭10号楼401室，对吗？",
+                round_index=9,
+            ),
+            DialogueTurn(speaker="user", text="不对", round_index=10),
+        ]
+        scenario = build_scenario()
+        collected_slots = {
+            "issue_description": "热水器加热慢。",
+            "surname": "张",
+            "phone": "13800138001",
+            "address": "",
+            "product_model": "",
+            "request_type": "fault",
+            "availability": "",
+            "phone_contactable": "yes",
+            "phone_contact_owner": "本人当前来电",
+            "phone_collection_attempts": "0",
+        }
+
+        self.assertFalse(
+            policy.should_insert_address_ie_after_observation_confirmation(
+                user_text="不对",
+                user_round_index=10,
+                transcript=transcript,
+                runtime_state=state,
+            )
+        )
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots=collected_slots,
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "了解了，麻烦您重新提供一下地址，包括省、市、区、乡镇。")
+        self.assertTrue(state.awaiting_full_address)
+        self.assertEqual(state.partial_address_candidate, "")
+
+    def test_observation_address_confirmation_yes_with_repeated_same_components_skips_ie_and_advances(self):
+        policy = ServiceDialoguePolicy()
+        state = ServiceRuntimeState(
+            expected_address_confirmation=True,
+            address_confirmation_triggered_by_observation=True,
+            pending_address_confirmation="江苏省扬州市宝应县御景豪庭10号楼401室",
+        )
+        transcript = [
+            DialogueTurn(
+                speaker="service",
+                text="好的，跟您确认一下，地址是江苏省扬州市宝应县御景豪庭10号楼401室，对吗？",
+                round_index=9,
+            ),
+            DialogueTurn(
+                speaker="user",
+                text="对，就是扬州市宝应县御景豪庭10号楼401室。",
+                round_index=10,
+            ),
+        ]
+        scenario = build_scenario()
+        collected_slots = {
+            "issue_description": "热水器加热慢。",
+            "surname": "张",
+            "phone": "13800138001",
+            "address": "",
+            "product_model": "",
+            "request_type": "fault",
+            "availability": "",
+            "phone_contactable": "yes",
+            "phone_contact_owner": "本人当前来电",
+            "phone_collection_attempts": "0",
+        }
+
+        self.assertFalse(
+            policy.should_insert_address_ie_after_observation_confirmation(
+                user_text="对，就是扬州市宝应县御景豪庭10号楼401室。",
+                user_round_index=10,
+                transcript=transcript,
+                runtime_state=state,
+            )
+        )
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots=collected_slots,
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.slot_updates["address"], "江苏省扬州市宝应县御景豪庭10号楼401室")
+        self.assertFalse(state.expected_address_confirmation)
+        self.assertFalse(state.awaiting_full_address)
+        self.assertNotIn("地址是", result.reply)
+
+    def test_observation_address_confirmation_model_add_without_real_progress_does_not_trigger_ie(self):
+        def fake_confirmation_inference(*, prompt_kind: str, user_text: str, **_: str):
+            if prompt_kind == "address_confirmation_observation_followup":
+                return {"intent": "add"}
+            if prompt_kind == "address_confirmation":
+                return {"intent": "yes"}
+            return {"intent": "unknown"}
+
+        policy = ServiceDialoguePolicy(
+            confirmation_intent_inference_callback=fake_confirmation_inference,
+        )
+        state = ServiceRuntimeState(
+            expected_address_confirmation=True,
+            address_confirmation_triggered_by_observation=True,
+            pending_address_confirmation="江苏省扬州市宝应县安宜镇阳光锦城",
+        )
+        transcript = [
+            DialogueTurn(
+                speaker="service",
+                text="好的，跟您确认一下，地址是江苏省扬州市宝应县安宜镇阳光锦城，对吗？",
+                round_index=9,
+            ),
+            DialogueTurn(
+                speaker="user",
+                text="嗯嗯，是的，宝应县安宜镇。",
+                round_index=10,
+            ),
+        ]
+
+        self.assertFalse(
+            policy.should_insert_address_ie_after_observation_confirmation(
+                user_text="嗯嗯，是的，宝应县安宜镇。",
+                user_round_index=10,
+                transcript=transcript,
+                runtime_state=state,
+            )
         )
 
     def test_known_address_confirmation_room_only_correction_starts_confirmation(self):
