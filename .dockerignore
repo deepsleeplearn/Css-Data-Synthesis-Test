@@ -10,3 +10,5 @@ __pycache__
 venv
 outputs
 *.sqlite3
+.adds
+.omx
