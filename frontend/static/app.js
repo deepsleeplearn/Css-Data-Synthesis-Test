@@ -91,10 +91,12 @@ let rewriteRecordSearchQuery = '';
 const rewriteObservationLoadingLineIds = new Set();
 let rewritePendingExportAction = null;
 let rewriteKeyPromptState = null;
+let rewriteTransferNoticeTimer = null;
 
 const authGate = document.getElementById('auth-gate');
 const appShell = document.getElementById('app-shell');
 const rewriteShell = document.getElementById('rewrite-shell');
+const rewriteTransferNotice = document.getElementById('rewrite-transfer-notice');
 const rewriteLeftPanel = document.getElementById('rewrite-left-panel');
 const rewriteRightPanel = document.getElementById('rewrite-right-panel');
 const rewriteMainPanel = document.getElementById('rewrite-main-panel');
@@ -130,6 +132,7 @@ const failedFlowStageSelect = document.getElementById('failed-flow-stage');
 const reviewNotes = document.getElementById('review-notes');
 const reviewPersistCheckbox = document.getElementById('review-persist-to-db');
 const reviewSubmitButton = document.getElementById('review-submit-btn');
+const reviewToRewriteButton = document.getElementById('review-to-rewrite-btn');
 const terminalScrollRegion = document.getElementById('terminal-scroll-region');
 const terminalOutput = document.getElementById('terminal-output');
 const userInput = document.getElementById('user-input');
@@ -2060,6 +2063,78 @@ function submitCurrentRewriteRecord() {
     }
 }
 
+function buildRewriteRecordFromSessionEntries() {
+    if (!Array.isArray(sessionTerminalEntries) || sessionTerminalEntries.length < 1) return null;
+    const dialogueProcess = [];
+    sessionTerminalEntries.forEach((entry) => {
+        if (!entry || typeof entry !== 'object') return;
+        if (entry.entry_type === 'turn') {
+            dialogueProcess.push({
+                round_label: entry.round_label || '',
+                speaker: entry.speaker || '',
+                text: entry.text || '',
+            });
+            return;
+        }
+        const rawText = String(entry.text || '').trim();
+        if (!rawText) return;
+        if (rawText.startsWith('function_call:')) {
+            dialogueProcess.push({
+                display_kind: 'function_call',
+                speaker: 'function_call',
+                text: rawText,
+            });
+            return;
+        }
+        if (rawText.startsWith('observation:')) {
+            dialogueProcess.push({
+                display_kind: 'observation',
+                speaker: 'observation',
+                text: rawText,
+            });
+        }
+    });
+    if (!dialogueProcess.length) return null;
+    return {
+        session_id: currentSessionId || `manual-${Date.now()}`,
+        id: currentSessionId || `manual-${Date.now()}`,
+        dialogue_process: dialogueProcess,
+        source: 'manual_test',
+    };
+}
+
+function appendCurrentSessionToRewriteMode() {
+    const record = buildRewriteRecordFromSessionEntries();
+    if (!record) {
+        window.alert('当前测试会话没有可转入改写模式的对话内容。');
+        return;
+    }
+    const incomingId = resolveRewriteRecordId(record);
+    if (incomingId) {
+        const duplicated = rewriteRecords.some((item) => resolveRewriteRecordId(item) === incomingId);
+        if (duplicated) {
+            showRewriteTransferNotice(`未转入改写模式：记录 id「${incomingId}」已存在。`);
+            return;
+        }
+    }
+    rewriteImportedRecords.push(cloneRewriteRecordData(record));
+    rewriteRecords.push(cloneRewriteRecordData(record));
+    if (!rewriteSourceName) {
+        rewriteSourceName = 'manual_session_export.json';
+    }
+    if (!rewriteSourceFormat) {
+        rewriteSourceFormat = 'json';
+    }
+    rewriteAvailableRoles = collectRewriteAvailableRoles(rewriteRecords);
+    dismissReview();
+    setAppMode('rewrite');
+    renderRewriteFileInfo();
+    renderRewriteRecordList();
+    const targetIndex = rewriteRecords.length - 1;
+    setRewriteUploadStatus(`已将测试数据追加到改写模式，共 ${rewriteRecords.length} 条记录。`);
+    selectRewriteRecord(targetIndex);
+}
+
 function buildRewriteExportContent() {
     const exportRecords = buildRewriteExportRecords();
     const format = String(rewriteSourceFormat || '').trim().toLowerCase() === 'jsonl' ? 'jsonl' : 'json';
@@ -2566,14 +2641,33 @@ async function resolveRewriteImportPreferences(payload) {
 }
 
 function buildRewriteRecordTitle(record, index) {
-    if (record && typeof record === 'object') {
-        const preferred = [
-            rewriteIdKeyPreference ? record[rewriteIdKeyPreference] : '',
-            ...REWRITE_RECORD_ID_KEYS.map((key) => record[key]),
-        ].find((value) => String(value || '').trim());
-        if (preferred) return String(preferred).trim();
-    }
+    const preferred = resolveRewriteRecordId(record);
+    if (preferred) return preferred;
     return `记录 ${index + 1}`;
+}
+
+function resolveRewriteRecordId(record) {
+    if (!record || typeof record !== 'object') return '';
+    const preferred = [
+        rewriteIdKeyPreference ? record[rewriteIdKeyPreference] : '',
+        ...REWRITE_RECORD_ID_KEYS.map((key) => record[key]),
+    ].find((value) => String(value || '').trim());
+    return preferred ? String(preferred).trim() : '';
+}
+
+function showRewriteTransferNotice(message) {
+    if (!rewriteTransferNotice) return;
+    rewriteTransferNotice.textContent = String(message || '').trim();
+    rewriteTransferNotice.classList.remove('hidden');
+    rewriteTransferNotice.classList.add('is-visible');
+    if (rewriteTransferNoticeTimer) {
+        window.clearTimeout(rewriteTransferNoticeTimer);
+    }
+    rewriteTransferNoticeTimer = window.setTimeout(() => {
+        rewriteTransferNotice.classList.remove('is-visible');
+        rewriteTransferNotice.classList.add('hidden');
+        rewriteTransferNoticeTimer = null;
+    }, 3000);
 }
 
 function buildRewriteSourceTitle() {
@@ -2587,9 +2681,12 @@ function buildRewriteRecordMeta(record) {
     const turns = recordIndex >= 0
         ? getRewriteEditableLines(record, recordIndex)
         : extractRewriteTurns(record);
+    const sourceValidation = evaluateRewriteRoleAlternation(buildRewriteInitialEditableLines(record));
     return {
         turns: turns.length,
         status: getRewriteRecordStatus(record),
+        sourceValidation,
+        hasSourceIssue: sourceValidation.state !== 'good',
     };
 }
 
@@ -2661,6 +2758,10 @@ function renderRewriteRecordList() {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'scenario-item';
+        if (meta.hasSourceIssue) {
+            button.classList.add('is-invalid-source');
+            button.title = `原始对话未通过当前结构校验：${meta.sourceValidation.text}`;
+        }
         if (index === rewriteSelectedIndex) {
             button.classList.add('active');
         }
@@ -5474,6 +5575,11 @@ chatInput.addEventListener('keyup', (event) => {
 document.getElementById('review-submit-btn').onclick = submitReview;
 document.getElementById('review-close-btn').onclick = dismissReview;
 document.getElementById('review-toggle-btn').onclick = reopenReviewModal;
+if (reviewToRewriteButton) {
+    reviewToRewriteButton.addEventListener('click', () => {
+        appendCurrentSessionToRewriteMode();
+    });
+}
 sessionIdCopyButton.addEventListener('click', copyCurrentSessionId);
 clearKnownAddressButton.addEventListener('click', () => {
     knownAddressInput.value = '';
