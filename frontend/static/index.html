@@ -42,13 +42,13 @@
     </section>
 
     <div id="app-shell" class="app-shell hidden" hidden aria-hidden="true">
-        <aside id="rewrite-left-panel" class="left-panel">
+        <aside id="manual-left-panel" class="left-panel">
             <section class="panel-section left-panel-hero">
                 <div class="section-heading">
                     <p class="eyebrow">Manual Mode</p>
                     <h1>CLI 手工对话测试台</h1>
                 </div>
-                <p class="section-copy">仅保留与 `interactive-test` 一致的手工输入模式，支持 `/help`、`/slots`、`/state`、`/quit`，点击用户轮次标签可删除该行及其下方所有内容，右键用户文本可手动插入或移除 function_call 展示。</p>
+                <p class="section-copy">仅保留与 `interactive-test` 一致的手工输入模式，支持 `/help`、`/slots`、`/state`、`/quit`；点击任意用户行可删除该行及其下方所有内容，右键用户文本可手动插入或移除 function_call 展示。</p>
             </section>
 
             <section class="panel-section left-panel-account">
@@ -107,9 +107,9 @@
                 <div class="section-heading compact">
                     <h2>场景列表</h2>
                 </div>
-                    <div id="scenario-list" class="scenario-list">
-                        <div class="terminal-hint">登录后显示场景列表</div>
-                    </div>
+                <div id="scenario-list" class="scenario-list">
+                    <div class="terminal-hint">登录后显示场景列表</div>
+                </div>
             </section>
 
             <section class="panel-section action-dock">
@@ -162,7 +162,7 @@
                 <section class="terminal-guide">
                     <div class="terminal-guide-copy">
                         <p>登录并启动会话后，这里会按 CLI 方式逐行输出会话内容。</p>
-                        <p>第一轮由你先输入用户话术，点击用户轮次标签可删除该行及其下方所有内容，右键用户文本可控制 function_call 展示。</p>
+                        <p>第一轮由你先输入用户话术，点击任意用户行可删除该行及其下方所有内容，右键用户文本可控制 function_call 展示。</p>
                         <button
                             id="session-id-copy-btn"
                             class="session-id-copy-btn"
@@ -226,7 +226,7 @@
                 </div>
             </section>
 
-            <section class="panel-section right-panel-section">
+            <section id="address-slots-panel" class="panel-section right-panel-section">
                 <div class="section-heading compact">
                     <h2>地址槽位信息</h2>
                 </div>
@@ -251,13 +251,15 @@
                 <div class="section-heading compact">
                     <h2>文件导入</h2>
                 </div>
-                <label for="rewrite-file-input" class="rewrite-upload-dropzone">
-                    <span class="rewrite-upload-title">选择JSON/JSONL文件</span>
-                    <span class="rewrite-upload-copy">支持单个JSON数组、单条JSON对象、多行JSONL。</span>
-                    <input id="rewrite-file-input" type="file" accept=".json,.jsonl,application/json,application/x-ndjson">
-                </label>
-                <button id="rewrite-export-btn" class="secondary-btn" type="button" disabled>导出编辑后文件</button>
-                <p id="rewrite-upload-status" class="terminal-hint">尚未导入文件。</p>
+                <div class="rewrite-import-actions">
+                    <label for="rewrite-file-input" class="rewrite-upload-dropzone">
+                        <span class="rewrite-upload-title">选择JSON/JSONL文件</span>
+                        <span class="rewrite-upload-copy">支持单个JSON数组、单条JSON对象、多行JSONL。</span>
+                        <input id="rewrite-file-input" type="file" accept=".json,.jsonl,application/json,application/x-ndjson">
+                    </label>
+                    <button id="rewrite-export-btn" class="secondary-btn" type="button" disabled>导出编辑后文件</button>
+                    <p id="rewrite-upload-status" class="terminal-hint">尚未导入文件。</p>
+                </div>
             </section>
 
             <section class="panel-section">
@@ -395,6 +397,12 @@
     </div>
 
     <div id="rewrite-transfer-notice" class="rewrite-transfer-notice hidden" hidden aria-hidden="true" aria-live="polite"></div>
+    <div id="blocking-action-notice" class="blocking-action-notice hidden" hidden aria-hidden="true" aria-live="polite">
+        <div class="blocking-action-notice-card">
+            <button id="blocking-action-notice-close" class="blocking-action-notice-close" type="button" aria-label="关闭提示">关闭</button>
+            <p id="blocking-action-notice-text" class="blocking-action-notice-text">请先选择场景。</p>
+        </div>
+    </div>
 
     <button id="chat-launcher" class="chat-launcher hidden" hidden aria-hidden="true" type="button" aria-expanded="false">
         <span>群聊</span>
@@ -409,7 +417,8 @@
         <button id="chat-recall-btn" class="chat-message-menu-btn chat-message-menu-btn-danger" type="button">撤回</button>
     </div>
     <div id="rewrite-record-menu" class="chat-message-menu hidden" hidden aria-hidden="true">
-        <button id="rewrite-record-delete-btn" class="chat-message-menu-btn chat-message-menu-btn-danger" type="button">删除该条记录</button>
+        <button id="rewrite-record-review-btn" class="chat-message-menu-btn" type="button">提交评审</button>
+        <button id="rewrite-record-delete-btn" class="chat-message-menu-btn chat-message-menu-btn-danger" type="button">删除</button>
     </div>
     <div id="terminal-turn-menu" class="chat-message-menu hidden" hidden aria-hidden="true">
         <button id="terminal-toggle-address-ie-btn" class="chat-message-menu-btn" type="button">插入 function_call 与 observation</button>

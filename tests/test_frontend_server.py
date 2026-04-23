@@ -547,7 +547,7 @@ class FrontendServerTests(unittest.TestCase):
         )
         self.assertEqual(closed_response.status_code, 409)
 
-    def test_session_respond_stores_and_displays_punctuated_user_text(self):
+    def test_session_respond_keeps_first_round_user_text_unpunctuated(self):
         self._login()
         start_payload = self.client.post(
             "/api/session/start",
@@ -555,7 +555,7 @@ class FrontendServerTests(unittest.TestCase):
         ).json()
         session_id = start_payload["session_id"]
 
-        with patch("frontend.server._punctuate_user_text_for_session", return_value="美的空气能热水器需要维修。"):
+        with patch("frontend.server._punctuate_user_text_for_session", return_value="美的空气能热水器需要维修。") as punctuate_mock:
             reply_response = self.client.post(
                 "/api/session/respond",
                 json={"session_id": session_id, "text": "美的空气能热水器需要维修"},
@@ -564,10 +564,40 @@ class FrontendServerTests(unittest.TestCase):
         self.assertEqual(reply_response.status_code, 200)
         payload = reply_response.json()
         session = frontend_server.sessions[session_id]
-        self.assertEqual(session["transcript"][0].text, "美的空气能热水器需要维修。")
-        self.assertEqual(session["trace"][0]["user_text"], "美的空气能热水器需要维修。")
-        self.assertEqual(payload["transcript"][0]["text"], "美的空气能热水器需要维修。")
-        self.assertEqual(payload["terminal_entries"][0]["text"], "美的空气能热水器需要维修。")
+        punctuate_mock.assert_not_called()
+        self.assertEqual(session["transcript"][0].text, "美的空气能热水器需要维修")
+        self.assertEqual(session["trace"][0]["user_text"], "美的空气能热水器需要维修")
+        self.assertEqual(payload["transcript"][0]["text"], "美的空气能热水器需要维修")
+        self.assertEqual(payload["terminal_entries"][0]["text"], "美的空气能热水器需要维修")
+
+    def test_session_respond_punctuates_user_text_from_second_round(self):
+        self._login()
+        start_payload = self.client.post(
+            "/api/session/start",
+            json={"scenario_id": "frontend_case"},
+        ).json()
+        session_id = start_payload["session_id"]
+
+        first_reply_response = self.client.post(
+            "/api/session/respond",
+            json={"session_id": session_id, "text": "美的空气能热水器需要维修"},
+        )
+        self.assertEqual(first_reply_response.status_code, 200)
+
+        with patch("frontend.server._punctuate_user_text_for_session", return_value="我姓张。") as punctuate_mock:
+            second_reply_response = self.client.post(
+                "/api/session/respond",
+                json={"session_id": session_id, "text": "我姓张"},
+            )
+
+        self.assertEqual(second_reply_response.status_code, 200)
+        punctuate_mock.assert_called_once_with("我姓张")
+        payload = second_reply_response.json()
+        session = frontend_server.sessions[session_id]
+        self.assertEqual(session["transcript"][2].text, "我姓张。")
+        self.assertEqual(session["trace"][1]["user_text"], "我姓张。")
+        self.assertEqual(payload["transcript"][2]["text"], "我姓张。")
+        self.assertEqual(payload["terminal_entries"][2]["text"], "我姓张。")
 
     def test_known_address_and_round_limit_follow_manual_mode(self):
         self._login()

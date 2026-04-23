@@ -9,13 +9,17 @@
     python review_db/delete_records.py --target <db> [全局开关] <策略> [策略参数]
 
 全局参数：
-    --target {reviews,generated}   （必填，必须写在策略名之前）指定要操作的数据库：
+    --target {reviews,generated,rewrite}
+                                   （必填，必须写在策略名之前）指定要操作的数据库：
                                      - reviews   → outputs/frontend_manual_test.sqlite3
                                                    表 manual_test_reviews
                                                    主键列 session_id，时间列 reviewed_at
                                      - generated → outputs/generated_dialogues.sqlite3
                                                    表 generated_dialogues
                                                    主键列 dialogue_id，时间列 generated_at
+                                     - rewrite   → outputs/frontend_rewrite_review.sqlite3
+                                                   表 rewrite_reviews
+                                                   主键列 record_id，时间列 reviewed_at
     --dry-run                      仅统计将会删除的行数，不实际执行 DELETE。
                                    可写在策略名之前或之后。
                                    建议任何一次新策略第一次运行都先带此开关试一遍。
@@ -25,7 +29,7 @@
 
 子命令 / 策略（必须提供其中之一）：
 
-1) by-id          按主键精确删除（session_id 或 dialogue_id）
+1) by-id          按主键精确删除（session_id / dialogue_id / record_id）
    用法：  by-id <id> [<id> ...]
    示例：  by-id abcd-1234
            by-id sess-1 sess-2 sess-3
@@ -36,7 +40,7 @@
    示例：  recent --hours 2          # 删除最近 2 小时的记录
            recent --days 1 --hours 6 # 组合；等价于最近 30 小时
    说明：  --days/--hours/--minutes 至少一个为正；generated 以 UTC 计算，
-           reviews 以本地展示时间 `YYYY-MM-DD HH:MM:SS` 计算。
+           reviews/rewrite 以本地展示时间 `YYYY-MM-DD HH:MM:SS` 计算。
 
 3) older-than     删除"N 段时间之前"的历史记录（时间列 <= now - Δ）
    用法：  older-than [--days D] [--hours H] [--minutes M]
@@ -47,7 +51,7 @@
    用法：  before --time <TIME>
    示例：  before --time 2026-03-01 08:00:00
            before --time 2026-03-01T00:00:00
-   说明：  reviews 使用 `YYYY-MM-DD HH:MM:SS`；generated 兼容旧 ISO。
+   说明：  reviews/rewrite 使用 `YYYY-MM-DD HH:MM:SS`；generated 兼容旧 ISO。
 
 5) after          删除某个"绝对时间点"之后的记录（时间列 >= --time）
    用法：  after --time <TIME>
@@ -76,6 +80,9 @@
 
     # 删除某个绝对时刻之前的所有评审
     python review_db/delete_records.py --target reviews before --time "2026-03-01 08:00:00"
+
+    # 删除某个改写评审 record_id
+    python review_db/delete_records.py --target rewrite by-id auto-20260423115442-bd58b00f
 
     # 清空整张表（需显式 --yes）
     python review_db/delete_records.py --target reviews --yes all
@@ -148,6 +155,14 @@ TARGETS: dict[str, TargetTable] = {
         id_column="dialogue_id",
         time_column="generated_at",
         time_style="iso",
+    ),
+    "rewrite": TargetTable(
+        name="rewrite",
+        db_path=OUTPUTS_DIR / "frontend_rewrite_review.sqlite3",
+        table="rewrite_reviews",
+        id_column="record_id",
+        time_column="reviewed_at",
+        time_style="display",
     ),
 }
 
@@ -377,12 +392,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--target",
         choices=sorted(TARGETS.keys()),
         required=True,
-        help="目标数据库：reviews / generated（必须写在策略名之前）",
+        help="目标数据库：reviews / generated / rewrite（必须写在策略名之前）",
     )
 
     sub = parser.add_subparsers(dest="strategy", required=True, metavar="<strategy>")
 
-    p_id = sub.add_parser("by-id", parents=[common], help="按 session_id / dialogue_id 删除")
+    p_id = sub.add_parser("by-id", parents=[common], help="按主键删除：session_id / dialogue_id / record_id")
     p_id.add_argument("ids", nargs="+", help="一个或多个 id（空格分隔）")
 
     for name, help_text in (
@@ -395,10 +410,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--minutes", type=int, default=0, help="分钟数（默认 0）")
 
     p_before = sub.add_parser("before", parents=[common], help="删除某个绝对时间之前的记录")
-    p_before.add_argument("--time", required=True, help="reviews 用 YYYY-MM-DD HH:MM:SS；generated 可用 ISO")
+    p_before.add_argument("--time", required=True, help="reviews/rewrite 用 YYYY-MM-DD HH:MM:SS；generated 可用 ISO")
 
     p_after = sub.add_parser("after", parents=[common], help="删除某个绝对时间之后的记录")
-    p_after.add_argument("--time", required=True, help="reviews 用 YYYY-MM-DD HH:MM:SS；generated 可用 ISO")
+    p_after.add_argument("--time", required=True, help="reviews/rewrite 用 YYYY-MM-DD HH:MM:SS；generated 可用 ISO")
 
     sub.add_parser("all", parents=[common], help="清空整张表（需配合 --yes）")
 

@@ -193,6 +193,65 @@ select {
     margin-top: auto;
 }
 
+.primary-btn.is-soft-disabled,
+.secondary-btn.is-soft-disabled,
+.ghost-btn.is-soft-disabled {
+    opacity: 0.58;
+    filter: saturate(0.82);
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
+.primary-btn.is-soft-disabled:hover,
+.secondary-btn.is-soft-disabled:hover,
+.ghost-btn.is-soft-disabled:hover {
+    transform: none;
+}
+
+.blocking-action-notice {
+    position: fixed;
+    inset: 0;
+    z-index: 32;
+    display: grid;
+    place-items: center;
+    padding: 1.25rem;
+    pointer-events: none;
+}
+
+.blocking-action-notice-card {
+    position: relative;
+    width: min(100%, 24rem);
+    padding: 1rem 1rem 0.9rem;
+    border: 1px solid rgba(191, 87, 0, 0.16);
+    border-radius: 20px;
+    background:
+        linear-gradient(180deg, rgba(255, 252, 247, 0.98), rgba(255, 246, 236, 0.98));
+    box-shadow:
+        0 20px 48px rgba(63, 39, 14, 0.16),
+        0 0 0 1px rgba(255, 255, 255, 0.6) inset;
+    pointer-events: auto;
+}
+
+.blocking-action-notice-close {
+    position: absolute;
+    top: 0.75rem;
+    right: 0.8rem;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    padding: 0.2rem 0.3rem;
+}
+
+.blocking-action-notice-text {
+    margin: 0;
+    padding-right: 3rem;
+    color: var(--text);
+    font-size: 0.96rem;
+    line-height: 1.65;
+    text-align: center;
+}
+
 .section-heading {
     margin-bottom: 0.75rem;
 }
@@ -450,16 +509,30 @@ select:focus {
     display: flex;
     flex-direction: column;
     gap: 0.28rem;
+    transition: border-color 0.16s ease, background-color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
 }
 
 .scenario-item:hover {
     border-color: rgba(15, 118, 110, 0.4);
     background: #fffdf8;
+    transform: translateY(-1px);
+    box-shadow: 0 12px 26px rgba(74, 54, 28, 0.08);
+}
+
+.scenario-item:focus-visible {
+    outline: none;
+    border-color: rgba(15, 118, 110, 0.52);
+    box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14);
 }
 
 .scenario-item.active {
     border-color: var(--accent);
-    background: var(--accent-soft);
+    background:
+        linear-gradient(135deg, rgba(15, 118, 110, 0.12), rgba(255, 251, 244, 0.96)),
+        var(--accent-soft);
+    box-shadow:
+        0 0 0 3px rgba(15, 118, 110, 0.08),
+        0 12px 28px rgba(15, 118, 110, 0.08);
 }
 
 .scenario-title {
@@ -500,6 +573,13 @@ select:focus {
     transition: border-color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
 }
 
+.rewrite-import-actions {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.9rem;
+}
+
 .rewrite-upload-dropzone:hover {
     border-color: rgba(15, 118, 110, 0.52);
     transform: translateY(-1px);
@@ -514,12 +594,24 @@ select:focus {
     font-size: 0.98rem;
     font-weight: 700;
     color: var(--text);
+    text-align: center;
 }
 
 .rewrite-upload-copy {
     font-size: 0.86rem;
     line-height: 1.6;
     color: var(--muted);
+    text-align: center;
+}
+
+#rewrite-export-btn {
+    align-self: center;
+}
+
+#rewrite-upload-status {
+    width: 100%;
+    margin: 0;
+    text-align: center;
 }
 
 .scenario-meta,
@@ -1004,7 +1096,7 @@ select:focus {
 
 .terminal-output.is-processing-only {
     min-height: 100%;
-    justify-content: center;
+    justify-content: flex-start;
 }
 
 .terminal-hint {
@@ -1020,101 +1112,49 @@ select:focus {
     line-height: 1.8;
 }
 
-.terminal-processing-card {
-    align-self: center;
-    width: min(42rem, 100%);
-    padding: 1.15rem 1.25rem 1.2rem;
-    border-radius: 22px;
-    border: 1px solid rgba(147, 197, 253, 0.22);
-    background:
-        linear-gradient(145deg, rgba(14, 24, 38, 0.92), rgba(20, 28, 45, 0.92)),
-        rgba(16, 24, 38, 0.94);
-    box-shadow:
-        0 18px 42px rgba(3, 7, 18, 0.34),
-        inset 0 1px 0 rgba(255, 255, 255, 0.04);
+.terminal-processing-line {
+    color: rgba(226, 232, 240, 0.72);
 }
 
-.terminal-processing-wave {
-    display: flex;
-    flex-direction: column;
-    gap: 0.46rem;
-    margin-bottom: 0.85rem;
-}
-
-.terminal-processing-wave-band {
-    position: relative;
-    display: block;
-    height: 0.34rem;
-    overflow: hidden;
-    border-radius: 999px;
-    background: rgba(148, 163, 184, 0.16);
-}
-
-.terminal-processing-wave-band::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    background:
-        linear-gradient(
-            90deg,
-            rgba(248, 113, 113, 0.92) 0%,
-            rgba(251, 191, 36, 0.92) 18%,
-            rgba(34, 211, 238, 0.94) 42%,
-            rgba(96, 165, 250, 0.94) 64%,
-            rgba(167, 139, 250, 0.9) 82%,
-            rgba(248, 113, 113, 0.92) 100%
-        );
+.terminal-processing-label {
+    display: inline-block;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: rgba(226, 232, 240, 0.46);
+    background-image: linear-gradient(
+        90deg,
+        rgba(148, 163, 184, 0.42) 0%,
+        rgba(148, 163, 184, 0.42) 34%,
+        rgba(248, 250, 252, 0.98) 48%,
+        rgba(125, 211, 252, 0.96) 50%,
+        rgba(134, 239, 172, 0.92) 54%,
+        rgba(148, 163, 184, 0.42) 68%,
+        rgba(148, 163, 184, 0.42) 100%
+    );
     background-size: 220% 100%;
-    filter: saturate(1.08);
-    animation: terminal-wave-flow 1.35s linear infinite;
+    background-position: 100% 50%;
+    background-repeat: no-repeat;
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: terminal-processing-scan 1.3s linear infinite;
 }
 
-.terminal-processing-wave-band:nth-child(2)::before {
-    animation-duration: 1.55s;
-    animation-delay: -0.26s;
-    opacity: 0.94;
+.terminal-processing-label.is-static {
+    color: rgba(226, 232, 240, 0.72);
+    background-image: none;
+    -webkit-background-clip: border-box;
+    background-clip: border-box;
+    -webkit-text-fill-color: currentColor;
+    animation: none;
 }
 
-.terminal-processing-wave-band:nth-child(3)::before {
-    animation-duration: 1.8s;
-    animation-delay: -0.44s;
-    opacity: 0.88;
-}
-
-.terminal-processing-copy {
-    display: flex;
-    flex-direction: column;
-    gap: 0.32rem;
-}
-
-.terminal-processing-title {
-    margin: 0;
-    color: #eff6ff;
-    font-size: 1.14rem;
-    font-weight: 700;
-    letter-spacing: 0.02em;
-}
-
-.terminal-processing-detail {
-    margin: 0;
-    color: rgba(219, 234, 254, 0.82);
-    font-size: 0.96rem;
-    line-height: 1.72;
-}
-
-@keyframes terminal-wave-flow {
+@keyframes terminal-processing-scan {
     0% {
-        transform: translateX(-12%) scaleX(0.92);
-        background-position: 0% 50%;
-    }
-    50% {
-        transform: translateX(12%) scaleX(1.03);
-        background-position: 100% 50%;
+        background-position: 120% 50%;
     }
     100% {
-        transform: translateX(-12%) scaleX(0.92);
-        background-position: 0% 50%;
+        background-position: -120% 50%;
     }
 }
 
@@ -1476,11 +1516,16 @@ select:focus {
     padding: 0.52rem 0.64rem;
     gap: 0.12rem;
     border-radius: 12px;
+    width: 100%;
 }
 
 .rewrite-shell .rewrite-upload-dropzone:hover {
     border-color: rgba(93, 127, 134, 0.42);
     box-shadow: 0 12px 28px rgba(93, 127, 134, 0.09);
+}
+
+.rewrite-shell .rewrite-import-actions {
+    gap: 1rem;
 }
 
 .rewrite-shell .data-item {
@@ -2194,6 +2239,7 @@ select:focus {
     z-index: 14;
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 0.7rem;
     max-width: min(calc(100vw - 2rem), 22rem);
     padding: 0.9rem 1.05rem;
@@ -2207,6 +2253,7 @@ select:focus {
         0 0 0 1px rgba(73, 64, 52, 0.34),
         0 18px 42px rgba(18, 14, 10, 0.22);
     cursor: pointer;
+    transform-origin: center;
 }
 
 .chat-launcher:hover {
@@ -2804,6 +2851,21 @@ select:focus {
 
 .hidden {
     display: none !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+
+    .cursor-trail-canvas {
+        display: none !important;
+    }
 }
 
 .modal-shell {

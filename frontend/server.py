@@ -124,6 +124,9 @@ SESSION_REVIEW_DB_LOCK = threading.RLock()
 _SESSION_REVIEW_DB_STATE_PATH: Path | None = None
 _SESSION_REVIEW_DB_SCHEMA_READY = False
 _SESSION_REVIEW_DB_NORMALIZED = False
+REWRITE_REVIEW_DB_PATH = PROJECT_ROOT / "outputs" / "frontend_rewrite_review.sqlite3"
+REWRITE_REVIEW_DB_LOCK = threading.RLock()
+_REWRITE_REVIEW_DB_SCHEMA_READY = False
 SESSION_REDIS_URL = os.getenv("FRONTEND_SESSION_REDIS_URL", "").strip()
 SESSION_REDIS_TTL_SECONDS = int(os.getenv("FRONTEND_SESSION_REDIS_TTL_SECONDS", "43200") or "43200")
 CHAT_STORAGE_PATH = PROJECT_ROOT / "outputs" / "frontend_chat_messages.json"
@@ -251,6 +254,11 @@ class ReviewSessionRequest(BaseModel):
     failed_flow_stage: str = ""
     notes: str = ""
     persist_to_db: bool = False
+
+
+class RewriteReviewRequest(BaseModel):
+    record_id: str
+    record: dict[str, Any]
 
 
 class ChatMessageRequest(BaseModel):
@@ -589,6 +597,22 @@ def _verify_registered_account(account: dict[str, Any], password: str) -> bool:
 
     stored_password = str(account.get("password", ""))
     return bool(stored_password) and secrets.compare_digest(password, stored_password)
+
+
+def _list_enabled_registered_accounts() -> list[dict[str, str]]:
+    accounts = _load_registered_accounts()
+    enabled_accounts = [
+        {
+            "username": str(account.get("username", "")).strip(),
+            "display_name": str(account.get("display_name", "")).strip() or str(account.get("username", "")).strip(),
+        }
+        for account in accounts.values()
+        if bool(account.get("enabled", True))
+    ]
+    return sorted(
+        [item for item in enabled_accounts if item["username"]],
+        key=lambda item: (str(item["display_name"]).lower(), str(item["username"]).lower()),
+    )
 
 
 def _copy_chat_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2256,6 +2280,154 @@ def _persist_review_result(
                     conn.close()
 
 
+def _normalize_rewrite_review_role(raw_role: Any) -> str:
+    role = str(raw_role or "").strip()
+    lowered = role.lower()
+    if not role:
+        return ""
+    if lowered in {"user", "human", "customer", "caller"} or role == "用户":
+        return "用户"
+    if lowered in {"service", "assistant", "agent"} or role == "客服":
+        return "客服"
+    if lowered == "function_call":
+        return "function_call"
+    if lowered == "observation":
+        return "observation"
+    if lowered in {"system", "tool"} or role == "系统":
+        return "系统"
+    return role
+
+
+def _rewrite_review_value_present(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    if value is None:
+        return False
+    return bool(str(value).strip())
+
+
+def _validate_rewrite_review_record(record_id: str, record: dict[str, Any]) -> None:
+    rewrited = record.get("rewrited")
+    if not isinstance(rewrited, list) or not rewrited:
+        raise HTTPException(status_code=400, detail="当前记录未提交 rewrited，不能提交评审。")
+
+    conflict_messages: list[str] = []
+    normalized_dialogue: list[tuple[int, str]] = []
+
+    for index, item in enumerate(rewrited):
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail=f"记录 {record_id} 的 rewrited 第 {index + 1} 项格式无效。")
+        role = _normalize_rewrite_review_role(item.get("from"))
+        value = item.get("value")
+        has_value = _rewrite_review_value_present(value)
+        if role == "function_call":
+            previous = rewrited[index - 1] if index > 0 and isinstance(rewrited[index - 1], dict) else None
+            previous_role = _normalize_rewrite_review_role(previous.get("from")) if previous else ""
+            previous_has_value = _rewrite_review_value_present(previous.get("value")) if previous else False
+            if previous_role != "用户" or not previous_has_value:
+                conflict_messages.append(
+                    f"第 {index + 1} 行 function_call 上一行必须是带内容的“用户”"
+                    if previous
+                    else f"第 {index + 1} 行 function_call 前缺少用户行"
+                )
+        if has_value and role in {"用户", "客服"}:
+            normalized_dialogue.append((index, role))
+
+    if len(normalized_dialogue) < 2:
+        raise HTTPException(status_code=400, detail="当前记录有效对话不足 2 行，不能提交评审。")
+
+    for index in range(1, len(normalized_dialogue)):
+        previous_index, previous_role = normalized_dialogue[index - 1]
+        current_index, current_role = normalized_dialogue[index]
+        if previous_role == current_role:
+            conflict_messages.append(
+                f"第 {previous_index + 1} 行和第 {current_index + 1} 行连续为“{current_role}”"
+            )
+
+    if conflict_messages:
+        raise HTTPException(
+            status_code=400,
+            detail=f"当前记录未通过角色交替/结构校验：{'；'.join(conflict_messages)}",
+        )
+
+
+def _ensure_rewrite_review_database() -> None:
+    global _REWRITE_REVIEW_DB_SCHEMA_READY
+    REWRITE_REVIEW_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with REWRITE_REVIEW_DB_LOCK:
+        if _REWRITE_REVIEW_DB_SCHEMA_READY:
+            return
+        conn = sqlite3.connect(REWRITE_REVIEW_DB_PATH, timeout=15.0, isolation_level=None)
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS rewrite_reviews (
+                    record_id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    reviewed_at TEXT NOT NULL,
+                    review_payload_json TEXT NOT NULL
+                )
+                """
+            )
+            _REWRITE_REVIEW_DB_SCHEMA_READY = True
+        finally:
+            conn.close()
+
+
+def _persist_rewrite_review_result(
+    *,
+    record_id: str,
+    record: dict[str, Any],
+    username: str,
+) -> str:
+    _ensure_rewrite_review_database()
+    reviewed_at = _current_display_timestamp()
+    review_payload = {
+        "record_id": record_id,
+        "username": username,
+        "source": str(record.get("source", "")).strip(),
+        "reviewed_at": reviewed_at,
+        "record": record,
+    }
+    with REWRITE_REVIEW_DB_LOCK:
+        conn = sqlite3.connect(REWRITE_REVIEW_DB_PATH, timeout=15.0, isolation_level=None)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO rewrite_reviews (
+                    record_id,
+                    username,
+                    source,
+                    reviewed_at,
+                    review_payload_json
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(record_id) DO UPDATE SET
+                    username=excluded.username,
+                    source=excluded.source,
+                    reviewed_at=excluded.reviewed_at,
+                    review_payload_json=excluded.review_payload_json
+                """,
+                (
+                    record_id,
+                    username,
+                    str(record.get("source", "")).strip(),
+                    reviewed_at,
+                    json.dumps(review_payload, ensure_ascii=False),
+                ),
+            )
+            conn.commit()
+            return reviewed_at
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+
 @app.get("/api/auth/me")
 def auth_me(current_user: dict[str, str] = Depends(_require_authenticated_user)):
     return {
@@ -2306,6 +2478,14 @@ def auth_logout(
         auth_sessions.pop(auth_token, None)
     _delete_auth_cookie(response)
     return {"ok": True}
+
+
+@app.get("/api/auth/mention-users")
+def auth_mention_users(current_user: dict[str, str] = Depends(_require_authenticated_user)):
+    return {
+        "users": _list_enabled_registered_accounts(),
+        "username": current_user["username"],
+    }
 
 
 @app.get("/api/chat/state")
@@ -3058,6 +3238,38 @@ def build_rewrite_address_observation(
         model=config.service_agent_model,
     )
     return {"observation": observation}
+
+
+@app.post("/api/rewrite/review")
+def review_rewrite_record(
+    req: RewriteReviewRequest,
+    current_user: dict[str, str] = Depends(_require_authenticated_user),
+):
+    record_id = str(req.record_id or "").strip()
+    if not record_id:
+        raise HTTPException(status_code=400, detail="缺少记录 id，不能提交评审。")
+    record = dict(req.record or {})
+    if not record:
+        raise HTTPException(status_code=400, detail="缺少记录内容，不能提交评审。")
+    if str(record.get("id", "")).strip() != record_id:
+        record["id"] = record_id
+    _validate_rewrite_review_record(record_id, record)
+    try:
+        reviewed_at = _persist_rewrite_review_result(
+            record_id=record_id,
+            record=record,
+            username=current_user["username"],
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"写入改写评审 SQLite 失败: {exc}") from exc
+    return {
+        "ok": True,
+        "record_id": record_id,
+        "username": current_user["username"],
+        "db_path": str(REWRITE_REVIEW_DB_PATH),
+        "reviewed_at": reviewed_at,
+    }
 
 
 @app.post("/api/session/review")

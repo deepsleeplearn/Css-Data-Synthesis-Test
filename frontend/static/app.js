@@ -51,6 +51,7 @@ let chatDragState = null;
 let chatResizeObserver = null;
 let chatOnlineUserCount = 0;
 let chatOnlineUsersCache = [];
+let chatMentionUsersCache = [];
 let chatOnlineDrawerOpen = false;
 let chatOnlineDrawerPosition = null;
 let chatAdminEnabled = false;
@@ -75,6 +76,7 @@ let sessionInputHistoryIndex = -1;
 let sessionInputDraft = '';
 let terminalTurnMenuState = null;
 let activeAppMode = 'manual';
+let availableScenarios = [];
 let rewriteRecords = [];
 let rewriteImportedRecords = [];
 let rewriteSelectedIndex = -1;
@@ -99,6 +101,7 @@ const rewriteObservationLoadingLineIds = new Set();
 let rewritePendingExportAction = null;
 let rewriteKeyPromptState = null;
 let rewriteTransferNoticeTimer = null;
+let blockingActionNoticeTimer = null;
 
 const authGate = document.getElementById('auth-gate');
 const appShell = document.getElementById('app-shell');
@@ -119,6 +122,9 @@ const loginPasswordToggleLabel = document.getElementById('login-password-toggle-
 const loginButton = document.getElementById('login-btn');
 const startSessionButton = document.getElementById('start-session-btn');
 const autoModeButton = document.getElementById('auto-mode-btn');
+const blockingActionNotice = document.getElementById('blocking-action-notice');
+const blockingActionNoticeText = document.getElementById('blocking-action-notice-text');
+const blockingActionNoticeCloseButton = document.getElementById('blocking-action-notice-close');
 const authUserName = document.getElementById('auth-user-name');
 const authUserMeta = document.getElementById('auth-user-meta');
 const knownAddressInput = document.getElementById('known-address');
@@ -147,7 +153,9 @@ const terminalScrollRegion = document.getElementById('terminal-scroll-region');
 const terminalOutput = document.getElementById('terminal-output');
 const userInput = document.getElementById('user-input');
 const sendButton = document.getElementById('send-btn');
+const scenarioList = document.getElementById('scenario-list');
 const addressSlotsContainer = document.getElementById('address-slots-container');
+const addressSlotsPanel = document.getElementById('address-slots-panel');
 const sessionContextPanel = document.getElementById('session-context-panel');
 const sessionContextTitle = document.getElementById('session-context-title');
 const sessionContextMode = document.getElementById('session-context-mode');
@@ -174,6 +182,7 @@ const chatLauncherUnread = document.getElementById('chat-launcher-unread');
 const chatMentionDropdown = document.getElementById('chat-mention-dropdown');
 const chatMessageMenu = document.getElementById('chat-message-menu');
 const rewriteRecordMenu = document.getElementById('rewrite-record-menu');
+const rewriteRecordReviewButton = document.getElementById('rewrite-record-review-btn');
 const rewriteRecordDeleteButton = document.getElementById('rewrite-record-delete-btn');
 const chatReplyButton = document.getElementById('chat-reply-btn');
 const chatEditButton = document.getElementById('chat-edit-btn');
@@ -282,6 +291,8 @@ const CHAT_MIN_WIDTH = 320;
 const CHAT_MIN_HEIGHT = 352;
 const CHAT_VIEWPORT_MARGIN = 12;
 const CHAT_UNREAD_CAP = 99;
+const CHAT_LAUNCHER_DRAG_THRESHOLD = 6;
+const CHAT_LAUNCHER_DRAG_CLICK_SUPPRESS_MS = 240;
 const CHAT_MESSAGE_HOLD_MS = 420;
 const CHAT_MESSAGE_HOLD_MOVE_TOLERANCE = 10;
 const CHAT_MENTION_OPTION_LIMIT = 12;
@@ -310,6 +321,7 @@ const REWRITE_RECORD_ID_KEYS = [
     '编号',
 ];
 const REWRITE_DIALOGUE_KEYS = [
+    'conversations',
     'dialogue_process',
     'transcript',
     'dialogue',
@@ -353,6 +365,10 @@ const AUTHENTICATED_ONLY_ROOTS = [
     textMagnifier,
 ].filter(Boolean);
 const authenticatedUiAnchors = new Map();
+const prefersReducedMotionQuery = typeof window.matchMedia === 'function'
+    ? window.matchMedia('(prefers-reduced-motion: reduce)')
+    : null;
+let prefersReducedMotion = Boolean(prefersReducedMotionQuery?.matches);
 
 function formatDisplayTimestamp(date) {
     const year = date.getFullYear();
@@ -394,7 +410,17 @@ function escapeHtml(value) {
 }
 
 function loadChatWindowState() {
-    const fallback = { visible: false, width: 384, height: 544, left: null, top: null, launcher_left: null, launcher_top: null };
+    const fallback = {
+        visible: false,
+        width: 384,
+        height: 544,
+        left: null,
+        top: null,
+        launcher_left: null,
+        launcher_top: null,
+        last_read_message_id: 0,
+        read_username: '',
+    };
     const raw = safeLocalStorageGet(CHAT_WINDOW_STORAGE_KEY);
     if (!raw) return fallback;
     try {
@@ -407,6 +433,8 @@ function loadChatWindowState() {
             top: Number.isFinite(Number(parsed.top)) ? Number(parsed.top) : null,
             launcher_left: Number.isFinite(Number(parsed.launcher_left)) ? Number(parsed.launcher_left) : null,
             launcher_top: Number.isFinite(Number(parsed.launcher_top)) ? Number(parsed.launcher_top) : null,
+            last_read_message_id: Math.max(Number(parsed.last_read_message_id || 0), 0),
+            read_username: String(parsed.read_username || '').trim(),
         };
     } catch (error) {
         return fallback;
@@ -457,6 +485,34 @@ function clearChatMentionDropdown() {
     chatMentionDropdown.innerHTML = '';
     chatMentionDropdown.classList.add('hidden');
     chatMentionDropdown.setAttribute('aria-hidden', 'true');
+}
+
+function normalizeChatMentionUsers(users = []) {
+    const uniqueByUsername = new Map();
+    users.forEach((user) => {
+        const username = String(user?.username || '').trim();
+        if (!username) return;
+        uniqueByUsername.set(username, {
+            username,
+            display_name: String(user?.display_name || username).trim() || username,
+        });
+    });
+    return Array.from(uniqueByUsername.values()).sort((left, right) => (
+        String(left.display_name || left.username).localeCompare(
+            String(right.display_name || right.username),
+            'zh-CN',
+            { sensitivity: 'base' },
+        ) || String(left.username).localeCompare(String(right.username), 'zh-CN', { sensitivity: 'base' })
+    ));
+}
+
+async function refreshChatMentionUsers() {
+    if (!authenticatedUser) {
+        chatMentionUsersCache = [];
+        return;
+    }
+    const data = await apiFetch('/api/auth/mention-users');
+    chatMentionUsersCache = normalizeChatMentionUsers(Array.isArray(data?.users) ? data.users : []);
 }
 
 function getChatViewportBounds() {
@@ -621,6 +677,97 @@ function updateChatPageIndicator() {
     }
 }
 
+function ensureChatWindowState() {
+    if (!chatWindowState) {
+        chatWindowState = loadChatWindowState();
+    }
+    return chatWindowState;
+}
+
+function resolveChatLauncherAnchorRect() {
+    const panel = addressSlotsPanel;
+    if (!panel || !panel.isConnected) return null;
+    const panelStyle = window.getComputedStyle(panel);
+    if (panelStyle.display === 'none' || panelStyle.visibility === 'hidden') return null;
+    const rect = panel.getBoundingClientRect();
+    if (rect.width < 32 || rect.height < 32) return null;
+    return rect;
+}
+
+function normalizeChatReadState({ persist = false } = {}) {
+    const state = ensureChatWindowState();
+    const latestId = Math.max(Number(chatLatestMessageId || 0), 0);
+    const username = String(authenticatedUser?.username || '').trim();
+    let changed = false;
+    let nextReadMessageId = Math.max(Number(state.last_read_message_id || 0), 0);
+    if (nextReadMessageId > latestId) {
+        nextReadMessageId = latestId;
+        changed = true;
+    }
+    if (state.last_read_message_id !== nextReadMessageId) {
+        state.last_read_message_id = nextReadMessageId;
+        changed = true;
+    }
+    if (username && state.read_username !== username) {
+        state.read_username = username;
+        state.last_read_message_id = 0;
+        changed = true;
+    }
+    if (changed && persist) {
+        persistChatWindowState();
+    }
+}
+
+function markChatAsRead(messageId = chatLatestMessageId, { persist = true } = {}) {
+    const state = ensureChatWindowState();
+    const normalizedMessageId = Math.max(Number(messageId || 0), 0);
+    const latestId = Math.max(Number(chatLatestMessageId || 0), 0);
+    const nextReadMessageId = Math.min(normalizedMessageId, latestId);
+    const username = String(authenticatedUser?.username || '').trim();
+    const changed = state.last_read_message_id !== nextReadMessageId || state.read_username !== username;
+    state.last_read_message_id = nextReadMessageId;
+    state.read_username = username;
+    if (changed && persist) {
+        persistChatWindowState();
+    }
+}
+
+function getUnreadChatMessages() {
+    if (!authenticatedUser) return [];
+    normalizeChatReadState();
+    const lastReadMessageId = Math.max(Number(chatWindowState?.last_read_message_id || 0), 0);
+    const currentUsername = String(authenticatedUser?.username || '').trim();
+    return chatMessages.filter((message) => {
+        if (!message || message.recalled) return false;
+        const messageId = Math.max(Number(message.id || 0), 0);
+        if (messageId <= lastReadMessageId) return false;
+        return String(message.username || '').trim() !== currentUsername;
+    });
+}
+
+function recomputeChatAttentionState({ persistReadState = false } = {}) {
+    if (!authenticatedUser) {
+        chatUnreadCount = 0;
+        chatMentionAlertActive = false;
+        updateChatLauncher();
+        return;
+    }
+    if (chatWindowState?.visible !== false) {
+        markChatAsRead(chatLatestMessageId, { persist: persistReadState });
+        chatUnreadCount = 0;
+        chatMentionAlertActive = false;
+        updateChatLauncher();
+        return;
+    }
+    const unreadMessages = getUnreadChatMessages();
+    const currentUsername = String(authenticatedUser?.username || '').trim();
+    chatUnreadCount = unreadMessages.length;
+    chatMentionAlertActive = unreadMessages.some((message) => (
+        extractMentionedUsernames(message.text || '').has(currentUsername)
+    ));
+    updateChatLauncher();
+}
+
 function resolveChatLauncherRect() {
     const bounds = getChatViewportBounds();
     const launcherWidth = Math.max(chatLauncher.offsetWidth || 172, 120);
@@ -628,12 +775,29 @@ function resolveChatLauncherRect() {
     const maxLeft = Math.max(CHAT_VIEWPORT_MARGIN, bounds.width - launcherWidth - CHAT_VIEWPORT_MARGIN);
     const maxTop = Math.max(CHAT_VIEWPORT_MARGIN, bounds.height - launcherHeight - CHAT_VIEWPORT_MARGIN);
     const hasStoredPosition = Number.isFinite(chatWindowState?.launcher_left) && Number.isFinite(chatWindowState?.launcher_top);
-    const left = hasStoredPosition
-        ? clamp(Number(chatWindowState.launcher_left), CHAT_VIEWPORT_MARGIN, maxLeft)
-        : null;
-    const top = hasStoredPosition
-        ? clamp(Number(chatWindowState.launcher_top), CHAT_VIEWPORT_MARGIN, maxTop)
-        : null;
+    if (hasStoredPosition) {
+        return {
+            left: clamp(Number(chatWindowState.launcher_left), CHAT_VIEWPORT_MARGIN, maxLeft),
+            top: clamp(Number(chatWindowState.launcher_top), CHAT_VIEWPORT_MARGIN, maxTop),
+        };
+    }
+    const anchorRect = resolveChatLauncherAnchorRect();
+    if (anchorRect) {
+        return {
+            left: clamp(
+                anchorRect.left + ((anchorRect.width - launcherWidth) / 2),
+                CHAT_VIEWPORT_MARGIN,
+                maxLeft,
+            ),
+            top: clamp(
+                anchorRect.top + ((anchorRect.height - launcherHeight) / 2),
+                CHAT_VIEWPORT_MARGIN,
+                maxTop,
+            ),
+        };
+    }
+    const left = clamp(bounds.width - launcherWidth - 20, CHAT_VIEWPORT_MARGIN, maxLeft);
+    const top = clamp(bounds.height - launcherHeight - 20, CHAT_VIEWPORT_MARGIN, maxTop);
     return { left, top };
 }
 
@@ -651,8 +815,6 @@ function applyChatLauncherRect() {
     chatLauncher.style.top = `${rect.top}px`;
     chatLauncher.style.right = 'auto';
     chatLauncher.style.bottom = 'auto';
-    chatWindowState.launcher_left = rect.left;
-    chatWindowState.launcher_top = rect.top;
 }
 
 function syncChatLauncherStateFromDom() {
@@ -669,15 +831,14 @@ function syncChatLauncherStateFromDom() {
 }
 
 function setChatWindowVisibility(visible, { persist = true, scrollToBottom = false } = {}) {
-    if (!chatWindowState) {
-        chatWindowState = loadChatWindowState();
-    }
+    ensureChatWindowState();
     chatWindowState.visible = Boolean(visible);
     const shouldShow = Boolean(authenticatedUser) && Boolean(visible);
     chatWindow.classList.toggle('hidden', !shouldShow);
     chatWindow.setAttribute('aria-hidden', shouldShow ? 'false' : 'true');
     if (shouldShow) {
         applyChatWindowRect();
+        markChatAsRead(chatLatestMessageId, { persist: false });
         if (scrollToBottom) {
             window.requestAnimationFrame(() => {
                 chatMessageList.scrollTop = chatMessageList.scrollHeight;
@@ -702,7 +863,7 @@ function setChatWindowVisibility(visible, { persist = true, scrollToBottom = fal
 }
 
 function resizeCursorTrailCanvas() {
-    if (!cursorTrailCanvas || !cursorTrailContext) return;
+    if (!cursorTrailCanvas || !cursorTrailContext || prefersReducedMotion) return;
     const dpr = window.devicePixelRatio || 1;
     const width = Math.max(Math.floor(window.innerWidth * dpr), 1);
     const height = Math.max(Math.floor(window.innerHeight * dpr), 1);
@@ -713,7 +874,7 @@ function resizeCursorTrailCanvas() {
 }
 
 function ensureCursorTrailAnimation() {
-    if (cursorTrailAnimationId !== null || !cursorTrailContext) return;
+    if (cursorTrailAnimationId !== null || !cursorTrailContext || prefersReducedMotion) return;
     cursorTrailAnimationId = window.requestAnimationFrame(renderCursorTrailFrame);
 }
 
@@ -793,6 +954,7 @@ function renderCursorTrailFrame(timestamp) {
 }
 
 function updateCursorGlow(event) {
+    if (prefersReducedMotion) return;
     cursorTrailTarget = { x: event.clientX, y: event.clientY };
     if (!cursorTrailInitialized) {
         cursorTrailPosition = { ...cursorTrailTarget };
@@ -803,8 +965,27 @@ function updateCursorGlow(event) {
 }
 
 function hideCursorGlow() {
+    if (prefersReducedMotion) return;
     cursorTrailVisible = false;
     ensureCursorTrailAnimation();
+}
+
+function applyReducedMotionPreference(enabled) {
+    prefersReducedMotion = Boolean(enabled);
+    if (!prefersReducedMotion) return;
+    cursorTrailVisible = false;
+    cursorTrailInitialized = false;
+    cursorTrailTarget = { x: -320, y: -320 };
+    cursorTrailPosition = { x: -320, y: -320 };
+    cursorTrailPoints = [];
+    cursorTrailLastTimestamp = 0;
+    if (cursorTrailAnimationId !== null) {
+        window.cancelAnimationFrame(cursorTrailAnimationId);
+        cursorTrailAnimationId = null;
+    }
+    if (cursorTrailContext && cursorTrailCanvas) {
+        cursorTrailContext.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    }
 }
 
 function generateMockCallStartTime() {
@@ -1078,17 +1259,60 @@ function isTestAdminUser() {
     return String(authenticatedUser?.display_name || '').trim() === '测试管理员';
 }
 
+function closeBlockingActionNotice() {
+    if (!blockingActionNotice) return;
+    blockingActionNotice.classList.add('hidden');
+    blockingActionNotice.setAttribute('hidden', 'hidden');
+    blockingActionNotice.setAttribute('aria-hidden', 'true');
+    if (blockingActionNoticeTimer !== null) {
+        window.clearTimeout(blockingActionNoticeTimer);
+        blockingActionNoticeTimer = null;
+    }
+}
+
+function showBlockingActionNotice(message = '请先选择场景。') {
+    if (!blockingActionNotice || !blockingActionNoticeText) return;
+    blockingActionNoticeText.textContent = String(message || '').trim() || '请先选择场景。';
+    blockingActionNotice.classList.remove('hidden');
+    blockingActionNotice.removeAttribute('hidden');
+    blockingActionNotice.setAttribute('aria-hidden', 'false');
+    if (blockingActionNoticeTimer !== null) {
+        window.clearTimeout(blockingActionNoticeTimer);
+    }
+    blockingActionNoticeTimer = window.setTimeout(() => {
+        closeBlockingActionNotice();
+    }, 3000);
+}
+
+function setSoftDisabledButton(button, active) {
+    if (!button) return;
+    const isSoftDisabled = Boolean(active);
+    button.classList.toggle('is-soft-disabled', isSoftDisabled);
+    button.dataset.softDisabled = isSoftDisabled ? 'true' : 'false';
+    button.setAttribute('aria-disabled', isSoftDisabled ? 'true' : 'false');
+    if (isSoftDisabled) {
+        button.removeAttribute('disabled');
+    }
+}
+
 function updateAutoModeButtonState() {
     if (!autoModeButton) return;
     const shouldShow = Boolean(authenticatedUser) && activeAppMode === 'manual' && isTestAdminUser();
+    const blockedByMissingScenario = shouldShow
+        && !selectedScenario
+        && !sessionBusy
+        && !(currentSessionId && !sessionClosed)
+        && !reviewPending
+        && !isReviewModalVisible()
+        && isCallStartTimeValid();
     autoModeButton.classList.toggle('hidden', !shouldShow);
     autoModeButton.disabled = !shouldShow
-        || !selectedScenario
         || sessionBusy
         || (currentSessionId && !sessionClosed)
         || reviewPending
         || isReviewModalVisible()
         || !isCallStartTimeValid();
+    setSoftDisabledButton(autoModeButton, blockedByMissingScenario);
 }
 
 function syncAppModeView() {
@@ -1118,6 +1342,11 @@ function syncAppModeView() {
             applyRewriteWorkbenchRatio();
         });
     }
+    if (authenticated && !showChatWindow) {
+        window.requestAnimationFrame(() => {
+            applyChatLauncherRect();
+        });
+    }
 }
 
 function setAppMode(mode) {
@@ -1128,6 +1357,51 @@ function setAppMode(mode) {
     closeTerminalTurnMenu();
     hideTextMagnifier();
     syncAppModeView();
+}
+
+function createScenarioListItem(scenario, index) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'scenario-item';
+    item.dataset.scenarioIndex = String(index);
+    if (selectedScenario?.id === scenario.id) {
+        item.classList.add('active');
+    }
+
+    const title = document.createElement('span');
+    title.className = 'scenario-title';
+    title.textContent = String(scenario.product || '-');
+
+    const metaId = document.createElement('span');
+    metaId.className = 'scenario-meta';
+    metaId.textContent = String(scenario.id || `场景 ${index + 1}`);
+
+    const metaRequest = document.createElement('span');
+    metaRequest.className = 'scenario-meta';
+    metaRequest.textContent = `${scenario.request || '-'} | max_turns=${scenario.max_turns || '-'}`;
+
+    const issue = document.createElement('span');
+    issue.className = 'scenario-issue';
+    issue.textContent = String(scenario.issue || '未填写故障描述');
+
+    item.append(title, metaId, metaRequest, issue);
+    item.addEventListener('click', () => {
+        selectScenario(scenario);
+    });
+    return item;
+}
+
+function renderScenarioList() {
+    if (!scenarioList) return;
+    clearElement(scenarioList);
+    if (!availableScenarios.length) {
+        scenarioList.innerHTML = '<div class="terminal-hint">登录后显示场景列表</div>';
+        return;
+    }
+
+    availableScenarios.forEach((scenario, index) => {
+        scenarioList.appendChild(createScenarioListItem(scenario, index));
+    });
 }
 
 function isPotentialRewriteTurn(value) {
@@ -2167,6 +2441,7 @@ function submitCurrentRewriteRecord() {
     if (!Number.isInteger(rewriteSelectedIndex) || rewriteSelectedIndex < 0) return;
     const record = rewriteRecords[rewriteSelectedIndex];
     if (!record || typeof record !== 'object') return;
+    const recordId = resolveRewriteRecordId(record) || `第 ${rewriteSelectedIndex + 1} 条记录`;
     const lines = getRewriteEditableLines(record, rewriteSelectedIndex);
     const validation = evaluateRewriteRoleAlternation(lines);
     if (validation.state !== 'good') {
@@ -2180,49 +2455,49 @@ function submitCurrentRewriteRecord() {
     record.rewrited = rewrited;
     renderRewriteRecordState(rewriteSelectedIndex);
     if (rewriteUploadStatus) {
-        rewriteUploadStatus.textContent = `当前记录已提交改写，rewrited 共写入 ${rewrited.length} 条。`;
+        rewriteUploadStatus.textContent = `${recordId} 已提交，共 ${lines.length} 行对话。`;
     }
 }
 
 function buildRewriteRecordFromSessionEntries() {
     if (!Array.isArray(sessionTerminalEntries) || sessionTerminalEntries.length < 1) return null;
-    const dialogueProcess = [];
+    const conversations = [];
     sessionTerminalEntries.forEach((entry) => {
         if (!entry || typeof entry !== 'object') return;
         if (entry.entry_type === 'turn') {
-            dialogueProcess.push({
-                round_label: entry.round_label || '',
-                speaker: entry.speaker || '',
-                text: entry.text || '',
+            const normalizedRole = normalizeRewriteSpeaker(entry.speaker || '') || String(entry.speaker || '').trim();
+            const normalizedText = String(entry.text || '').trim();
+            if (!normalizedRole || !normalizedText) return;
+            conversations.push({
+                role: normalizedRole,
+                content: normalizedText,
             });
             return;
         }
         const rawText = String(entry.text || '').trim();
         if (!rawText) return;
         if (rawText.startsWith('function_call:')) {
-            dialogueProcess.push({
-                display_kind: 'function_call',
-                speaker: 'function_call',
-                text: rawText,
+            conversations.push({
+                role: 'function_call',
+                content: rawText,
             });
             return;
         }
         if (rawText.startsWith('observation:')) {
-            dialogueProcess.push({
-                display_kind: 'observation',
-                speaker: 'observation',
-                text: rawText,
+            conversations.push({
+                role: 'observation',
+                content: rawText,
             });
         }
     });
-    if (!dialogueProcess.length) return null;
+    if (!conversations.length) return null;
     const autoRecordId = String(currentAutoModeId || '').trim();
     const recordId = currentSessionId || autoRecordId || `manual-${Date.now()}`;
     return {
         session_id: currentSessionId || '',
         auto_mode_id: autoRecordId,
         id: recordId,
-        dialogue_process: dialogueProcess,
+        conversations,
         source: autoRecordId && !currentSessionId ? 'auto_mode' : 'manual_test',
     };
 }
@@ -2244,10 +2519,10 @@ function appendCurrentSessionToRewriteMode() {
     rewriteImportedRecords.push(cloneRewriteRecordData(record));
     rewriteRecords.push(cloneRewriteRecordData(record));
     if (!rewriteSourceName) {
-        rewriteSourceName = record.source === 'auto_mode' ? 'auto_mode_export.json' : 'manual_session_export.json';
+        rewriteSourceName = record.source === 'auto_mode' ? 'auto_mode_export.jsonl' : 'manual_session_export.jsonl';
     }
     if (!rewriteSourceFormat) {
-        rewriteSourceFormat = 'json';
+        rewriteSourceFormat = 'jsonl';
     }
     rewriteAvailableRoles = collectRewriteAvailableRoles(rewriteRecords);
     dismissReview();
@@ -3333,6 +3608,53 @@ function deleteRewriteRecord(recordIndex) {
     selectRewriteRecord(nextIndex);
 }
 
+async function submitRewriteRecordReview(recordIndex) {
+    if (!Number.isInteger(recordIndex) || recordIndex < 0 || recordIndex >= rewriteRecords.length) return;
+    const record = rewriteRecords[recordIndex];
+    if (!record || typeof record !== 'object') return;
+    const recordId = resolveRewriteRecordId(record);
+    if (!recordId) {
+        showRewriteTransferNotice('提交评审失败：当前记录缺少 id。');
+        return;
+    }
+    const status = getRewriteRecordStatus(record);
+    if (status !== '已提交') {
+        showRewriteTransferNotice(`提交评审失败：记录 ${recordId} 当前状态为“${status}”，请先完成提交。`);
+        return;
+    }
+    const lines = getRewriteEditableLines(record, recordIndex);
+    const validation = evaluateRewriteRoleAlternation(lines);
+    if (validation.state !== 'good') {
+        const details = Array.isArray(validation.conflictMessages) && validation.conflictMessages.length
+            ? `：${validation.conflictMessages.join('；')}`
+            : `：${validation.text}`;
+        showRewriteTransferNotice(`提交评审失败${details}`);
+        if (recordIndex !== rewriteSelectedIndex) {
+            selectRewriteRecord(recordIndex);
+        }
+        focusRewriteConflictLines(validation.conflictIndexes || []);
+        return;
+    }
+
+    closeRewriteRecordMenu();
+    try {
+        const payloadRecord = cloneRewriteRecordData(record) || {};
+        payloadRecord.id = recordId;
+        const data = await apiFetch('/api/rewrite/review', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                record_id: recordId,
+                record: payloadRecord,
+            }),
+        });
+        setRewriteUploadStatus(`记录 ${recordId} 已提交评审并写入独立 SQLite。`);
+        showRewriteTransferNotice(`记录 ${data.record_id} 已提交评审。`);
+    } catch (error) {
+        showRewriteTransferNotice(error.message || '提交评审失败，请稍后重试。');
+    }
+}
+
 async function importRewriteFile(file) {
     if (!file) return;
     rewriteRecordEditCache.clear();
@@ -3475,13 +3797,20 @@ function updateCallStartTimeValidationState() {
 }
 
 function updateStartSessionButtonState() {
+    const blockedByMissingScenario = Boolean(authenticatedUser)
+        && !selectedScenario
+        && !sessionBusy
+        && !reviewPending
+        && !isReviewModalVisible()
+        && isCallStartTimeValid();
     const canStart = Boolean(authenticatedUser)
         && Boolean(selectedScenario)
         && !sessionBusy
         && !reviewPending
         && !isReviewModalVisible()
         && isCallStartTimeValid();
-    startSessionButton.disabled = !canStart;
+    startSessionButton.disabled = !canStart && !blockedByMissingScenario;
+    setSoftDisabledButton(startSessionButton, blockedByMissingScenario);
     updateAutoModeButtonState();
 }
 
@@ -3775,10 +4104,36 @@ function updateSessionContext(scenario, sessionConfig = {}) {
     updateSessionContextDensity();
 }
 
+function isTerminalProcessingText(text = '') {
+    const normalized = String(text || '').trim();
+    return normalized === '自动模式正在逐轮生成，请稍候...';
+}
+
+function buildTerminalProcessingLine(text = '', { animate = true } = {}) {
+    const processingLine = document.createElement('div');
+    processingLine.className = 'terminal-line system terminal-processing-line';
+
+    const label = document.createElement('span');
+    label.className = 'terminal-processing-label';
+    label.classList.toggle('is-static', !animate);
+    const title = String(text || '').trim() || '正在处理';
+    label.textContent = /(\.\.\.|…)$/.test(title) ? title : `${title}...`;
+
+    processingLine.appendChild(label);
+    return processingLine;
+}
+
 function renderTerminalEntries(entries = []) {
     terminalOutput.innerHTML = '';
     terminalOutput.classList.toggle('is-processing-only', Boolean(terminalProcessingState?.active) && entries.length === 0);
     entries.forEach((entry) => {
+        if (isTerminalProcessingText(entry.text || '')) {
+            terminalOutput.appendChild(
+                buildTerminalProcessingLine(entry.text || '', { animate: !sessionClosed }),
+            );
+            return;
+        }
+
         const line = document.createElement('div');
         line.className = `terminal-line ${entry.tone || 'system'}`;
 
@@ -3830,33 +4185,7 @@ function renderTerminalEntries(entries = []) {
     });
 
     if (terminalProcessingState?.active) {
-        const card = document.createElement('section');
-        card.className = 'terminal-processing-card';
-
-        const wave = document.createElement('div');
-        wave.className = 'terminal-processing-wave';
-        for (let index = 0; index < 3; index += 1) {
-            const band = document.createElement('span');
-            band.className = 'terminal-processing-wave-band';
-            wave.appendChild(band);
-        }
-
-        const content = document.createElement('div');
-        content.className = 'terminal-processing-copy';
-
-        const title = document.createElement('h3');
-        title.className = 'terminal-processing-title';
-        title.textContent = terminalProcessingState.title;
-
-        const detail = document.createElement('p');
-        detail.className = 'terminal-processing-detail';
-        detail.textContent = terminalProcessingState.detail || '请稍候，系统正在准备本次测试所需设定。';
-
-        content.appendChild(title);
-        content.appendChild(detail);
-        card.appendChild(wave);
-        card.appendChild(content);
-        terminalOutput.appendChild(card);
+        terminalOutput.appendChild(buildTerminalProcessingLine(terminalProcessingState.title, { animate: true }));
     }
 
     terminalScrollRegion.scrollTop = terminalScrollRegion.scrollHeight;
@@ -4022,9 +4351,14 @@ function openReviewModal(data, { blocking = true } = {}) {
     reviewPending = blocking;
     reviewAvailable = true;
     reviewContext = data;
+    reviewCloseButton.disabled = false;
     syncReviewModalMode(data);
     const isAutoModeReview = String(data?.mode || '').trim() === 'auto_mode';
-    if (isAutoModeReview) {
+    if (data?.review_submitted) {
+        reviewSummary.textContent = isAutoModeReview
+            ? `自动模式评审已提交。Auto ID: ${reviewIdentifier}。如需继续处理这段对话，仍可点击下方“提交改写模式”。`
+            : `评审已提交。Session ID: ${reviewIdentifier}。如需继续处理这段对话，仍可点击下方“提交改写模式”。`;
+    } else if (isAutoModeReview) {
         reviewSummary.textContent = `自动模式已结束。Auto ID: ${reviewIdentifier}。如需继续处理这段对话，请点击下方“提交改写模式”。`;
     } else {
         reviewSummary.textContent = data.status === 'completed'
@@ -4234,8 +4568,9 @@ function setChatSendStatus(message = '', { isError = false } = {}) {
 
 function getChatMentionCandidates(query = '') {
     const normalizedQuery = String(query || '').trim().toLowerCase();
+    const sourceUsers = chatMentionUsersCache.length ? chatMentionUsersCache : chatOnlineUsersCache;
     const uniqueByUsername = new Map();
-    chatOnlineUsersCache.forEach((user) => {
+    sourceUsers.forEach((user) => {
         const username = String(user.username || '').trim();
         if (!username || username === authenticatedUser?.username) return;
         if (!normalizedQuery) {
@@ -4373,40 +4708,48 @@ function extractMentionedUsernames(text) {
 
 function beginChatLauncherDrag(event) {
     if (chatLauncher.classList.contains('hidden') || event.button !== 0) return;
-    const currentRect = chatLauncher.getBoundingClientRect();
+    if (event.target.closest('.chat-launcher-unread')) return;
+    event.preventDefault();
+    const currentLeft = parseFloat(chatLauncher.style.left);
+    const currentTop = parseFloat(chatLauncher.style.top);
+    const fallbackRect = resolveChatLauncherRect();
     chatLauncherDragState = {
         pointerId: event.pointerId,
-        offsetX: event.clientX - currentRect.left,
-        offsetY: event.clientY - currentRect.top,
-        moved: false,
+        offsetX: event.clientX - (Number.isFinite(currentLeft) ? currentLeft : fallbackRect.left),
+        offsetY: event.clientY - (Number.isFinite(currentTop) ? currentTop : fallbackRect.top),
+        startX: event.clientX,
+        startY: event.clientY,
+        dragged: false,
     };
 }
 
 function handleChatLauncherDrag(event) {
     if (!chatLauncherDragState || event.pointerId !== chatLauncherDragState.pointerId) return;
+    const movedX = event.clientX - chatLauncherDragState.startX;
+    const movedY = event.clientY - chatLauncherDragState.startY;
+    if (!chatLauncherDragState.dragged) {
+        if (Math.hypot(movedX, movedY) < CHAT_LAUNCHER_DRAG_THRESHOLD) return;
+        chatLauncherDragState.dragged = true;
+    }
     const bounds = getChatViewportBounds();
     const width = Math.max(chatLauncher.offsetWidth || 172, 120);
     const height = Math.max(chatLauncher.offsetHeight || 50, 40);
-    const maxLeft = Math.max(CHAT_VIEWPORT_MARGIN, bounds.width - width - CHAT_VIEWPORT_MARGIN);
-    const maxTop = Math.max(CHAT_VIEWPORT_MARGIN, bounds.height - height - CHAT_VIEWPORT_MARGIN);
-    const nextLeft = clamp(event.clientX - chatLauncherDragState.offsetX, CHAT_VIEWPORT_MARGIN, maxLeft);
-    const nextTop = clamp(event.clientY - chatLauncherDragState.offsetY, CHAT_VIEWPORT_MARGIN, maxTop);
+    const nextLeft = clamp(event.clientX - chatLauncherDragState.offsetX, CHAT_VIEWPORT_MARGIN, bounds.width - width - CHAT_VIEWPORT_MARGIN);
+    const nextTop = clamp(event.clientY - chatLauncherDragState.offsetY, CHAT_VIEWPORT_MARGIN, bounds.height - height - CHAT_VIEWPORT_MARGIN);
     chatLauncher.style.left = `${nextLeft}px`;
     chatLauncher.style.top = `${nextTop}px`;
     chatLauncher.style.right = 'auto';
     chatLauncher.style.bottom = 'auto';
-    chatLauncherDragState.moved = true;
 }
 
 function endChatLauncherDrag(event) {
     if (!chatLauncherDragState || (event && event.pointerId !== chatLauncherDragState.pointerId)) return;
-    const moved = chatLauncherDragState.moved;
+    const dragged = chatLauncherDragState.dragged === true;
     chatLauncherDragState = null;
-    if (moved) {
-        chatLauncherSuppressClickUntil = Date.now() + 240;
-        syncChatLauncherStateFromDom();
-        persistChatWindowState();
-    }
+    if (!dragged) return;
+    chatLauncherSuppressClickUntil = Date.now() + CHAT_LAUNCHER_DRAG_CLICK_SUPPRESS_MS;
+    syncChatLauncherStateFromDom();
+    persistChatWindowState();
 }
 
 function setChatOnlineDrawerOpen(open) {
@@ -4491,6 +4834,7 @@ function resetChatRuntime() {
     chatStoragePath = '';
     chatOnlineUserCount = 0;
     chatOnlineUsersCache = [];
+    chatMentionUsersCache = [];
     chatOnlineDrawerOpen = false;
     chatOnlineDrawerPosition = null;
     chatAdminEnabled = false;
@@ -4875,36 +5219,20 @@ function mergeChatState(data, { forceScroll = false } = {}) {
         chatReadReceiptOpenMessageId = 0;
         chatReadReceiptMembers = [];
     }
-    chatLatestMessageId = Math.max(serverLatest, ...chatMessages.map((item) => Number(item.id || 0)), previousLatest);
+    const derivedLatestMessageId = Math.max(serverLatest, ...chatMessages.map((item) => Number(item.id || 0)));
+    chatLatestMessageId = shouldReplaceMessages
+        ? derivedLatestMessageId
+        : Math.max(previousLatest, derivedLatestMessageId);
     chatSnapshotRevision = serverSnapshotRevision;
-
-    const newMessageCount = isInitialSnapshot
-        ? 0
-        : incoming.filter((message) => Number(message.id || 0) > previousLatest).length;
-    const hasMentionForCurrentUser = !isInitialSnapshot && incoming.some((message) => (
-        message
-        && String(message.username || '') !== String(authenticatedUser?.username || '')
-        && extractMentionedUsernames(message.text || '').has(String(authenticatedUser?.username || ''))
-    ));
-    if (chatWindowState?.visible === false && newMessageCount > 0) {
-        chatUnreadCount += newMessageCount;
-        if (hasMentionForCurrentUser) {
-            chatMentionAlertActive = true;
-        }
-    } else if (chatWindowState?.visible !== false) {
-        chatUnreadCount = 0;
-        chatMentionAlertActive = false;
-    }
     if (serverReset) {
-        chatUnreadCount = 0;
-        chatMentionAlertActive = false;
+        markChatAsRead(chatLatestMessageId, { persist: false });
     }
 
     renderChatMessages({ forceScroll: forceScroll || isInitialSnapshot });
     renderChatEditPreview();
     renderChatReplyPreview();
     chatStateInitialized = true;
-    updateChatLauncher();
+    recomputeChatAttentionState({ persistReadState: true });
 }
 
 async function refreshChatState({ forceScroll = false } = {}) {
@@ -5130,8 +5458,16 @@ async function clearChatHistory() {
 
 function initializeChatWindow() {
     chatWindowState = loadChatWindowState();
+    if (chatWindowState.read_username && chatWindowState.read_username !== String(authenticatedUser?.username || '').trim()) {
+        chatWindowState.last_read_message_id = 0;
+    }
+    chatWindowState.read_username = String(authenticatedUser?.username || '').trim();
+    chatWindowState.visible = false;
+    chatWindowState.launcher_left = null;
+    chatWindowState.launcher_top = null;
+    persistChatWindowState();
     applyChatWindowRect();
-    setChatWindowVisibility(chatWindowState.visible !== false, { persist: false });
+    setChatWindowVisibility(false, { persist: false });
     if ('ResizeObserver' in window && !chatResizeObserver) {
         chatResizeObserver = new ResizeObserver(() => {
             if (chatWindow.classList.contains('hidden')) return;
@@ -5149,6 +5485,7 @@ function setAuthError(message = '') {
 
 function resetWorkspace() {
     selectedScenario = null;
+    availableScenarios = [];
     currentSessionId = null;
     stopAutoModePolling();
     currentAutoModeId = '';
@@ -5180,9 +5517,8 @@ function resetWorkspace() {
     prefillMockCallStartTime(true);
     updateCallStartTimeValidationState();
     updateStartSessionButtonState();
-    document.getElementById('scenario-list').innerHTML = '<div class="terminal-hint">登录后显示场景列表</div>';
+    renderScenarioList();
     document.getElementById('terminal-output').innerHTML = '';
-    document.querySelectorAll('.scenario-item').forEach((item) => item.classList.remove('active'));
     resetRewriteWorkspace();
 }
 
@@ -5194,12 +5530,14 @@ function applyAuthenticatedState(user) {
     updateCallStartTimeValidationState();
     updateStartSessionButtonState();
     initializeChatWindow();
+    refreshChatMentionUsers().catch(() => {});
     startChatPolling();
     syncAppModeView();
 }
 
 function applyLoggedOutState(message = '') {
     authenticatedUser = null;
+    closeBlockingActionNotice();
     stopAutoModePolling();
     authUserName.textContent = '未登录';
     authUserMeta.textContent = '只有备案账号可访问测试台。';
@@ -5210,6 +5548,7 @@ function applyLoggedOutState(message = '') {
     setAuthError(message);
     activeAppMode = 'manual';
     resetWorkspace();
+    syncAppModeView();
     updateModeSwitchButtons();
 }
 
@@ -5235,10 +5574,15 @@ async function safeJson(response) {
 }
 
 async function apiFetch(url, options = {}) {
-    const response = await fetch(url, options);
+    const unauthorizedMode = String(options?.unauthorizedMode || 'logout').trim();
+    const requestOptions = { ...options };
+    delete requestOptions.unauthorizedMode;
+    const response = await fetch(url, requestOptions);
     const data = await safeJson(response);
     if (response.status === 401) {
-        applyLoggedOutState(data.detail || '登录状态已失效，请重新登录。');
+        if (unauthorizedMode !== 'ignore') {
+            applyLoggedOutState(data.detail || '登录状态已失效，请重新登录。');
+        }
         throw new Error(data.detail || '请先登录');
     }
     if (!response.ok) {
@@ -5248,36 +5592,25 @@ async function apiFetch(url, options = {}) {
 }
 
 async function loadScenarios() {
-    const list = document.getElementById('scenario-list');
-    list.innerHTML = '<div class="terminal-hint">加载中...</div>';
+    if (scenarioList) {
+        scenarioList.innerHTML = '<div class="terminal-hint">加载中...</div>';
+    }
     try {
         const scenarios = await apiFetch('/api/scenarios');
-        list.innerHTML = '';
-
-        scenarios.forEach((scenario, index) => {
-            const item = document.createElement('button');
-            item.type = 'button';
-            item.className = 'scenario-item';
-            item.innerHTML = `
-                <span class="scenario-title">${scenario.product}</span>
-                <span class="scenario-meta">${scenario.id}</span>
-                <span class="scenario-meta">${scenario.request} | max_turns=${scenario.max_turns}</span>
-                <span class="scenario-issue">${scenario.issue}</span>
-            `;
-            item.onclick = () => selectScenario(scenarios[index], item);
-            list.appendChild(item);
-        });
+        availableScenarios = Array.isArray(scenarios) ? scenarios : [];
+        renderScenarioList();
     } catch (error) {
-        if (authenticatedUser) {
-            list.innerHTML = `<div class="terminal-hint error">${error.message}</div>`;
+        availableScenarios = [];
+        if (authenticatedUser && scenarioList) {
+            scenarioList.innerHTML = `<div class="terminal-hint error">${escapeHtml(error.message)}</div>`;
         }
     }
 }
 
-function selectScenario(scenario, element) {
+function selectScenario(scenario) {
+    closeBlockingActionNotice();
     selectedScenario = scenario;
-    document.querySelectorAll('.scenario-item').forEach((item) => item.classList.remove('active'));
-    element.classList.add('active');
+    renderScenarioList();
     updateScenarioHeader({
         scenario_id: scenario.id,
         product: { brand: scenario.product.split(' ')[0] || scenario.product, model: scenario.product.replace(/^[^ ]+\s*/, '') },
@@ -5318,6 +5651,7 @@ async function login(event) {
         const data = await apiFetch('/api/auth/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            unauthorizedMode: 'ignore',
             body: JSON.stringify({ username, password }),
         });
         applyAuthenticatedState(data.user);
@@ -5379,7 +5713,16 @@ async function submitReview() {
             'system',
         );
         sessionReviewLocked = true;
-        resetReviewState();
+        openReviewModal(
+            {
+                ...(reviewContext || {}),
+                review_required: true,
+                session_id: data.session_id || currentSessionId,
+                mode: reviewSourceMode || 'manual',
+                review_submitted: true,
+            },
+            { blocking: false },
+        );
         updateInputAvailability(false);
         renderTerminalEntries(sessionTerminalEntries);
     } catch (error) {
@@ -5414,12 +5757,16 @@ function reopenReviewModal() {
 
 function syncReviewModalMode(data = {}) {
     const isAutoModeReview = String(data?.mode || reviewSourceMode || '').trim() === 'auto_mode';
+    const reviewSubmitted = Boolean(data?.review_submitted);
     reviewSourceMode = isAutoModeReview ? 'auto_mode' : 'manual';
-    reviewChoiceGroup?.classList.toggle('hidden', isAutoModeReview);
-    reviewPersistToggle?.classList.toggle('hidden', isAutoModeReview);
-    reviewSubmitButton?.classList.toggle('hidden', isAutoModeReview);
-    if (isAutoModeReview) {
+    reviewChoiceGroup?.classList.toggle('hidden', isAutoModeReview || reviewSubmitted);
+    reviewPersistToggle?.classList.toggle('hidden', isAutoModeReview || reviewSubmitted);
+    reviewSubmitButton?.classList.toggle('hidden', isAutoModeReview || reviewSubmitted);
+    reviewSubmitButton.disabled = reviewSubmitted;
+    if (isAutoModeReview || reviewSubmitted) {
         reviewErrorFields.classList.add('hidden');
+    }
+    if (isAutoModeReview) {
         document.querySelectorAll('input[name="review-correctness"]').forEach((input) => {
             input.checked = false;
         });
@@ -5636,6 +5983,7 @@ async function runAutoMode() {
         } else {
             autoModeJobId = String(data?.job_id || '').trim();
             scheduleAutoModePoll();
+            setSessionBusyState(false);
         }
     } catch (error) {
         setTerminalProcessingState(null);
@@ -5663,6 +6011,7 @@ async function forceEndSession() {
                 setSessionBusyState(false);
             } else {
                 scheduleAutoModePoll(450);
+                setSessionBusyState(false);
             }
         } catch (error) {
             errorMessage = error.message;
@@ -5799,8 +6148,28 @@ async function toggleAddressIeDisplayForRound(roundIndex, enabled) {
 loginForm.addEventListener('submit', login);
 loginPasswordToggle.addEventListener('click', togglePasswordVisibility);
 document.getElementById('logout-btn').onclick = logout;
-startSessionButton.onclick = startSession;
-if (autoModeButton) autoModeButton.onclick = runAutoMode;
+startSessionButton.onclick = () => {
+    if (startSessionButton?.dataset.softDisabled === 'true') {
+        showBlockingActionNotice('请先选择场景后再启动测试会话。');
+        return;
+    }
+    startSession();
+};
+if (autoModeButton) {
+    autoModeButton.onclick = () => {
+        if (autoModeButton.dataset.softDisabled === 'true') {
+            showBlockingActionNotice('请先选择场景后再使用自动模式。');
+            return;
+        }
+        runAutoMode();
+    };
+}
+blockingActionNoticeCloseButton?.addEventListener('click', closeBlockingActionNotice);
+blockingActionNotice?.addEventListener('click', (event) => {
+    if (event.target === blockingActionNotice) {
+        closeBlockingActionNotice();
+    }
+});
 document.getElementById('end-session-btn').onclick = forceEndSession;
 modeSwitchButton.addEventListener('click', () => {
     if (modeSwitchButton.disabled) return;
@@ -6148,6 +6517,10 @@ rewriteRecordDeleteButton?.addEventListener('click', () => {
     if (!rewriteRecordMenuState) return;
     deleteRewriteRecord(Number(rewriteRecordMenuState.recordIndex));
 });
+rewriteRecordReviewButton?.addEventListener('click', () => {
+    if (!rewriteRecordMenuState) return;
+    void submitRewriteRecordReview(Number(rewriteRecordMenuState.recordIndex));
+});
 document.addEventListener('click', (event) => {
     if (issueReferencePopover.classList.contains('hidden')) return;
     const clickedInsidePopover = event.target.closest('#issue-reference-popover');
@@ -6347,6 +6720,16 @@ if (rewriteResetButton) {
         resetRewriteRecordToInitial(rewriteSelectedIndex);
     });
 }
+if (prefersReducedMotionQuery?.addEventListener) {
+    prefersReducedMotionQuery.addEventListener('change', (event) => {
+        applyReducedMotionPreference(event.matches);
+    });
+} else if (prefersReducedMotionQuery?.addListener) {
+    prefersReducedMotionQuery.addListener((event) => {
+        applyReducedMotionPreference(event.matches);
+    });
+}
+applyReducedMotionPreference(prefersReducedMotion);
 document.addEventListener('pointerleave', hideCursorGlow, true);
 document.addEventListener('pointerout', (event) => {
     if (!event.relatedTarget) {
