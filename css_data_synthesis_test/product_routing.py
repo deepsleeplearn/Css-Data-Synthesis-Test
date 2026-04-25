@@ -11,7 +11,7 @@ ROUTING_RESULT_HOME = "家用 + 可直接确认机型"
 ROUTING_RESULT_BUILDING = "楼宇 + 可直接确认机型"
 ROUTING_RESULT_HUMAN = "转人工"
 
-PROMPT_BRAND_OR_SERIES = "请问您的空气能是什么具体品牌或系列呢？"
+PROMPT_BRAND_OR_SERIES = "请问您的空气能热水器具体是什么品牌或系列的呢？"
 PROMPT_USAGE_PURPOSE = "请问是生活用水加采暖使用，还是单独生活用水，或者单独采暖的呢？"
 PROMPT_USAGE_SCENE = "请问是在家庭、别墅、公寓或理发店使用的吗？"
 PROMPT_PURCHASE_OR_PROPERTY = "请问是您自己购买的，还是楼盘配套赠送的呢？"

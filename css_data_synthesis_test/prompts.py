@@ -49,7 +49,7 @@ def count_phone_keypad_prompts(transcript: list[DialogueTurn]) -> int:
     return sum(
         1
         for turn in transcript
-        if normalize_speaker(turn.speaker) == SERVICE_SPEAKER and "拨号盘上输入您的联系方式" in turn.text
+        if normalize_speaker(turn.speaker) == SERVICE_SPEAKER and ServiceDialoguePolicy.is_phone_keypad_prompt(turn.text)
     )
 
 

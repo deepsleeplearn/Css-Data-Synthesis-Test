@@ -107,22 +107,80 @@ select {
 .app-shell {
     height: 100dvh;
     display: grid;
-    grid-template-columns: 320px minmax(0, 1fr) 340px;
-    gap: 1.25rem;
+    gap: 0.95rem;
     padding: 1.25rem;
     overflow: hidden;
 }
 
+#app-shell {
+    --manual-shell-left-width: 320px;
+    --manual-shell-right-width: 340px;
+    grid-template-columns:
+        minmax(0, var(--manual-shell-left-width))
+        12px
+        minmax(0, 1fr)
+        12px
+        minmax(0, var(--manual-shell-right-width));
+}
+
+#manual-left-panel.is-manual-panel-collapsed,
+#manual-right-panel.is-manual-panel-collapsed {
+    opacity: 0;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+.manual-shell-splitter {
+    position: relative;
+    min-width: 12px;
+    width: 12px;
+    border-radius: 999px;
+    align-self: stretch;
+    cursor: col-resize;
+    background: rgba(113, 95, 72, 0.08);
+    transition: background 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
+}
+
+.manual-shell-splitter:hover,
+.manual-shell-splitter.is-dragging,
+.manual-shell-splitter.is-panel-hidden {
+    background: rgba(15, 118, 110, 0.14);
+    box-shadow: inset 0 0 0 1px rgba(15, 118, 110, 0.18);
+}
+
+.manual-shell-splitter-handle {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 4px;
+    height: 84px;
+    border-radius: 999px;
+    transform: translate(-50%, -50%);
+    background: linear-gradient(180deg, rgba(15, 118, 110, 0.18), rgba(15, 118, 110, 0.48), rgba(15, 118, 110, 0.18));
+}
+
+#app-shell.manual-hide-left #manual-left-splitter,
+#app-shell.manual-hide-right #manual-right-splitter {
+    background: rgba(15, 118, 110, 0.18);
+}
+
+#app-shell.manual-hide-left #manual-left-splitter .manual-shell-splitter-handle,
+#app-shell.manual-hide-right #manual-right-splitter .manual-shell-splitter-handle {
+    width: 5px;
+    height: 112px;
+}
 .left-panel,
 .right-panel,
 .terminal-panel {
     min-height: 0;
+    min-width: 0;
 }
 
 .left-panel,
 .right-panel {
     display: flex;
     flex-direction: column;
+    width: 100%;
     gap: 1rem;
     min-height: 0;
     overflow: hidden;
@@ -133,8 +191,9 @@ select {
     border: 1px solid var(--border);
     border-radius: 20px;
     box-shadow: var(--shadow);
-    padding: 1rem;
+    padding: 0.88rem;
     flex-shrink: 0;
+    min-width: 0;
 }
 
 .left-panel-hero,
@@ -287,7 +346,7 @@ h2 {
     display: flex;
     flex-direction: column;
     gap: 0.45rem;
-    margin-bottom: 0.9rem;
+    margin-bottom: 0.68rem;
     font-size: 0.92rem;
     color: var(--muted);
 }
@@ -364,6 +423,22 @@ input:focus,
 select:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+}
+
+#known-address,
+#ivr-utterance {
+    min-height: 0;
+    line-height: 1.5;
+    padding-top: 0.62rem;
+    padding-bottom: 0.62rem;
+}
+
+#known-address {
+    height: 4.55rem;
+}
+
+#ivr-utterance {
+    height: 3.45rem;
 }
 
 .password-toggle {
@@ -491,14 +566,29 @@ select:focus {
 
 .scenario-list,
 .data-list {
+    width: 100%;
     min-height: 0;
+    min-width: 0;
     overflow: auto;
     display: flex;
     flex-direction: column;
+    align-items: stretch;
     gap: 0.75rem;
 }
 
+.scenario-config-list {
+    padding-right: 0.1rem;
+}
+
+.scenario-config-list .field {
+    margin-bottom: 0;
+}
+
 .scenario-item {
+    display: block;
+    align-self: stretch;
+    width: 100%;
+    min-width: 0;
     border: 1px solid var(--border);
     border-radius: 16px;
     background: var(--panel-strong);
@@ -3015,7 +3105,15 @@ select:focus {
 @media (max-width: 1200px) {
     .app-shell {
         height: 100dvh;
-        grid-template-columns: 300px 1fr;
+        grid-template-columns: clamp(268px, 30vw, 320px) minmax(0, 1fr);
+    }
+
+    #app-shell {
+        grid-template-columns: clamp(268px, 30vw, 320px) minmax(0, 1fr);
+    }
+
+    .manual-shell-splitter {
+        display: none;
     }
 
     .right-panel {
@@ -3036,6 +3134,10 @@ select:focus {
         height: auto;
         min-height: 100dvh;
         overflow: visible;
+        grid-template-columns: 1fr;
+    }
+
+    #app-shell {
         grid-template-columns: 1fr;
     }
 

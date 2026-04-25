@@ -103,9 +103,18 @@ let rewritePendingExportAction = null;
 let rewriteKeyPromptState = null;
 let rewriteTransferNoticeTimer = null;
 let blockingActionNoticeTimer = null;
+let manualShellLeftHidden = false;
+let manualShellRightHidden = false;
+let manualShellLeftWidth = 320;
+let manualShellRightWidth = 340;
+let manualShellResizeState = null;
 
 const authGate = document.getElementById('auth-gate');
 const appShell = document.getElementById('app-shell');
+const manualLeftPanel = document.getElementById('manual-left-panel');
+const manualRightPanel = document.getElementById('manual-right-panel');
+const manualLeftSplitter = document.getElementById('manual-left-splitter');
+const manualRightSplitter = document.getElementById('manual-right-splitter');
 const rewriteShell = document.getElementById('rewrite-shell');
 const rewriteTransferNotice = document.getElementById('rewrite-transfer-notice');
 const rewriteLeftPanel = document.getElementById('rewrite-left-panel');
@@ -129,6 +138,10 @@ const blockingActionNoticeCloseButton = document.getElementById('blocking-action
 const authUserName = document.getElementById('auth-user-name');
 const authUserMeta = document.getElementById('auth-user-meta');
 const knownAddressInput = document.getElementById('known-address');
+const ivrUtteranceInput = document.getElementById('ivr-utterance');
+const manualProductCategorySelect = document.getElementById('manual-product-category');
+const manualRequestTypeSelect = document.getElementById('manual-request-type');
+const manualMaxRoundsInput = document.getElementById('manual-max-rounds');
 const generateKnownAddressButton = document.getElementById('generate-known-address-btn');
 const clearKnownAddressButton = document.getElementById('clear-known-address-btn');
 const callStartTimeInput = document.getElementById('call-start-time');
@@ -298,6 +311,13 @@ const CHAT_MESSAGE_HOLD_MS = 420;
 const CHAT_MESSAGE_HOLD_MOVE_TOLERANCE = 10;
 const CHAT_MENTION_OPTION_LIMIT = 12;
 const SESSION_INPUT_HISTORY_LIMIT = 50;
+const MANUAL_SHELL_LAYOUT_STORAGE_KEY = 'frontend-manual-shell-layout';
+const MANUAL_SHELL_LEFT_MIN_PX = 248;
+const MANUAL_SHELL_LEFT_MAX_PX = 420;
+const MANUAL_SHELL_RIGHT_MIN_PX = 276;
+const MANUAL_SHELL_RIGHT_MAX_PX = 460;
+const MANUAL_SHELL_CENTER_MIN_PX = 560;
+const MANUAL_SHELL_HIDE_THRESHOLD_PX = 92;
 const DEFAULT_DOCUMENT_TITLE = document.title;
 const CHAT_FAVICON_SIZE = 64;
 const REWRITE_RECORD_COLLECTION_KEYS = [
@@ -349,6 +369,21 @@ const REWRITE_SHELL_CENTER_MIN_PX = 420;
 const REWRITE_FUNCTION_CALL_ADDRESS_TARGET = 'addressInfo';
 const REWRITE_FUNCTION_CALL_ADDRESS_LABEL = '地址';
 const REWRITE_FUNCTION_CALL_ADDRESS_PAYLOAD = '[{"name": "ie", "arguments": {"entity_type": "addressInfo"}}]';
+const REWRITE_FUNCTION_CALL_TELEPHONE_TARGET = 'telephone';
+const REWRITE_FUNCTION_CALL_TELEPHONE_LABEL = '电话';
+const REWRITE_FUNCTION_CALL_TELEPHONE_PAYLOAD = '[{"name": "ie", "arguments": {"entity_type": "telephone"}}]';
+const REWRITE_FUNCTION_CALL_OPTIONS = [
+    {
+        target: REWRITE_FUNCTION_CALL_ADDRESS_TARGET,
+        label: REWRITE_FUNCTION_CALL_ADDRESS_LABEL,
+        payload: REWRITE_FUNCTION_CALL_ADDRESS_PAYLOAD,
+    },
+    {
+        target: REWRITE_FUNCTION_CALL_TELEPHONE_TARGET,
+        label: REWRITE_FUNCTION_CALL_TELEPHONE_LABEL,
+        payload: REWRITE_FUNCTION_CALL_TELEPHONE_PAYLOAD,
+    },
+];
 const AUTHENTICATED_ONLY_ROOTS = [
     appShell,
     rewriteShell,
@@ -445,6 +480,46 @@ function loadChatWindowState() {
 function persistChatWindowState() {
     if (!chatWindowState) return;
     safeLocalStorageSet(CHAT_WINDOW_STORAGE_KEY, JSON.stringify(chatWindowState));
+}
+
+function loadManualShellLayoutState() {
+    const raw = safeLocalStorageGet(MANUAL_SHELL_LAYOUT_STORAGE_KEY);
+    if (!raw) {
+        return {
+            leftHidden: false,
+            rightHidden: false,
+            leftWidth: 320,
+            rightWidth: 340,
+        };
+    }
+    try {
+        const parsed = JSON.parse(raw);
+        return {
+            leftHidden: parsed?.leftHidden === true,
+            rightHidden: parsed?.rightHidden === true,
+            leftWidth: Number.isFinite(Number(parsed?.leftWidth)) ? Number(parsed.leftWidth) : 320,
+            rightWidth: Number.isFinite(Number(parsed?.rightWidth)) ? Number(parsed.rightWidth) : 340,
+        };
+    } catch (error) {
+        return {
+            leftHidden: false,
+            rightHidden: false,
+            leftWidth: 320,
+            rightWidth: 340,
+        };
+    }
+}
+
+function persistManualShellLayoutState() {
+    safeLocalStorageSet(
+        MANUAL_SHELL_LAYOUT_STORAGE_KEY,
+        JSON.stringify({
+            leftHidden: manualShellLeftHidden,
+            rightHidden: manualShellRightHidden,
+            leftWidth: manualShellLeftWidth,
+            rightWidth: manualShellRightWidth,
+        }),
+    );
 }
 
 function setElementInertState(element, inert) {
@@ -1013,9 +1088,13 @@ function appendTerminalLine(text, tone = 'system') {
         renderTerminalEntries(sessionTerminalEntries);
         return;
     }
-    const line = document.createElement('div');
-    line.className = `terminal-line ${tone}`;
-    line.textContent = normalizedText;
+    const line = isTerminalProcessingText(normalizedText)
+        ? buildTerminalProcessingLine(normalizedText, { animate: true })
+        : document.createElement('div');
+    if (!isTerminalProcessingText(normalizedText)) {
+        line.className = `terminal-line ${tone}`;
+        line.textContent = normalizedText;
+    }
     terminalOutput.appendChild(line);
     terminalScrollRegion.scrollTop = terminalScrollRegion.scrollHeight;
 }
@@ -1256,6 +1335,178 @@ function updateModeSwitchButtons() {
     if (rewriteBackButton) rewriteBackButton.disabled = !canSwitch;
 }
 
+function getManualShellGapWidth() {
+    if (!appShell) return 0;
+    const computedStyle = window.getComputedStyle(appShell);
+    const gapValue = computedStyle.columnGap || computedStyle.gap || '0';
+    const gapSize = parseFloat(gapValue) || 0;
+    return gapSize * 4;
+}
+
+function applyManualShellLayoutState() {
+    if (!appShell) return;
+    const shouldUseResponsiveStack = window.innerWidth <= 1200;
+    if (shouldUseResponsiveStack) {
+        appShell.style.removeProperty('--manual-shell-left-width');
+        appShell.style.removeProperty('--manual-shell-right-width');
+    } else {
+        const leftWidth = manualShellLeftHidden ? 0 : manualShellLeftWidth;
+        const rightWidth = manualShellRightHidden ? 0 : manualShellRightWidth;
+        appShell.style.setProperty('--manual-shell-left-width', `${Math.round(leftWidth)}px`);
+        appShell.style.setProperty('--manual-shell-right-width', `${Math.round(rightWidth)}px`);
+    }
+    appShell.classList.toggle('manual-hide-left', manualShellLeftHidden);
+    appShell.classList.toggle('manual-hide-right', manualShellRightHidden);
+    if (manualLeftPanel) {
+        manualLeftPanel.classList.toggle('is-manual-panel-collapsed', manualShellLeftHidden);
+        manualLeftPanel.setAttribute('aria-hidden', manualShellLeftHidden ? 'true' : 'false');
+    }
+    if (manualRightPanel) {
+        manualRightPanel.classList.toggle('is-manual-panel-collapsed', manualShellRightHidden);
+        manualRightPanel.setAttribute('aria-hidden', manualShellRightHidden ? 'true' : 'false');
+    }
+    if (manualLeftSplitter) {
+        manualLeftSplitter.classList.toggle('is-panel-hidden', manualShellLeftHidden);
+        manualLeftSplitter.setAttribute(
+            'aria-label',
+            manualShellLeftHidden ? '向右拖拽显示左侧配置栏' : '调整左侧配置栏宽度',
+        );
+        manualLeftSplitter.setAttribute(
+            'aria-valuenow',
+            String(Math.round(manualShellLeftHidden ? 0 : manualShellLeftWidth)),
+        );
+    }
+    if (manualRightSplitter) {
+        manualRightSplitter.classList.toggle('is-panel-hidden', manualShellRightHidden);
+        manualRightSplitter.setAttribute(
+            'aria-label',
+            manualShellRightHidden ? '向左拖拽显示右侧状态栏' : '调整右侧状态栏宽度',
+        );
+        manualRightSplitter.setAttribute(
+            'aria-valuenow',
+            String(Math.round(manualShellRightHidden ? 0 : manualShellRightWidth)),
+        );
+    }
+}
+
+function applyManualShellWidthConstraints() {
+    if (!appShell || window.innerWidth <= 1200) return;
+    const shellRect = appShell.getBoundingClientRect();
+    const totalWidth = shellRect.width;
+    const splitterWidth = (manualLeftSplitter?.offsetWidth || 0) + (manualRightSplitter?.offsetWidth || 0);
+    const reservedWidth = splitterWidth + getManualShellGapWidth();
+
+    manualShellLeftWidth = Math.min(
+        Math.max(manualShellLeftWidth, MANUAL_SHELL_LEFT_MIN_PX),
+        MANUAL_SHELL_LEFT_MAX_PX,
+    );
+    manualShellRightWidth = Math.min(
+        Math.max(manualShellRightWidth, MANUAL_SHELL_RIGHT_MIN_PX),
+        MANUAL_SHELL_RIGHT_MAX_PX,
+    );
+
+    if (!manualShellLeftHidden && !manualShellRightHidden) {
+        const maxLeft = Math.max(
+            MANUAL_SHELL_LEFT_MIN_PX,
+            totalWidth - reservedWidth - manualShellRightWidth - MANUAL_SHELL_CENTER_MIN_PX,
+        );
+        manualShellLeftWidth = Math.min(manualShellLeftWidth, maxLeft);
+        const maxRight = Math.max(
+            MANUAL_SHELL_RIGHT_MIN_PX,
+            totalWidth - reservedWidth - manualShellLeftWidth - MANUAL_SHELL_CENTER_MIN_PX,
+        );
+        manualShellRightWidth = Math.min(manualShellRightWidth, maxRight);
+    }
+}
+
+function updateManualShellWidthFromPointer(side, clientX) {
+    if (!appShell) return;
+    const shellRect = appShell.getBoundingClientRect();
+    const totalWidth = shellRect.width;
+    const reservedWidth = (
+        (manualLeftSplitter?.offsetWidth || 0)
+        + (manualRightSplitter?.offsetWidth || 0)
+        + getManualShellGapWidth()
+    );
+
+    if (side === 'left') {
+        const rawWidth = clientX - shellRect.left;
+        if (rawWidth <= MANUAL_SHELL_HIDE_THRESHOLD_PX) {
+            manualShellLeftHidden = true;
+        } else {
+            manualShellLeftHidden = false;
+            const maxLeft = Math.max(
+                MANUAL_SHELL_LEFT_MIN_PX,
+                totalWidth
+                    - reservedWidth
+                    - (manualShellRightHidden ? 0 : manualShellRightWidth)
+                    - MANUAL_SHELL_CENTER_MIN_PX,
+            );
+            manualShellLeftWidth = Math.min(
+                Math.max(rawWidth, MANUAL_SHELL_LEFT_MIN_PX),
+                Math.min(MANUAL_SHELL_LEFT_MAX_PX, maxLeft),
+            );
+        }
+    }
+
+    if (side === 'right') {
+        const rawWidth = shellRect.right - clientX;
+        if (rawWidth <= MANUAL_SHELL_HIDE_THRESHOLD_PX) {
+            manualShellRightHidden = true;
+        } else {
+            manualShellRightHidden = false;
+            const maxRight = Math.max(
+                MANUAL_SHELL_RIGHT_MIN_PX,
+                totalWidth
+                    - reservedWidth
+                    - (manualShellLeftHidden ? 0 : manualShellLeftWidth)
+                    - MANUAL_SHELL_CENTER_MIN_PX,
+            );
+            manualShellRightWidth = Math.min(
+                Math.max(rawWidth, MANUAL_SHELL_RIGHT_MIN_PX),
+                Math.min(MANUAL_SHELL_RIGHT_MAX_PX, maxRight),
+            );
+        }
+    }
+
+    applyManualShellWidthConstraints();
+    applyManualShellLayoutState();
+}
+
+function beginManualShellResize(side, event) {
+    if (!appShell || activeAppMode !== 'manual' || isReviewModalVisible() || window.innerWidth <= 1200) return;
+    event.preventDefault();
+    manualShellResizeState = { side, pointerId: event.pointerId };
+    const splitter = side === 'left' ? manualLeftSplitter : manualRightSplitter;
+    splitter?.classList.add('is-dragging');
+    if (typeof splitter?.setPointerCapture === 'function') {
+        splitter.setPointerCapture(event.pointerId);
+    }
+    updateManualShellWidthFromPointer(side, event.clientX);
+}
+
+function handleManualShellResize(event) {
+    if (!manualShellResizeState || event.pointerId !== manualShellResizeState.pointerId) return;
+    updateManualShellWidthFromPointer(manualShellResizeState.side, event.clientX);
+}
+
+function endManualShellResize(event) {
+    if (!manualShellResizeState || (event && event.pointerId !== manualShellResizeState.pointerId)) return;
+    const splitter = manualShellResizeState.side === 'left' ? manualLeftSplitter : manualRightSplitter;
+    if (
+        splitter
+        && typeof splitter.releasePointerCapture === 'function'
+        && event
+        && splitter.hasPointerCapture?.(event.pointerId)
+    ) {
+        splitter.releasePointerCapture(event.pointerId);
+    }
+    manualShellResizeState = null;
+    manualLeftSplitter?.classList.remove('is-dragging');
+    manualRightSplitter?.classList.remove('is-dragging');
+    persistManualShellLayoutState();
+}
+
 function isTestAdminUser() {
     return String(authenticatedUser?.display_name || '').trim() === '测试管理员';
 }
@@ -1299,13 +1550,6 @@ function setSoftDisabledButton(button, active) {
 function updateAutoModeButtonState() {
     if (!autoModeButton) return;
     const shouldShow = Boolean(authenticatedUser) && activeAppMode === 'manual' && isTestAdminUser();
-    const blockedByMissingScenario = shouldShow
-        && !selectedScenario
-        && !sessionBusy
-        && !(currentSessionId && !sessionClosed)
-        && !reviewPending
-        && !isReviewModalVisible()
-        && isCallStartTimeValid();
     autoModeButton.classList.toggle('hidden', !shouldShow);
     autoModeButton.disabled = !shouldShow
         || sessionBusy
@@ -1313,13 +1557,15 @@ function updateAutoModeButtonState() {
         || reviewPending
         || isReviewModalVisible()
         || !isCallStartTimeValid();
-    setSoftDisabledButton(autoModeButton, blockedByMissingScenario);
+    setSoftDisabledButton(autoModeButton, false);
 }
 
 function syncAppModeView() {
     const authenticated = Boolean(authenticatedUser);
     const showManual = authenticated && activeAppMode === 'manual';
     const showRewrite = authenticated && activeAppMode === 'rewrite';
+    applyManualShellWidthConstraints();
+    applyManualShellLayoutState();
     setAuthenticatedUiMounted(authenticated);
     authGate.classList.toggle('hidden', authenticated);
     authGate.toggleAttribute('hidden', authenticated);
@@ -1393,16 +1639,59 @@ function createScenarioListItem(scenario, index) {
 }
 
 function renderScenarioList() {
-    if (!scenarioList) return;
-    clearElement(scenarioList);
-    if (!availableScenarios.length) {
-        scenarioList.innerHTML = '<div class="terminal-hint">登录后显示场景列表</div>';
-        return;
-    }
+    syncManualScenarioSelection({ refreshKnownAddress: true });
+}
 
-    availableScenarios.forEach((scenario, index) => {
-        scenarioList.appendChild(createScenarioListItem(scenario, index));
-    });
+function getManualRequestLabel(requestType) {
+    return String(requestType || '').trim() === 'installation' ? '安装' : '维修';
+}
+
+function getManualMaxRoundsValue() {
+    const parsed = Number.parseInt(String(manualMaxRoundsInput?.value || '').trim(), 10);
+    if (!Number.isFinite(parsed) || parsed < 1) return 32;
+    return parsed;
+}
+
+function sanitizeManualMaxRoundsInput() {
+    if (!manualMaxRoundsInput) return getManualMaxRoundsValue();
+    const normalized = String(getManualMaxRoundsValue());
+    manualMaxRoundsInput.value = normalized;
+    return Number.parseInt(normalized, 10);
+}
+
+function buildConfiguredScenarioSelection() {
+    const productCategory = String(manualProductCategorySelect?.value || '空气能热水机').trim() || '空气能热水机';
+    const requestType = String(manualRequestTypeSelect?.value || 'fault').trim() === 'installation'
+        ? 'installation'
+        : 'fault';
+    const requestLabel = getManualRequestLabel(requestType);
+    const maxTurns = getManualMaxRoundsValue();
+    const productKeyMap = {
+        '空气能热水机': 'air_energy',
+        '热水器': 'water_heater',
+        '燃气热水器': 'gas_water_heater',
+        '电热水器': 'electric_water_heater',
+    };
+    const productKey = productKeyMap[productCategory] || 'air_energy';
+    return {
+        id: `manual-config-${productKey}-${requestType}`,
+        scenario_id: `manual_config_${productKey}_${requestType}`,
+        product: `美的 ${productCategory}`,
+        request: requestType,
+        issue: `美的${productCategory}需要${requestLabel}`,
+        max_turns: maxTurns,
+        product_category: productCategory,
+        request_type: requestType,
+    };
+}
+
+function syncManualScenarioSelection(options = {}) {
+    const { refreshKnownAddress = false } = options;
+    selectedScenario = buildConfiguredScenarioSelection();
+    updateStartSessionButtonState();
+    if (refreshKnownAddress && authenticatedUser) {
+        hydrateKnownAddressPrefill(false);
+    }
 }
 
 function isPotentialRewriteTurn(value) {
@@ -1645,17 +1934,35 @@ function extractRewriteStructuredLine(text = '', explicitKind = '') {
 
 function inferRewriteFunctionCallTarget(text = '') {
     const normalizedText = String(text || '').trim();
-    return normalizedText === REWRITE_FUNCTION_CALL_ADDRESS_PAYLOAD
-        ? REWRITE_FUNCTION_CALL_ADDRESS_TARGET
-        : '';
+    const matchedOption = REWRITE_FUNCTION_CALL_OPTIONS.find((option) => option.payload === normalizedText);
+    return matchedOption ? matchedOption.target : '';
 }
 
-function createDefaultRewriteObservationPayload() {
-    return {
-        address: '',
-        error_code: '',
-        error_msg: '',
-    };
+function getRewriteObservationFieldSpecs(payload = {}, targetType = '') {
+    const normalizedTarget = String(targetType || '').trim();
+    if (
+        normalizedTarget === REWRITE_FUNCTION_CALL_TELEPHONE_TARGET
+        || Object.prototype.hasOwnProperty.call(payload, 'telephone')
+        || Object.prototype.hasOwnProperty.call(payload, 'numberType')
+    ) {
+        return [
+            ['telephone', 'telephone', payload.telephone, '填写 observation 的电话结果'],
+            ['numberType', 'numberType', payload.numberType, '填写 numberType'],
+            ['error_code', 'error_code', payload.error_code, '填写 error_code'],
+            ['error_msg', 'error_msg', payload.error_msg, '填写 error_msg'],
+        ];
+    }
+    return [
+        ['address', 'address', payload.address, '填写 observation 的地址结果'],
+        ['error_code', 'error_code', payload.error_code, '填写 error_code'],
+        ['error_msg', 'error_msg', payload.error_msg, '填写 error_msg'],
+    ];
+}
+
+function createDefaultRewriteObservationPayload(targetType = '') {
+    return Object.fromEntries(
+        getRewriteObservationFieldSpecs({}, targetType).map(([fieldKey]) => [fieldKey, '']),
+    );
 }
 
 function parseRewriteObservationPayload(text = '') {
@@ -1667,11 +1974,9 @@ function parseRewriteObservationPayload(text = '') {
     try {
         const parsed = JSON.parse(normalizedText);
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-            return {
-                address: String(parsed.address ?? ''),
-                error_code: String(parsed.error_code ?? ''),
-                error_msg: String(parsed.error_msg ?? ''),
-            };
+            return Object.fromEntries(
+                Object.entries(parsed).map(([key, value]) => [key, value == null ? '' : String(value)]),
+            );
         }
     } catch (error) {
         // Fallback to the inline observation display format.
@@ -1694,13 +1999,23 @@ function parseRewriteObservationPayload(text = '') {
 }
 
 function serializeRewriteObservationPayload(payload = {}) {
-    const rawErrorCode = String(payload.error_code ?? '').trim();
-    const normalizedErrorCode = /^-?\d+$/.test(rawErrorCode) ? Number(rawErrorCode) : rawErrorCode;
-    return JSON.stringify({
-        address: String(payload.address ?? '').trim(),
-        error_code: normalizedErrorCode,
-        error_msg: String(payload.error_msg ?? '').trim(),
+    const parsedPayload = payload && typeof payload === 'object' && !Array.isArray(payload)
+        ? payload
+        : {};
+    const targetType = Object.prototype.hasOwnProperty.call(parsedPayload, 'telephone')
+        || Object.prototype.hasOwnProperty.call(parsedPayload, 'numberType')
+        ? REWRITE_FUNCTION_CALL_TELEPHONE_TARGET
+        : REWRITE_FUNCTION_CALL_ADDRESS_TARGET;
+    const normalizedPayload = {};
+    getRewriteObservationFieldSpecs(parsedPayload, targetType).forEach(([fieldKey]) => {
+        if (fieldKey === 'error_code') {
+            const rawErrorCode = String(parsedPayload.error_code ?? '').trim();
+            normalizedPayload.error_code = /^-?\d+$/.test(rawErrorCode) ? Number(rawErrorCode) : rawErrorCode;
+            return;
+        }
+        normalizedPayload[fieldKey] = String(parsedPayload[fieldKey] ?? '').trim();
     });
+    return JSON.stringify(normalizedPayload);
 }
 
 function stripRewriteLinePrefix(text = '') {
@@ -2526,6 +2841,7 @@ function appendCurrentSessionToRewriteMode() {
         rewriteSourceFormat = 'jsonl';
     }
     rewriteAvailableRoles = collectRewriteAvailableRoles(rewriteRecords);
+    reviewPending = false;
     dismissReview();
     setAppMode('rewrite');
     renderRewriteFileInfo();
@@ -2778,7 +3094,8 @@ function updateRewriteLineRole(recordIndex, lineId, role) {
     target.role = normalizedRole;
     if (isRewriteFunctionCallRole(normalizedRole)) {
         const targetType = inferRewriteFunctionCallTarget(target.text);
-        target.text = targetType === REWRITE_FUNCTION_CALL_ADDRESS_TARGET ? target.text : '';
+        const matchedOption = REWRITE_FUNCTION_CALL_OPTIONS.find((option) => option.target === targetType);
+        target.text = matchedOption ? matchedOption.payload : '';
     } else if (isRewriteObservationRole(normalizedRole)) {
         target.text = serializeRewriteObservationPayload(parseRewriteObservationPayload(target.text));
     }
@@ -2797,9 +3114,8 @@ function updateRewriteFunctionCallTarget(recordIndex, lineId, targetType) {
     const targetLine = currentLines.find((line) => line.id === lineId);
     if (!targetLine || !isRewriteFunctionCallRole(targetLine.role)) return;
     const normalizedTarget = String(targetType || '').trim();
-    targetLine.text = normalizedTarget === REWRITE_FUNCTION_CALL_ADDRESS_TARGET
-        ? REWRITE_FUNCTION_CALL_ADDRESS_PAYLOAD
-        : '';
+    const matchedOption = REWRITE_FUNCTION_CALL_OPTIONS.find((option) => option.target === normalizedTarget);
+    targetLine.text = matchedOption ? matchedOption.payload : '';
     applyRewriteLineMutation(recordIndex, currentLines, {
         pushHistory: true,
         previousLines: getRewriteEditableLines(record, recordIndex),
@@ -2824,7 +3140,7 @@ function updateRewriteObservationField(recordIndex, lineId, field, value) {
     });
 }
 
-function buildRewriteAddressObservationContextLines(recordIndex, functionCallLineId) {
+function buildRewriteObservationContextLines(recordIndex, functionCallLineId) {
     const record = rewriteRecords[recordIndex];
     if (!record) return [];
     const currentLines = getRewriteEditableLines(record, recordIndex);
@@ -2849,12 +3165,13 @@ async function generateRewriteObservationLine(recordIndex, functionCallLineId) {
     if (functionCallIndex < 0) return;
     const functionCallLine = currentLines[functionCallIndex];
     if (!isRewriteFunctionCallRole(functionCallLine.role)) return;
-    if (inferRewriteFunctionCallTarget(functionCallLine.text) !== REWRITE_FUNCTION_CALL_ADDRESS_TARGET) {
-        window.alert('请先为 function_call 选择“地址”调用项。');
+    const targetType = inferRewriteFunctionCallTarget(functionCallLine.text);
+    if (!targetType) {
+        window.alert('请先为 function_call 选择调用项。');
         return;
     }
 
-    const dialogueLines = buildRewriteAddressObservationContextLines(recordIndex, functionCallLineId);
+    const dialogueLines = buildRewriteObservationContextLines(recordIndex, functionCallLineId);
     if (!dialogueLines.length) {
         window.alert('请先在 function_call 上方保留用户/客服对话内容。');
         return;
@@ -2863,10 +3180,10 @@ async function generateRewriteObservationLine(recordIndex, functionCallLineId) {
     rewriteObservationLoadingLineIds.add(functionCallLineId);
     renderRewriteRecordState(recordIndex);
     try {
-        const data = await apiFetch('/api/rewrite/address-observation', {
+        const data = await apiFetch('/api/rewrite/ie-observation', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ dialogue_lines: dialogueLines }),
+            body: JSON.stringify({ entity_type: targetType, dialogue_lines: dialogueLines }),
         });
         const observation = data?.observation ?? {};
         const observationText = serializeRewriteObservationPayload(observation);
@@ -3384,10 +3701,12 @@ function renderRewriteDialogue(record) {
             emptyOption.value = '';
             emptyOption.textContent = '请选择调用项';
             functionCallTarget.appendChild(emptyOption);
-            const addressOption = document.createElement('option');
-            addressOption.value = REWRITE_FUNCTION_CALL_ADDRESS_TARGET;
-            addressOption.textContent = REWRITE_FUNCTION_CALL_ADDRESS_LABEL;
-            functionCallTarget.appendChild(addressOption);
+            REWRITE_FUNCTION_CALL_OPTIONS.forEach((option) => {
+                const optionNode = document.createElement('option');
+                optionNode.value = option.target;
+                optionNode.textContent = option.label;
+                functionCallTarget.appendChild(optionNode);
+            });
             functionCallTarget.value = inferRewriteFunctionCallTarget(entry.text);
             updateRewriteFunctionCallTargetWidth(functionCallTarget);
             functionCallTarget.addEventListener('change', (event) => {
@@ -3410,7 +3729,7 @@ function renderRewriteDialogue(record) {
             if (isObservationLoading) {
                 generateButton.classList.add('is-loading');
             }
-            generateButton.disabled = isObservationLoading || functionCallTarget.value !== REWRITE_FUNCTION_CALL_ADDRESS_TARGET;
+            generateButton.disabled = isObservationLoading || !functionCallTarget.value;
             generateButton.addEventListener('click', () => {
                 generateRewriteObservationLine(recordIndex, entry.id);
             });
@@ -3424,11 +3743,7 @@ function renderRewriteDialogue(record) {
             const observationBody = document.createElement('div');
             observationBody.className = 'rewrite-observation-body';
 
-            [
-                ['address', 'address', observation.address, '填写 observation 的地址结果'],
-                ['error_code', 'error_code', observation.error_code, '填写 error_code'],
-                ['error_msg', 'error_msg', observation.error_msg, '填写 error_msg'],
-            ].forEach(([fieldKey, labelText, fieldValue, placeholder]) => {
+            getRewriteObservationFieldSpecs(observation).forEach(([fieldKey, labelText, fieldValue, placeholder]) => {
                 const field = document.createElement('label');
                 field.className = `rewrite-observation-field rewrite-observation-field--${fieldKey}`;
 
@@ -3798,20 +4113,13 @@ function updateCallStartTimeValidationState() {
 }
 
 function updateStartSessionButtonState() {
-    const blockedByMissingScenario = Boolean(authenticatedUser)
-        && !selectedScenario
-        && !sessionBusy
-        && !reviewPending
-        && !isReviewModalVisible()
-        && isCallStartTimeValid();
     const canStart = Boolean(authenticatedUser)
-        && Boolean(selectedScenario)
         && !sessionBusy
         && !reviewPending
         && !isReviewModalVisible()
         && isCallStartTimeValid();
-    startSessionButton.disabled = !canStart && !blockedByMissingScenario;
-    setSoftDisabledButton(startSessionButton, blockedByMissingScenario);
+    startSessionButton.disabled = !canStart;
+    setSoftDisabledButton(startSessionButton, false);
     updateAutoModeButtonState();
 }
 
@@ -4107,7 +4415,10 @@ function updateSessionContext(scenario, sessionConfig = {}) {
 
 function isTerminalProcessingText(text = '') {
     const normalized = String(text || '').trim();
-    return normalized === '自动模式正在逐轮生成，请稍候...';
+    return (
+        normalized === '自动模式正在逐轮生成，请稍候...'
+        || normalized === '正在初始化手工测试会话...'
+    );
 }
 
 function buildTerminalProcessingLine(text = '', { animate = true } = {}) {
@@ -4137,7 +4448,7 @@ function renderTerminalEntries(entries = []) {
     renderedEntries.forEach((entry) => {
         if (isTerminalProcessingText(entry.text || '')) {
             terminalOutput.appendChild(
-                buildTerminalProcessingLine(entry.text || '', { animate: !sessionClosed }),
+                buildTerminalProcessingLine(entry.text || '', { animate: !sessionClosed || sessionBusy }),
             );
             return;
         }
@@ -4473,10 +4784,13 @@ function applySessionView(data) {
 function updateScenarioHeader(scenario) {
     const title = document.getElementById('current-scenario-title');
     if (!scenario) {
-        title.textContent = '请选择场景并启动会话';
+        title.textContent = '请配置产品和诉求并启动会话';
         return;
     }
-    title.textContent = `${scenario.scenario_id} | ${scenario.product.brand} ${scenario.product.model}`;
+    const productCategory = String(scenario?.product?.category || '').trim();
+    const productModel = String(scenario?.product?.model || '').trim();
+    const descriptor = [productCategory, productModel].filter(Boolean).join(' ');
+    title.textContent = `${scenario.scenario_id} | ${String(scenario?.product?.brand || '').trim()} ${descriptor}`.trim();
 }
 
 function updateInspector(slots = {}, state = {}, scenario = null) {
@@ -5556,6 +5870,7 @@ function resetWorkspace() {
     useSessionStartTimeCheckbox.checked = false;
     prefillMockCallStartTime(true);
     updateCallStartTimeValidationState();
+    sanitizeManualMaxRoundsInput();
     updateStartSessionButtonState();
     renderScenarioList();
     document.getElementById('terminal-output').innerHTML = '';
@@ -5568,6 +5883,8 @@ function applyAuthenticatedState(user) {
     authUserMeta.textContent = `备案账号：${user.username}`;
     setAuthError('');
     updateCallStartTimeValidationState();
+    sanitizeManualMaxRoundsInput();
+    syncManualScenarioSelection();
     updateStartSessionButtonState();
     initializeChatWindow();
     refreshChatMentionUsers().catch(() => {});
@@ -5632,19 +5949,8 @@ async function apiFetch(url, options = {}) {
 }
 
 async function loadScenarios() {
-    if (scenarioList) {
-        scenarioList.innerHTML = '<div class="terminal-hint">加载中...</div>';
-    }
-    try {
-        const scenarios = await apiFetch('/api/scenarios');
-        availableScenarios = Array.isArray(scenarios) ? scenarios : [];
-        renderScenarioList();
-    } catch (error) {
-        availableScenarios = [];
-        if (authenticatedUser && scenarioList) {
-            scenarioList.innerHTML = `<div class="terminal-hint error">${escapeHtml(error.message)}</div>`;
-        }
-    }
+    availableScenarios = [];
+    renderScenarioList();
 }
 
 function selectScenario(scenario) {
@@ -5817,21 +6123,22 @@ async function startSession() {
         appendTerminalLine('请先完成上一条测试记录的评审；如已关闭弹窗，可点击“打开评审”继续。', 'error');
         return;
     }
-    if (!selectedScenario) {
-        appendTerminalLine('请先在左侧选择一个场景。', 'error');
-        return;
-    }
 
     if (!updateCallStartTimeValidationState()) {
         updateStartSessionButtonState();
         return;
     }
+    selectedScenario = buildConfiguredScenarioSelection();
     const payload = {
-        scenario_id: selectedScenario.id,
+        scenario_id: '',
         auto_generate_hidden_settings: document.getElementById('auto-hidden-settings').checked,
+        product_category: selectedScenario.product_category,
+        request_type: selectedScenario.request_type,
         known_address: knownAddressInput.value,
+        ivr_utterance: ivrUtteranceInput?.value || '',
         call_start_time: callStartTimeInput.value.trim(),
         use_session_start_time_as_call_start_time: useSessionStartTimeCheckbox.checked,
+        max_rounds: getManualMaxRoundsValue(),
         persist_to_db: document.getElementById('persist-to-db').checked,
     };
 
@@ -5973,10 +6280,6 @@ async function runAutoMode() {
         appendTerminalLine('请先完成上一条测试记录的评审；如已关闭弹窗，可点击“打开评审”继续。', 'error');
         return;
     }
-    if (!selectedScenario) {
-        appendTerminalLine('请先在左侧选择一个场景。', 'error');
-        return;
-    }
     if (!updateCallStartTimeValidationState()) {
         updateStartSessionButtonState();
         return;
@@ -5986,12 +6289,17 @@ async function runAutoMode() {
         return;
     }
 
+    selectedScenario = buildConfiguredScenarioSelection();
     const payload = {
-        scenario_id: selectedScenario.id,
+        scenario_id: '',
         auto_generate_hidden_settings: document.getElementById('auto-hidden-settings').checked,
+        product_category: selectedScenario.product_category,
+        request_type: selectedScenario.request_type,
         known_address: knownAddressInput.value,
+        ivr_utterance: ivrUtteranceInput?.value || '',
         call_start_time: callStartTimeInput.value.trim(),
         use_session_start_time_as_call_start_time: useSessionStartTimeCheckbox.checked,
+        max_rounds: getManualMaxRoundsValue(),
         persist_to_db: document.getElementById('persist-to-db').checked,
     };
 
@@ -6190,20 +6498,26 @@ async function toggleAddressIeDisplayForRound(roundIndex, enabled) {
 
 loginForm.addEventListener('submit', login);
 loginPasswordToggle.addEventListener('click', togglePasswordVisibility);
+manualProductCategorySelect?.addEventListener('change', () => {
+    syncManualScenarioSelection({ refreshKnownAddress: true });
+});
+manualRequestTypeSelect?.addEventListener('change', () => {
+    syncManualScenarioSelection({ refreshKnownAddress: true });
+});
+manualMaxRoundsInput?.addEventListener('change', () => {
+    sanitizeManualMaxRoundsInput();
+    syncManualScenarioSelection();
+});
+manualMaxRoundsInput?.addEventListener('blur', () => {
+    sanitizeManualMaxRoundsInput();
+    syncManualScenarioSelection();
+});
 document.getElementById('logout-btn').onclick = logout;
 startSessionButton.onclick = () => {
-    if (startSessionButton?.dataset.softDisabled === 'true') {
-        showBlockingActionNotice('请先选择场景后再启动测试会话。');
-        return;
-    }
     startSession();
 };
 if (autoModeButton) {
     autoModeButton.onclick = () => {
-        if (autoModeButton.dataset.softDisabled === 'true') {
-            showBlockingActionNotice('请先选择场景后再使用自动模式。');
-            return;
-        }
         runAutoMode();
     };
 }
@@ -6654,6 +6968,8 @@ window.addEventListener('resize', () => {
     if (!terminalTurnMenu.classList.contains('hidden')) {
         closeTerminalTurnMenu();
     }
+    applyManualShellWidthConstraints();
+    applyManualShellLayoutState();
     applyRewriteShellLayout();
     applyRewriteWorkbenchRatio();
 });
@@ -6785,6 +7101,69 @@ document.addEventListener('visibilitychange', () => {
 });
 document.addEventListener('pointerdown', beginTextMagnifierPress);
 document.addEventListener('scroll', handleDocumentScroll, true);
+document.addEventListener('pointermove', handleManualShellResize);
+document.addEventListener('pointerup', endManualShellResize);
+document.addEventListener('pointercancel', endManualShellResize);
+if (manualLeftSplitter) {
+    manualLeftSplitter.addEventListener('pointerdown', (event) => {
+        beginManualShellResize('left', event);
+    });
+    manualLeftSplitter.addEventListener('keydown', (event) => {
+        if (window.innerWidth <= 1200) return;
+        if (event.key === 'ArrowLeft') {
+            event.preventDefault();
+            manualShellLeftHidden = false;
+            manualShellLeftWidth = Math.max(manualShellLeftWidth - 24, MANUAL_SHELL_LEFT_MIN_PX);
+            if (manualShellLeftWidth <= MANUAL_SHELL_HIDE_THRESHOLD_PX + 8) {
+                manualShellLeftHidden = true;
+            }
+            applyManualShellWidthConstraints();
+            applyManualShellLayoutState();
+            persistManualShellLayoutState();
+        }
+        if (event.key === 'ArrowRight') {
+            event.preventDefault();
+            manualShellLeftHidden = false;
+            manualShellLeftWidth = Math.min(
+                Math.max(manualShellLeftWidth || MANUAL_SHELL_LEFT_MIN_PX, MANUAL_SHELL_LEFT_MIN_PX) + 24,
+                MANUAL_SHELL_LEFT_MAX_PX,
+            );
+            applyManualShellWidthConstraints();
+            applyManualShellLayoutState();
+            persistManualShellLayoutState();
+        }
+    });
+}
+if (manualRightSplitter) {
+    manualRightSplitter.addEventListener('pointerdown', (event) => {
+        beginManualShellResize('right', event);
+    });
+    manualRightSplitter.addEventListener('keydown', (event) => {
+        if (window.innerWidth <= 1200) return;
+        if (event.key === 'ArrowLeft') {
+            event.preventDefault();
+            manualShellRightHidden = false;
+            manualShellRightWidth = Math.min(
+                Math.max(manualShellRightWidth || MANUAL_SHELL_RIGHT_MIN_PX, MANUAL_SHELL_RIGHT_MIN_PX) + 24,
+                MANUAL_SHELL_RIGHT_MAX_PX,
+            );
+            applyManualShellWidthConstraints();
+            applyManualShellLayoutState();
+            persistManualShellLayoutState();
+        }
+        if (event.key === 'ArrowRight') {
+            event.preventDefault();
+            manualShellRightHidden = false;
+            manualShellRightWidth = Math.max(manualShellRightWidth - 24, MANUAL_SHELL_RIGHT_MIN_PX);
+            if (manualShellRightWidth <= MANUAL_SHELL_HIDE_THRESHOLD_PX + 8) {
+                manualShellRightHidden = true;
+            }
+            applyManualShellWidthConstraints();
+            applyManualShellLayoutState();
+            persistManualShellLayoutState();
+        }
+    });
+}
 
 sessionContextDetails.forEach((detail) => {
     detail.addEventListener('toggle', updateSessionContextDensity);
@@ -6831,6 +7210,13 @@ userInput.addEventListener('keydown', (event) => {
 setSessionStatus('idle');
 setSessionIdIndicator('');
 setNextRound(1);
+{
+    const initialManualShellLayout = loadManualShellLayoutState();
+    manualShellLeftHidden = initialManualShellLayout.leftHidden;
+    manualShellRightHidden = initialManualShellLayout.rightHidden;
+    manualShellLeftWidth = initialManualShellLayout.leftWidth;
+    manualShellRightWidth = initialManualShellLayout.rightWidth;
+}
 resetReviewState();
 setPasswordVisibility(false);
 prefillMockCallStartTime(true);

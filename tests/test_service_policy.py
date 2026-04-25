@@ -431,6 +431,376 @@ class ServicePolicyTests(unittest.TestCase):
         self.assertNotIn("issue_description", result.slot_updates)
         self.assertEqual(result.reply, "您好，很高兴为您服务，请问是美的空气能热水器需要维修吗？")
 
+    def test_water_heater_opening_yes_asks_fixed_type_prompt(self):
+        def fake_resolution(*, user_text: str, current_brand: str, current_request_type: str, previous_service_text: str, user_round_index: int):
+            return {"intent": "yes", "brand": "", "request_type": "", "heater_type": ""}
+
+        policy = ServiceDialoguePolicy(
+            water_heater_opening_resolution_callback=fake_resolution,
+        )
+        scenario = build_scenario()
+        scenario.product.category = "热水器"
+        scenario.hidden_context["ivr_opening_overridden"] = True
+        scenario.hidden_context["ivr_product_kind"] = "water_heater"
+        state = ServiceRuntimeState(
+            expected_water_heater_opening_confirmation=True,
+            pending_water_heater_brand="美的",
+            pending_water_heater_request_type="fault",
+        )
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(speaker="service", text="您好，很高兴为您服务，请问是美的热水器需要维修吗？", round_index=1),
+                DialogueTurn(speaker="user", text="对，是的。", round_index=2),
+            ],
+            collected_slots={
+                "issue_description": "",
+                "surname": "",
+                "phone": "",
+                "address": "",
+                "product_model": "",
+                "request_type": "",
+                "availability": "",
+                "phone_contactable": "",
+                "phone_contact_owner": "",
+                "phone_collection_attempts": "",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "好的，请问您的热水器是空气能热水器，还是燃气热水器、还是电热水器？")
+        self.assertTrue(state.expected_water_heater_type_selection)
+
+    def test_water_heater_opening_request_correction_updates_fixed_type_prompt(self):
+        def fake_resolution(*, user_text: str, current_brand: str, current_request_type: str, previous_service_text: str, user_round_index: int):
+            return {"intent": "no", "brand": "", "request_type": "installation", "heater_type": ""}
+
+        policy = ServiceDialoguePolicy(
+            water_heater_opening_resolution_callback=fake_resolution,
+        )
+        scenario = build_scenario()
+        scenario.product.category = "热水器"
+        scenario.hidden_context["ivr_opening_overridden"] = True
+        scenario.hidden_context["ivr_product_kind"] = "water_heater"
+        state = ServiceRuntimeState(
+            expected_water_heater_opening_confirmation=True,
+            pending_water_heater_brand="美的",
+            pending_water_heater_request_type="fault",
+        )
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(speaker="service", text="您好，很高兴为您服务，请问是美的热水器需要维修吗？", round_index=1),
+                DialogueTurn(speaker="user", text="不是维修，是安装。", round_index=2),
+            ],
+            collected_slots={
+                "issue_description": "",
+                "surname": "",
+                "phone": "",
+                "address": "",
+                "product_model": "",
+                "request_type": "",
+                "availability": "",
+                "phone_contactable": "",
+                "phone_contact_owner": "",
+                "phone_collection_attempts": "",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "好的，请问您要安装的美的热水器是空气能热水器，还是燃气热水器、还是电热水器？")
+        self.assertEqual(state.pending_water_heater_request_type, "installation")
+
+    def test_water_heater_opening_short_request_correction_updates_fixed_type_prompt(self):
+        def fake_resolution(*, user_text: str, current_brand: str, current_request_type: str, previous_service_text: str, user_round_index: int):
+            return {"intent": "no", "brand": "", "request_type": "installation", "heater_type": ""}
+
+        policy = ServiceDialoguePolicy(
+            water_heater_opening_resolution_callback=fake_resolution,
+        )
+        scenario = build_scenario()
+        scenario.product.category = "热水器"
+        scenario.hidden_context["ivr_opening_overridden"] = True
+        scenario.hidden_context["ivr_product_kind"] = "water_heater"
+        state = ServiceRuntimeState(
+            expected_water_heater_opening_confirmation=True,
+            pending_water_heater_brand="美的",
+            pending_water_heater_request_type="fault",
+        )
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(speaker="service", text="您好，很高兴为您服务，请问是美的热水器需要维修吗？", round_index=1),
+                DialogueTurn(speaker="user", text="是安装。", round_index=2),
+            ],
+            collected_slots={
+                "issue_description": "",
+                "surname": "",
+                "phone": "",
+                "address": "",
+                "product_model": "",
+                "request_type": "",
+                "availability": "",
+                "phone_contactable": "",
+                "phone_contact_owner": "",
+                "phone_collection_attempts": "",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "好的，请问您要安装的美的热水器是空气能热水器，还是燃气热水器、还是电热水器？")
+        self.assertEqual(state.pending_water_heater_request_type, "installation")
+
+    def test_water_heater_type_air_energy_enters_product_routing(self):
+        def fake_resolution(*, user_text: str, current_brand: str, current_request_type: str, previous_service_text: str, user_round_index: int):
+            return {"intent": "no", "brand": "", "request_type": "", "heater_type": "air_energy"}
+
+        policy = ServiceDialoguePolicy(
+            water_heater_opening_resolution_callback=fake_resolution,
+        )
+        scenario = build_scenario()
+        scenario.product.category = "热水器"
+        scenario.hidden_context["ivr_opening_overridden"] = True
+        scenario.hidden_context["ivr_product_kind"] = "water_heater"
+        scenario.hidden_context["product_routing_plan"] = {
+            "enabled": True,
+            "steps": [
+                {
+                    "prompt_key": "brand_or_series",
+                    "prompt": "请问您的空气能是什么具体品牌或系列呢？",
+                    "answer_key": "entry.unknown",
+                    "answer_value": "不知道品牌或系列",
+                    "answer_instruction": "自然表达自己不知道品牌或系列。",
+                }
+            ],
+            "trace": [],
+            "result": "",
+            "summary": "",
+        }
+        state = ServiceRuntimeState(
+            expected_water_heater_type_selection=True,
+            pending_water_heater_brand="美的",
+            pending_water_heater_request_type="fault",
+        )
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(speaker="service", text="好的，请问您的热水器是空气能热水器，还是燃气热水器、还是电热水器？", round_index=2),
+                DialogueTurn(speaker="user", text="空气能热水器。", round_index=3),
+            ],
+            collected_slots={
+                "issue_description": "",
+                "surname": "",
+                "phone": "",
+                "address": "",
+                "product_model": "",
+                "request_type": "",
+                "availability": "",
+                "phone_contactable": "",
+                "phone_contact_owner": "",
+                "phone_collection_attempts": "",
+                "product_routing_result": "",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "请问您的空气能是什么具体品牌或系列呢？")
+        self.assertEqual(scenario.product.category, "空气能热水机")
+        self.assertEqual(result.slot_updates["request_type"], "fault")
+        self.assertTrue(state.expected_product_routing_response)
+
+    def test_water_heater_request_changed_to_installation_then_gas_asks_arrival(self):
+        responses = [
+            {"intent": "no", "brand": "", "request_type": "installation", "heater_type": ""},
+            {"intent": "no", "brand": "", "request_type": "", "heater_type": "gas"},
+        ]
+
+        def fake_resolution(*, user_text: str, current_brand: str, current_request_type: str, previous_service_text: str, user_round_index: int):
+            return responses.pop(0)
+
+        policy = ServiceDialoguePolicy(
+            water_heater_opening_resolution_callback=fake_resolution,
+        )
+        scenario = build_scenario()
+        scenario.product.category = "热水器"
+        scenario.hidden_context["ivr_opening_overridden"] = True
+        scenario.hidden_context["ivr_product_kind"] = "water_heater"
+        state = ServiceRuntimeState(
+            expected_water_heater_opening_confirmation=True,
+            pending_water_heater_brand="美的",
+            pending_water_heater_request_type="fault",
+        )
+
+        first_result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(speaker="service", text="您好，很高兴为您服务，请问是美的热水器需要维修吗？", round_index=1),
+                DialogueTurn(speaker="user", text="是安装。", round_index=2),
+            ],
+            collected_slots={
+                "issue_description": "",
+                "surname": "",
+                "phone": "",
+                "address": "",
+                "product_model": "",
+                "request_type": "",
+                "availability": "",
+                "phone_contactable": "",
+                "phone_contact_owner": "",
+                "phone_collection_attempts": "",
+            },
+            runtime_state=state,
+        )
+        self.assertEqual(
+            first_result.reply,
+            "好的，请问您要安装的美的热水器是空气能热水器，还是燃气热水器、还是电热水器？",
+        )
+
+        second_result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(speaker="service", text=first_result.reply, round_index=2),
+                DialogueTurn(speaker="user", text="燃气热水器。", round_index=3),
+            ],
+            collected_slots={
+                "issue_description": "",
+                "surname": "",
+                "phone": "",
+                "address": "",
+                "product_model": "",
+                "request_type": "",
+                "availability": "",
+                "phone_contactable": "",
+                "phone_contact_owner": "",
+                "phone_collection_attempts": "",
+            },
+            runtime_state=state,
+        )
+        self.assertEqual(second_result.reply, "好的，请问燃气热水器已经送到了吗？")
+        self.assertEqual(scenario.request.request_type, "installation")
+        self.assertEqual(second_result.slot_updates["request_type"], "installation")
+
+    def test_water_heater_request_changed_to_fault_then_electric_asks_issue(self):
+        responses = [
+            {"intent": "no", "brand": "", "request_type": "fault", "heater_type": ""},
+            {"intent": "no", "brand": "", "request_type": "", "heater_type": "electric"},
+        ]
+
+        def fake_resolution(*, user_text: str, current_brand: str, current_request_type: str, previous_service_text: str, user_round_index: int):
+            return responses.pop(0)
+
+        policy = ServiceDialoguePolicy(
+            water_heater_opening_resolution_callback=fake_resolution,
+        )
+        scenario = build_scenario()
+        scenario.product.category = "热水器"
+        scenario.request.request_type = "installation"
+        scenario.hidden_context["ivr_opening_overridden"] = True
+        scenario.hidden_context["ivr_product_kind"] = "water_heater"
+        state = ServiceRuntimeState(
+            expected_water_heater_opening_confirmation=True,
+            pending_water_heater_brand="美的",
+            pending_water_heater_request_type="installation",
+        )
+
+        first_result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(speaker="service", text="您好，很高兴为您服务，请问是美的热水器需要安装吗？", round_index=1),
+                DialogueTurn(speaker="user", text="是维修。", round_index=2),
+            ],
+            collected_slots={
+                "issue_description": "",
+                "surname": "",
+                "phone": "",
+                "address": "",
+                "product_model": "",
+                "request_type": "",
+                "availability": "",
+                "phone_contactable": "",
+                "phone_contact_owner": "",
+                "phone_collection_attempts": "",
+            },
+            runtime_state=state,
+        )
+        self.assertEqual(
+            first_result.reply,
+            "好的，请问您要维修的美的热水器是空气能热水器，还是燃气热水器、还是电热水器？",
+        )
+
+        second_result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(speaker="service", text=first_result.reply, round_index=2),
+                DialogueTurn(speaker="user", text="电热水器。", round_index=3),
+            ],
+            collected_slots={
+                "issue_description": "",
+                "surname": "",
+                "phone": "",
+                "address": "",
+                "product_model": "",
+                "request_type": "",
+                "availability": "",
+                "phone_contactable": "",
+                "phone_contact_owner": "",
+                "phone_collection_attempts": "",
+            },
+            runtime_state=state,
+        )
+        self.assertEqual(second_result.reply, "好的，请问电热水器现在是出现了什么问题？")
+        self.assertEqual(scenario.request.request_type, "fault")
+        self.assertEqual(second_result.slot_updates["request_type"], "fault")
+
+    def test_water_heater_opening_brand_and_request_correction_updates_fixed_type_prompt(self):
+        def fake_resolution(*, user_text: str, current_brand: str, current_request_type: str, previous_service_text: str, user_round_index: int):
+            return {"intent": "no", "brand": "海尔", "request_type": "installation", "heater_type": ""}
+
+        policy = ServiceDialoguePolicy(
+            water_heater_opening_resolution_callback=fake_resolution,
+        )
+        scenario = build_scenario()
+        scenario.product.category = "热水器"
+        scenario.hidden_context["ivr_opening_overridden"] = True
+        scenario.hidden_context["ivr_product_kind"] = "water_heater"
+        state = ServiceRuntimeState(
+            expected_water_heater_opening_confirmation=True,
+            pending_water_heater_brand="美的",
+            pending_water_heater_request_type="fault",
+        )
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(
+                    speaker="service",
+                    text="您好，很高兴为您服务，请问是美的热水器需要维修吗？",
+                    round_index=1,
+                ),
+                DialogueTurn(speaker="user", text="不是美的，是海尔，要安装。", round_index=2),
+            ],
+            collected_slots={
+                "issue_description": "",
+                "surname": "",
+                "phone": "",
+                "address": "",
+                "product_model": "",
+                "request_type": "",
+                "availability": "",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(
+            result.reply,
+            "好的，请问您要安装的海尔热水器是空气能热水器，还是燃气热水器、还是电热水器？",
+        )
+        self.assertTrue(state.expected_water_heater_type_selection)
+
     def test_opening_and_arrival_prompts_use_custom_product_name(self):
         policy = ServiceDialoguePolicy()
         scenario = build_installation_scenario(category="燃气热水器")
@@ -622,11 +992,10 @@ class ServicePolicyTests(unittest.TestCase):
             runtime_state=state,
         )
 
-        self.assertEqual(result.reply, "好的，号码是13800138001，对吗？")
+        self.assertEqual(result.reply, "请您在电话拨号盘上输入您的联系号码，并以#号键结束。")
         self.assertEqual(result.slot_updates["phone_contactable"], "yes")
         self.assertEqual(result.slot_updates["phone_contact_owner"], "本人当前来电")
-        self.assertTrue(state.expected_phone_number_confirmation)
-        self.assertEqual(state.pending_phone_number_confirmation, "13800138001")
+        self.assertTrue(state.awaiting_phone_keypad_input)
 
     def test_cli_freeform_contactable_yes_uses_mock_current_call_phone(self):
         policy = ServiceDialoguePolicy()
@@ -725,7 +1094,7 @@ class ServicePolicyTests(unittest.TestCase):
             runtime_state=state,
         )
 
-        self.assertEqual(result.reply, "请您在拨号盘上输入您的联系方式，并以#号键结束。")
+        self.assertEqual(result.reply, "请您在电话拨号盘上输入您的联系号码，并以#号键结束。")
         self.assertEqual(result.slot_updates["phone_contactable"], "no")
         self.assertEqual(result.slot_updates["phone_contact_owner"], "另一个号码")
         self.assertTrue(state.awaiting_phone_keypad_input)
@@ -758,7 +1127,7 @@ class ServicePolicyTests(unittest.TestCase):
             runtime_state=state,
         )
 
-        self.assertEqual(result.reply, "请您在拨号盘上输入您的联系方式，并以#号键结束。")
+        self.assertEqual(result.reply, "请您在电话拨号盘上输入您的联系号码，并以#号键结束。")
         self.assertEqual(result.slot_updates["phone_contactable"], "no")
         self.assertEqual(result.slot_updates["phone_contact_owner"], "另一个号码")
         self.assertTrue(state.awaiting_phone_keypad_input)
@@ -799,13 +1168,10 @@ class ServicePolicyTests(unittest.TestCase):
             runtime_state=state,
         )
 
-        self.assertEqual(result.reply, "号码是13978201465，对吗？")
+        self.assertEqual(result.reply, "请您在电话拨号盘上输入您的联系号码，并以#号键结束。")
         self.assertEqual(result.slot_updates["phone_contactable"], "no")
         self.assertEqual(result.slot_updates["phone_contact_owner"], "另一个号码")
-        self.assertEqual(result.slot_updates["phone_collection_attempts"], "0")
-        self.assertFalse(state.awaiting_phone_keypad_input)
-        self.assertTrue(state.expected_phone_number_confirmation)
-        self.assertEqual(state.pending_phone_number_confirmation, "13978201465")
+        self.assertTrue(state.awaiting_phone_keypad_input)
         self.assertTrue(policy.last_used_model_intent_inference)
 
     def test_cli_freeform_contactable_spoken_invalid_phone_still_uses_keypad(self):
@@ -844,7 +1210,7 @@ class ServicePolicyTests(unittest.TestCase):
             runtime_state=state,
         )
 
-        self.assertEqual(result.reply, "请您在拨号盘上输入您的联系方式，并以#号键结束。")
+        self.assertEqual(result.reply, "请您在电话拨号盘上输入您的联系号码，并以#号键结束。")
         self.assertEqual(result.slot_updates["phone_contactable"], "no")
         self.assertEqual(result.slot_updates["phone_contact_owner"], "另一个号码")
         self.assertTrue(state.awaiting_phone_keypad_input)
@@ -879,7 +1245,7 @@ class ServicePolicyTests(unittest.TestCase):
             runtime_state=state,
         )
 
-        self.assertEqual(result.reply, "请您在拨号盘上输入您的联系方式，并以#号键结束。")
+        self.assertEqual(result.reply, "请您在电话拨号盘上输入您的联系号码，并以#号键结束。")
         self.assertEqual(result.slot_updates["phone_contactable"], "no")
         self.assertEqual(result.slot_updates["phone_contact_owner"], "儿子")
         self.assertTrue(state.awaiting_phone_keypad_input)
@@ -911,7 +1277,7 @@ class ServicePolicyTests(unittest.TestCase):
             runtime_state=state,
         )
 
-        self.assertEqual(result.reply, "请您在拨号盘上输入您的联系方式，并以#号键结束。")
+        self.assertEqual(result.reply, "请您在电话拨号盘上输入您的联系号码，并以#号键结束。")
         self.assertEqual(result.slot_updates["phone_contactable"], "no")
         self.assertEqual(result.slot_updates["phone_contact_owner"], "老伴")
         self.assertTrue(state.awaiting_phone_keypad_input)
@@ -943,7 +1309,7 @@ class ServicePolicyTests(unittest.TestCase):
             runtime_state=state,
         )
 
-        self.assertEqual(result.reply, "请您在拨号盘上输入您的联系方式，并以#号键结束。")
+        self.assertEqual(result.reply, "请您在电话拨号盘上输入您的联系号码，并以#号键结束。")
         self.assertEqual(result.slot_updates["phone_contactable"], "no")
         self.assertEqual(result.slot_updates["phone_contact_owner"], "老伴")
         self.assertTrue(state.awaiting_phone_keypad_input)
@@ -975,7 +1341,7 @@ class ServicePolicyTests(unittest.TestCase):
             runtime_state=state,
         )
 
-        self.assertEqual(result.reply, "请您在拨号盘上输入您的联系方式，并以#号键结束。")
+        self.assertEqual(result.reply, "请您在电话拨号盘上输入您的联系号码，并以#号键结束。")
         self.assertEqual(result.slot_updates["phone_contactable"], "no")
         self.assertEqual(result.slot_updates["phone_contact_owner"], "老婆")
         self.assertTrue(state.awaiting_phone_keypad_input)
@@ -2725,7 +3091,7 @@ class ServicePolicyTests(unittest.TestCase):
             runtime_state=state,
         )
 
-        self.assertEqual(result.reply, "请您在拨号盘上输入您的联系方式，并以#号键结束。")
+        self.assertEqual(result.reply, "请您在电话拨号盘上输入您的联系号码，并以#号键结束。")
         self.assertEqual(result.slot_updates["phone_contactable"], "no")
         self.assertEqual(result.slot_updates["phone_contact_owner"], "另一个号码")
         self.assertTrue(state.awaiting_phone_keypad_input)
@@ -2866,7 +3232,7 @@ class ServicePolicyTests(unittest.TestCase):
         )
         self.assertEqual(
             first_result.reply,
-            "您输入的号码有误，请重新在拨号盘上输入您的联系方式，并以#号键结束。",
+            "非常抱歉输入有误，请您在拨号盘输入上门服务时的联系号码，输完后按#号键结束。",
         )
         self.assertEqual(first_result.slot_updates["phone_collection_attempts"], "1")
 
@@ -2884,6 +3250,7 @@ class ServicePolicyTests(unittest.TestCase):
         self.assertEqual(second_result.slot_updates.get("phone", ""), "")
         self.assertEqual(second_result.reply, "好的，号码是13900139002，对吗？")
         self.assertTrue(state.expected_phone_number_confirmation)
+        self.assertEqual(state.pending_phone_number_confirmation, "13900139002")
 
     def test_confirmed_keypad_phone_moves_to_next_slot(self):
         policy = ServiceDialoguePolicy()
@@ -2949,7 +3316,137 @@ class ServicePolicyTests(unittest.TestCase):
         )
 
         self.assertEqual(result.reply, "好的，号码是13900139002，对吗？")
-        self.assertEqual(result.slot_updates["phone_collection_attempts"], "3")
+        self.assertEqual(result.slot_updates.get("phone", ""), "")
+        self.assertTrue(state.expected_phone_number_confirmation)
+        self.assertEqual(state.pending_phone_number_confirmation, "13900139002")
+
+    def test_third_invalid_keypad_attempt_enters_sms_fill_confirmation(self):
+        policy = ServiceDialoguePolicy()
+        state = ServiceRuntimeState(awaiting_phone_keypad_input=True, phone_input_attempts=2)
+        scenario = build_scenario()
+        transcript = [
+            DialogueTurn(speaker="service", text="非常抱歉输入有误，请您在拨号盘输入上门服务时的联系号码，输完后按#号键结束。", round_index=6),
+            DialogueTurn(speaker="user", text="12345#", round_index=6),
+        ]
+        collected_slots = {
+            "issue_description": "对，家里热水器加热很慢。",
+            "surname": "张",
+            "phone": "",
+            "address": "",
+            "product_model": "",
+            "request_type": "fault",
+            "availability": "",
+            "phone_contactable": "no",
+            "phone_contact_owner": "爱人",
+            "phone_collection_attempts": "2",
+        }
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots=collected_slots,
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "很抱歉，我们将为您下发短信，您可点击短信链接，补充信息并提交，您看是否可以？")
+        self.assertTrue(state.expected_phone_sms_fill_confirmation)
+        self.assertFalse(state.awaiting_phone_keypad_input)
+
+    def test_third_confirmed_phone_denial_enters_sms_fill_confirmation(self):
+        policy = ServiceDialoguePolicy()
+        state = ServiceRuntimeState(
+            expected_phone_number_confirmation=True,
+            phone_input_attempts=3,
+            pending_phone_number_confirmation="13900139002",
+        )
+        scenario = build_scenario()
+        transcript = [
+            DialogueTurn(speaker="service", text="好的，号码是13900139002，对吗？", round_index=7),
+            DialogueTurn(speaker="user", text="不是", round_index=7),
+        ]
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots={
+                "issue_description": "对，家里热水器加热很慢。",
+                "surname": "张",
+                "phone": "",
+                "address": "",
+                "product_model": "",
+                "request_type": "fault",
+                "availability": "",
+                "phone_contactable": "no",
+                "phone_contact_owner": "爱人",
+                "phone_collection_attempts": "3",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "很抱歉，我们将为您下发短信，您可点击短信链接，补充信息并提交，您看是否可以？")
+        self.assertTrue(state.expected_phone_sms_fill_confirmation)
+        self.assertFalse(state.awaiting_phone_keypad_input)
+
+    def test_phone_sms_fill_confirmation_yes_closes_with_sms_sent(self):
+        policy = ServiceDialoguePolicy()
+        state = ServiceRuntimeState(expected_phone_sms_fill_confirmation=True)
+        scenario = build_scenario()
+        transcript = [
+            DialogueTurn(speaker="service", text="很抱歉，我们将为您下发短信，您可点击短信链接，补充信息并提交，您看是否可以？", round_index=7),
+            DialogueTurn(speaker="user", text="可以", round_index=7),
+        ]
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots={
+                "issue_description": "对，家里热水器加热很慢。",
+                "surname": "张",
+                "phone": "",
+                "address": "",
+                "product_model": "",
+                "request_type": "fault",
+                "availability": "",
+                "phone_contactable": "no",
+                "phone_contact_owner": "爱人",
+                "phone_collection_attempts": "3",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "短信已发送，请稍后留意查看，感谢您的来电，再见！")
+        self.assertTrue(result.is_ready_to_close)
+
+    def test_phone_sms_fill_confirmation_non_yes_transfers_to_human(self):
+        policy = ServiceDialoguePolicy()
+        state = ServiceRuntimeState(expected_phone_sms_fill_confirmation=True)
+        scenario = build_scenario()
+        transcript = [
+            DialogueTurn(speaker="service", text="很抱歉，我们将为您下发短信，您可点击短信链接，补充信息并提交，您看是否可以？", round_index=7),
+            DialogueTurn(speaker="user", text="不用了", round_index=7),
+        ]
+
+        result = policy.respond(
+            scenario=scenario,
+            transcript=transcript,
+            collected_slots={
+                "issue_description": "对，家里热水器加热很慢。",
+                "surname": "张",
+                "phone": "",
+                "address": "",
+                "product_model": "",
+                "request_type": "fault",
+                "availability": "",
+                "phone_contactable": "no",
+                "phone_contact_owner": "爱人",
+                "phone_collection_attempts": "3",
+            },
+            runtime_state=state,
+        )
+
+        self.assertEqual(result.reply, "请稍等，正在为您转接人工服务。")
+        self.assertTrue(result.is_ready_to_close)
+        self.assertEqual(result.close_reason, "phone_collection_failed")
 
     def test_known_address_confirmation_yes_completes_address(self):
         policy = ServiceDialoguePolicy()

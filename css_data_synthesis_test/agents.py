@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from css_data_synthesis_test.dialogue_plans import resolve_second_round_reply_strategy
+from css_data_synthesis_test.function_call import build_telephone_model_observation
 from css_data_synthesis_test.llm import OpenAIChatClient
 from css_data_synthesis_test.product_routing import (
     ensure_product_routing_plan,
@@ -416,7 +417,9 @@ class ServiceAgent:
             contact_intent_inference_callback=self._infer_contactable_intent_with_model,
             confirmation_intent_inference_callback=self._infer_confirmation_intent_with_model,
             opening_intent_inference_callback=self._infer_opening_intent_with_model,
+            water_heater_opening_resolution_callback=self._infer_water_heater_opening_resolution_with_model,
             issue_description_extraction_callback=self._extract_issue_description_with_model,
+            phone_inference_callback=self._infer_phone_with_model,
             product_routing_intent_inference_callback=self._infer_product_routing_intent_with_model,
             product_routing_enabled=product_routing_enabled,
         )
@@ -729,6 +732,224 @@ class ServiceAgent:
         )
         return {"intent": str(payload.get("intent", "")).strip()}
 
+    def _infer_water_heater_opening_resolution_with_model(
+        self,
+        *,
+        user_text: str,
+        current_brand: str,
+        current_request_type: str,
+        previous_service_text: str = "",
+        user_round_index: int = 0,
+    ) -> dict[str, Any]:
+        action = "安装" if str(current_request_type or "").strip() == "installation" else "维修"
+        def _normalize_opening_resolution_payload(payload: dict[str, Any] | None) -> dict[str, str]:
+            normalized_payload = payload if isinstance(payload, dict) else {}
+            return {
+                "intent": str(normalized_payload.get("intent", "")).strip(),
+                "brand": str(normalized_payload.get("brand", "")).strip(),
+                "request_type": str(normalized_payload.get("request_type", "")).strip(),
+                "heater_type": str(normalized_payload.get("heater_type", "")).strip(),
+            }
+
+        prompt_brand = str(current_brand or "").strip() or "美的"
+        system_prompt = """你是家电客服对话里的热水器首轮确认识别助手。
+
+场景：
+客服刚问过用户一个确认问题。
+你会同时看到：
+1. 客服上一句原话
+2. 当前用户回复
+
+默认场景里，客服可能问：
+“您好，很高兴为您服务，请问是__PROMPT_BRAND__热水器需要__ACTION__吗？”
+这句话同时在确认三点：
+1. 品牌是不是这个品牌
+2. 品类是不是热水器
+3. 诉求是不是安装/维修
+
+你的任务：
+只根据用户当前这一句回复，判断：
+1. 用户整体是在肯定、否定/修改、还是没答清
+2. 如果用户修改了品牌，提取修改后的品牌
+3. 如果用户修改了诉求，提取 installation 或 fault
+4. 如果用户已经明确把热水器细分成 空气能 / 燃气 / 电热，提取 heater_type
+
+输出要求：
+1. intent 只允许 yes / no / unknown
+2. request_type 只允许 installation / fault / 空字符串
+3. heater_type 只允许 air_energy / gas / electric / water_heater / 空字符串
+4. brand 没有明确修改时输出空字符串
+5. 不要脑补没有说出的品牌或诉求
+6. 只要用户对品牌、诉求、热水器类型中的任意一点做了修改或补充，intent 就必须输出 no，不能输出 yes 或 unknown。
+7. 用户即使先说“是的”“对”“嗯”，但后面又说“是安装”“不是美的”“海尔的”“空气能热水器”，也属于修改，intent 必须是 no。
+8. “是的，是安装”“对，但是安装”“不是维修，是安装”“海尔的，要安装”“是空气能热水器” 这些都不是纯确认。
+9. 忽略寒暄和语气词，例如“你好啊”“您好啊”“嗯”“哦”“啊”“呀”“哈”“呢”“吧”“嘛”，只看真正表达的品牌/诉求/类型信息。
+10. “你好啊，是安装啊。”“嗯，是安装的。”“您好，不是维修，是安装。” 都属于修改诉求，intent 必须是 no。
+
+示例：
+- “对，是美的的，维修” -> {"intent":"yes","brand":"","request_type":"","heater_type":""}
+- “是的，是安装。” -> {"intent":"no","brand":"","request_type":"installation","heater_type":""}
+- “你好啊，是安装啊。” -> {"intent":"no","brand":"","request_type":"installation","heater_type":""}
+- “您好啊，不是维修，是安装。” -> {"intent":"no","brand":"","request_type":"installation","heater_type":""}
+- “嗯，是海尔的，安装。” -> {"intent":"no","brand":"海尔","request_type":"installation","heater_type":""}
+- “对，但是安装。” -> {"intent":"no","brand":"","request_type":"installation","heater_type":""}
+- “对，海尔的。” -> {"intent":"no","brand":"海尔","request_type":"","heater_type":""}
+- “不是美的，海尔的” -> {"intent":"no","brand":"海尔","request_type":"","heater_type":""}
+- “不是维修，是安装” -> {"intent":"no","brand":"","request_type":"installation","heater_type":""}
+- “是空气能热水器” -> {"intent":"no","brand":"","request_type":"","heater_type":"air_energy"}
+- “对，是空气能热水器。” -> {"intent":"no","brand":"","request_type":"","heater_type":"air_energy"}
+- “海尔的，安装空气能” -> {"intent":"no","brand":"海尔","request_type":"installation","heater_type":"air_energy"}
+
+只返回 JSON：
+{
+  "intent": "yes|no|unknown",
+  "brand": "修改后的品牌或空字符串",
+  "request_type": "installation|fault|",
+  "heater_type": "air_energy|gas|electric|water_heater|"
+}"""
+        system_prompt = (
+            system_prompt
+            .replace("__PROMPT_BRAND__", prompt_brand)
+            .replace("__ACTION__", action)
+        )
+        payload = self.client.complete_json(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"客服上一句: {previous_service_text}\n"
+                        f"当前确认品牌: {current_brand}\n"
+                        f"当前确认诉求: {current_request_type}\n"
+                        f"[{user_round_index}]用户: {user_text}\n"
+                        "只返回 JSON。"
+                    ),
+                },
+            ],
+            temperature=0.0,
+        )
+        resolved = _normalize_opening_resolution_payload(payload)
+        if (
+            resolved["intent"].strip().lower() == "unknown"
+            and not resolved["brand"].strip()
+            and not resolved["request_type"].strip()
+            and not resolved["heater_type"].strip()
+        ):
+            repair_prompt = """你是家电客服对话里的热水器确认补判助手。
+
+客服上一句在确认：
+1. 品牌是不是指定品牌
+2. 品类是不是热水器
+3. 诉求是不是安装/维修
+
+你会同时看到客服上一句原话和用户当前回复，要结合这组问答来判断。
+
+你的任务：
+只根据用户这一句，补判用户有没有：
+1. 仅仅确认，不改任何点
+2. 改品牌
+3. 改诉求（installation/fault）
+4. 指明空气能/燃气/电热
+
+注意：
+1. 用户即使开头说“是的”“对”“嗯”，只要后面改了品牌、诉求或类型，都必须视为修改，intent=no。
+2. “是的，是安装”“对，安装”“嗯，是海尔的”“对，是空气能热水器” 都属于修改，不是纯确认。
+3. 只有纯粹确认、没有新增或修改任何品牌/诉求/类型信息时，intent 才能是 yes。
+4. 如果用户直接说“是安装”“安装”“要安装”“是维修”“维修”“要维修”，这就是在明确诉求，不能输出 unknown。
+5. 如果当前确认诉求是维修，而用户说“是安装”“安装”，就输出 {"intent":"no","request_type":"installation"}。
+6. 如果当前确认诉求是安装，而用户说“是维修”“维修”，就输出 {"intent":"no","request_type":"fault"}。
+7. 忽略寒暄和语气词，例如“你好啊”“您好啊”“嗯”“啊”“呀”“哈”“呢”，只看真正表达的品牌/诉求/类型信息。
+
+只返回 JSON：
+{
+  "intent": "yes|no|unknown",
+  "brand": "修改后的品牌或空字符串",
+  "request_type": "installation|fault|",
+  "heater_type": "air_energy|gas|electric|water_heater|"
+}
+
+示例：
+- “是安装。” -> {"intent":"no","brand":"","request_type":"installation","heater_type":""}
+- “安装。” -> {"intent":"no","brand":"","request_type":"installation","heater_type":""}
+- “要安装。” -> {"intent":"no","brand":"","request_type":"installation","heater_type":""}
+- “你好啊，是安装啊。” -> {"intent":"no","brand":"","request_type":"installation","heater_type":""}
+- “您好啊，安装。” -> {"intent":"no","brand":"","request_type":"installation","heater_type":""}
+- “是维修。” -> {"intent":"no","brand":"","request_type":"fault","heater_type":""}
+- “维修。” -> {"intent":"no","brand":"","request_type":"fault","heater_type":""}
+- “对，是安装。” -> {"intent":"no","brand":"","request_type":"installation","heater_type":""}
+- “对，是维修。” -> {"intent":"no","brand":"","request_type":"fault","heater_type":""}"""
+            repaired_payload = self.client.complete_json(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": repair_prompt},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"客服上一句: {previous_service_text}\n"
+                            f"当前确认品牌: {current_brand}\n"
+                            f"当前确认诉求: {current_request_type}\n"
+                            f"[{user_round_index}]用户: {user_text}\n"
+                            "只返回 JSON。"
+                        ),
+                    },
+                ],
+                temperature=0.0,
+            )
+            resolved = _normalize_opening_resolution_payload(repaired_payload)
+        if (
+            resolved["intent"].strip().lower() == "unknown"
+            and not resolved["brand"].strip()
+            and not resolved["request_type"].strip()
+            and not resolved["heater_type"].strip()
+        ):
+            extraction_prompt = """你是家电客服对话里的热水器字段提取助手。
+
+任务：
+1. 只根据用户这一句，提取是否明确说了品牌、安装/维修诉求、空气能/燃气/电热类型。
+1.1 需要结合客服上一句的问题一起看，判断用户是在改什么。
+2. 不需要判断整体语气，只需要尽量提取用户明确说出来的字段。
+3. 如果用户说“是安装”“安装”“要安装”，request_type 必须输出 installation。
+4. 如果用户说“是维修”“维修”“要维修”，request_type 必须输出 fault。
+5. 如果用户说“空气能热水器”“燃气热水器”“电热水器”，heater_type 必须输出对应值。
+6. 没明确说就留空。
+7. 忽略寒暄和语气词，例如“你好啊”“您好”“嗯”“啊”“呀”，不要因为这些词漏掉后面的安装/维修信息。
+
+只返回 JSON：
+{
+  "brand": "修改后的品牌或空字符串",
+  "request_type": "installation|fault|",
+  "heater_type": "air_energy|gas|electric|water_heater|"
+}"""
+            extracted_payload = self.client.complete_json(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": extraction_prompt},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"客服上一句: {previous_service_text}\n"
+                            f"当前确认品牌: {current_brand}\n"
+                            f"当前确认诉求: {current_request_type}\n"
+                            f"[{user_round_index}]用户: {user_text}\n"
+                            "只返回 JSON。"
+                        ),
+                    },
+                ],
+                temperature=0.0,
+            )
+            extracted_brand = str((extracted_payload or {}).get("brand", "")).strip()
+            extracted_request_type = str((extracted_payload or {}).get("request_type", "")).strip()
+            extracted_heater_type = str((extracted_payload or {}).get("heater_type", "")).strip()
+            if extracted_brand or extracted_request_type or extracted_heater_type:
+                resolved = {
+                    "intent": "no",
+                    "brand": extracted_brand,
+                    "request_type": extracted_request_type,
+                    "heater_type": extracted_heater_type,
+                }
+        return resolved
+
     def _extract_issue_description_with_model(
         self,
         *,
@@ -764,6 +985,19 @@ class ServiceAgent:
             temperature=0.0,
         )
         return {"issue_description": str(payload.get("issue_description", "")).strip()}
+
+    def _infer_phone_with_model(
+        self,
+        *,
+        dialogue: list[DialogueTurn],
+        user_text: str,
+    ) -> dict[str, Any]:
+        _ = user_text
+        return build_telephone_model_observation(
+            dialogue,
+            client=self.client,
+            model=self.model,
+        )
 
     def _infer_product_routing_intent_with_model(
         self,

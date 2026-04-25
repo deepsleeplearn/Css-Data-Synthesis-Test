@@ -79,7 +79,7 @@
                     </div>
                     <textarea id="known-address" rows="3" placeholder="可选。填写后，客服会优先走地址核对流程。"></textarea>
                 </label>
-                <label class="field inline-field">
+                <label class="field">
                     <div class="field-heading">
                         <span>通话开始时间</span>
                         <div class="field-action-group">
@@ -105,10 +105,41 @@
 
             <section class="panel-section grow">
                 <div class="section-heading compact">
-                    <h2>场景列表</h2>
+                    <h2>场景设置</h2>
                 </div>
-                <div id="scenario-list" class="scenario-list">
-                    <div class="terminal-hint">登录后显示场景列表</div>
+                <div id="scenario-list" class="scenario-list scenario-config-list">
+                    <label class="field">
+                        <div class="field-heading">
+                            <span>产品</span>
+                        </div>
+                        <select id="manual-product-category">
+                            <option value="空气能热水机" selected>空气能热水机</option>
+                            <option value="热水器">热水器</option>
+                            <option value="燃气热水器">燃气热水器</option>
+                            <option value="电热水器">电热水器</option>
+                        </select>
+                    </label>
+                    <label class="field">
+                        <div class="field-heading">
+                            <span>诉求</span>
+                        </div>
+                        <select id="manual-request-type">
+                            <option value="fault" selected>维修</option>
+                            <option value="installation">安装</option>
+                        </select>
+                    </label>
+                    <label class="field">
+                        <div class="field-heading">
+                            <span>最大轮次</span>
+                        </div>
+                        <input id="manual-max-rounds" type="number" min="1" step="1" value="32">
+                    </label>
+                    <label class="field">
+                        <div class="field-heading">
+                            <span>IVR 诉求原话</span>
+                        </div>
+                        <textarea id="ivr-utterance" rows="2" placeholder="可选。填写后会记录 IVR 原话，但首轮仍按这里的产品和诉求配置启动。">空气能热水器需要维修</textarea>
+                    </label>
                 </div>
             </section>
 
@@ -117,11 +148,25 @@
             </section>
         </aside>
 
+        <div
+            id="manual-left-splitter"
+            class="manual-shell-splitter"
+            role="separator"
+            aria-label="调整左侧配置栏宽度"
+            aria-orientation="vertical"
+            aria-valuemin="248"
+            aria-valuemax="420"
+            aria-valuenow="320"
+            tabindex="0"
+        >
+            <span class="manual-shell-splitter-handle"></span>
+        </div>
+
         <main class="terminal-panel">
             <header class="terminal-header">
                 <div>
                     <p class="eyebrow">Session</p>
-                    <h2 id="current-scenario-title">请选择场景并启动会话</h2>
+                    <h2 id="current-scenario-title">请配置产品和诉求并启动会话</h2>
                 </div>
                 <div class="status-group">
                     <span id="session-status" class="status-badge idle">未开始</span>
@@ -207,7 +252,21 @@
             </footer>
         </main>
 
-        <aside class="right-panel">
+        <div
+            id="manual-right-splitter"
+            class="manual-shell-splitter"
+            role="separator"
+            aria-label="调整右侧状态栏宽度"
+            aria-orientation="vertical"
+            aria-valuemin="276"
+            aria-valuemax="460"
+            aria-valuenow="340"
+            tabindex="0"
+        >
+            <span class="manual-shell-splitter-handle"></span>
+        </div>
+
+        <aside id="manual-right-panel" class="right-panel">
             <section class="panel-section right-panel-section">
                 <div class="section-heading compact">
                     <h2>已收集槽位</h2>

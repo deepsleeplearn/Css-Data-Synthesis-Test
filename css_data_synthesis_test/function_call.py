@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
 import os
+import phonenumbers
 import re
 import sys
 import time
@@ -104,6 +106,60 @@ ADDRESS_CONFIRMATION_PATTERNS = (
     ),
 )
 
+DEFAULT_SPLIT_TOKEN = "+"
+IE_PROMPT_TEMPLATE = """
+请从以下用户与客服之间的语音对话中提取关键信息，并按照给定的示例严格遵从以JSON格式输出，不需要任何其他补充文本。
+
+**通用规则**：
+1.如果某个字段的信息在对话中未提及或不符合白名单范围，则其值必须为空字符''。
+2.如果某个字段的取值存在多个值，则多个取值之间使用'|'分割。
+
+**字段具体要求**：
+{key_maps}
+
+**输出格式示例**：
+{examples}
+"""
+
+COPIED_CUSTOMER_AGENT_KEYS_CONFIG = {
+    "familyName": {
+        "description": "<用户的姓氏，string类型>",
+        "rule": "用户的姓氏，通常是用户名字的第一个汉字或前两个汉字（即复姓）。",
+    },
+    "contactNumber": {
+        "description": "<用户的联系电话号码，string类型>",
+        "rule": "用户的联系电话号码，通常是手机号码或座机号码，一般由数字组成，不包含其他符号（如空格、中划线）。",
+    },
+    "serviceAddress": {
+        "description": "<用户的上门服务地址，string类型>",
+        "rule": "用户的上门服务地址，通常由省、市、区/县、乡镇/街道和详细地址组成。",
+    },
+    "productModel": {
+        "description": "<产品型号，string类型>",
+        "rule": "产品型号，通常是产品的唯一标识，通常由字母、数字和符号组成。若某型号没有被用户确认，则该字段必须输出空字符''。",
+    },
+    "productCategory": {
+        "description": "<产品品类，string类型>",
+        "rule": "产品品类，通常是指用户已确认需要服务的家电产品大类。若某品类没有被用户确认，则该字段必须输出空字符''。",
+    },
+}
+
+COPIED_CUSTOMER_AGENT_ADDRESS_PROMPT = (
+    "你是一个顶级的地址信息处理专家。你的任务是分析【机器人】和【用户】之间的对话，并根据用户的回应，"
+    "严格遵循以下规则，推断出最终的、最准确的地址。#核心规则"
+    "用户肯定:如果用户使用“嗯”、“对”、“是的”等词语或未提出异议，最终地址应为【机器人】提供的完整地址。"
+    "用户补充/追加:如果用户在机器人地址的基础上补充了额外信息（如小区名、楼栋号），最终地址应是【机器人】地址和【用户】补充信息的无缝结合。"
+    "用户否定/移除:如果用户明确否定了地址的某个部分（如“不是这个村”），并且没有提供新的信息，则应将该部分及之后的所有信息从地址中移除。"
+    "用户更正/替换(截断规则):当用户对地址的任何部分（无论是省、市、区、街道、路名、小区名，还是门牌号）进行更正或替换时，"
+    "最终地址应采纳用户的更正，并丢弃机器人原地址中位于被更正层级之后的所有信息。"
+    "-例外：如果用户提供了一个全新的、结构完整的地址，则完全采纳用户的新地址。"
+    "用户澄清/选择:如果【机器人】提供的地址中包含重复或冲突的同级地址信息，而【用户】的回应明确指出了其中一个，"
+    "那么最终地址应采纳用户指出的部分，并移除其他冲突的同级地址。"
+    "无法判断:如果用户的回答语义模糊、答非所问、没有听清，最终地址应为“无法判断”。"
+    "#输出要求你的回答必须且只能是一个严格的JSON格式字符串。绝对不要包含任何JSON之外的文字、解释、理由或代码块标记(例如json...)。"
+    "最终格式必须是：{\"serviceAddress\":\"提取出的最终地址或'无法判断'\"}"
+)
+
 
 def create_jwt(key: str, secret: str) -> str:
     current_time = int(time.time())
@@ -163,78 +219,130 @@ def _get_llm_client() -> OpenAIChatClient:
     return OpenAIChatClient(load_config())
 
 
-def _ie_instruction(entity_type: str) -> str:
-    if entity_type == "product_model":
-        return (
-            "请从以下用户与客服之间的语音对话中提取关键信息，并使用给定的示例以JSON格式输出，"
-            "不要输出任何其他补充文本。\n"
-            "<example>\n"
-            "{\n"
-            '"product_model":"[产品型号，由字母、数字、杠等组成，不含中文，未提及则输出空字符]"\n'
-            "}\n"
-            "</example>\n"
-        )
-    if entity_type == "address":
-        return (
-            "你是一个顶级的地址信息处理专家。你的任务是分析【客服】和【用户】之间的对话，"
-            "根据用户的回应推断最终的、最准确的地址，并只输出严格的 JSON。\n"
-            "核心规则：\n"
-            "1. 用户肯定：如果用户使用“嗯”“对”“是的”等词语或未提出异议，最终地址应为客服提供的完整地址。\n"
-            "2. 用户补充：如果用户在客服地址基础上补充了小区、楼栋、门牌号等信息，最终地址应将补充内容无缝合并进去。\n"
-            "3. 用户否定：如果用户明确否定了地址中的某一部分，且未提供替代信息，则从该部分开始及其后续信息都应移除。\n"
-            "4. 用户更正：如果用户更正了省、市、区县、街道、路名、小区或门牌号中的任一层级，应采用用户更正后的内容，并丢弃原地址中该层级之后的旧信息。\n"
-            "5. 全新地址：如果用户提供了一个全新的、结构完整的地址，则完全采用该新地址。\n"
-            "6. 无法判断：如果用户答非所问、表述模糊或无法判断，输出“无法判断”。\n"
-            "输出要求：不要输出任何解释、备注或代码块，只输出 JSON。\n"
-            "<example>\n"
-            "{\n"
-            '"address":"[提取出的最终地址，或无法判断，未提及则输出空字符]"\n'
-            "}\n"
-            "</example>\n"
-        )
-    if entity_type == "telephone_number":
-        return (
-            "请从以下用户与客服之间的语音对话中提取关键信息，并使用给定的示例以JSON格式输出，"
-            "不要输出任何其他补充文本。\n"
-            "<example>\n"
-            "{\n"
-            '"telephone_number":"[电话号码，一般为长度为7或11的数字序列，未提及则输出空字符]"\n'
-            "}\n"
-            "</example>\n"
-        )
-    if entity_type == "last_name":
-        return (
-            "请从以下用户与客服之间的语音对话中提取关键信息，并使用给定的示例以JSON格式输出，"
-            "不要输出任何其他补充文本。\n"
-            "<example>\n"
-            "{\n"
-            '"last_name":"[姓氏，即中国人名开头的第一个字或两个字，未提及则输出空字符]"\n'
-            "}\n"
-            "</example>\n"
-        )
-    if entity_type == "product_category":
-        return (
-            "请从以下用户与客服之间的语音对话中提取关键信息，并使用给定的示例以JSON格式输出，"
-            "不要输出任何其他补充文本。\n"
-            "<example>\n"
-            "{\n"
-            '"product_category":"[产品品类，即家电中文名称，未提及则输出空字符]"\n'
-            "}\n"
-            "</example>\n"
-        )
-    return (
-        "请从以下用户与客服之间的语音对话中提取关键信息，并使用给定的示例以JSON格式输出，"
-        "不要输出任何其他补充文本。\n"
-        "<example>\n"
-        "{\n"
-        '"telephone_number":"[电话号码，一般为长度为7或11的数字序列，未提及则输出空字符]",\n'
-        '"address":"[地址，由省、市、区/县/县级市、街道/乡镇、详细地址组成，部分片段可省略，未提及则输出空字符]",\n'
-        '"product_model":"[产品型号，由字母、数字、杠等组成，不含中文，未提及则输出空字符]",\n'
-        '"product_category":"[产品品类，即家电中文名称，未提及则输出空字符]",\n'
-        '"last_name":"[姓氏，即中国人名开头的第一个字或两个字，未提及则输出空字符]"\n'
-        "}\n"
-        "</example>\n"
+def _map_local_entity_type_to_customer_agent(entity_type: str) -> str:
+    mapping = {
+        "address": "serviceAddress",
+        "addressInfo": "serviceAddress",
+        "telephone_number": "contactNumber",
+        "telephone": "contactNumber",
+        "last_name": "familyName",
+        "product_model": "productModel",
+        "product_category": "productCategory",
+        "all": "all",
+    }
+    return mapping.get(entity_type, entity_type)
+
+
+def _gen_copied_key_maps(entity_types: list[str] | str) -> str:
+    if entity_types == "all":
+        keys = list(COPIED_CUSTOMER_AGENT_KEYS_CONFIG.keys())
+    else:
+        keys = list(entity_types)
+    return "".join(
+        f"- **{key}**:\n{COPIED_CUSTOMER_AGENT_KEYS_CONFIG[key]['rule']}\n"
+        for key in keys
+        if key in COPIED_CUSTOMER_AGENT_KEYS_CONFIG
     )
+
+
+def _gen_copied_examples(entity_types: list[str] | str) -> str:
+    if entity_types == "all":
+        keys = list(COPIED_CUSTOMER_AGENT_KEYS_CONFIG.keys())
+    else:
+        keys = list(entity_types)
+    examples = {
+        key: COPIED_CUSTOMER_AGENT_KEYS_CONFIG[key]["description"]
+        for key in keys
+        if key in COPIED_CUSTOMER_AGENT_KEYS_CONFIG
+    }
+    return json.dumps(examples, ensure_ascii=False)
+
+
+def _get_copied_customer_agent_sys_prompt(entity_type: str) -> str:
+    mapped_entity_type = _map_local_entity_type_to_customer_agent(entity_type)
+    if mapped_entity_type == "serviceAddress":
+        return COPIED_CUSTOMER_AGENT_ADDRESS_PROMPT
+    entity_types: list[str] | str
+    if mapped_entity_type == "all":
+        entity_types = "all"
+    else:
+        entity_types = mapped_entity_type.split(DEFAULT_SPLIT_TOKEN)
+    return IE_PROMPT_TEMPLATE.format(
+        key_maps=_gen_copied_key_maps(entity_types),
+        examples=_gen_copied_examples(entity_types),
+    )
+
+
+def _normalize_customer_agent_ie_response(
+    entity_type: str,
+    response: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    normalized = dict(response or {})
+
+    if entity_type in {"address", "addressInfo"}:
+        normalized["address"] = str(
+            normalized.get("serviceAddress")
+            or normalized.get("address")
+            or ""
+        ).strip()
+    elif entity_type in {"telephone", "telephone_number"}:
+        normalized["telephone_number"] = str(
+            normalized.get("contactNumber")
+            or normalized.get("telephone_number")
+            or normalized.get("telephone")
+            or ""
+        ).strip()
+    elif entity_type == "last_name":
+        normalized["last_name"] = str(
+            normalized.get("familyName")
+            or normalized.get("last_name")
+            or ""
+        ).strip()
+    elif entity_type == "product_model":
+        normalized["product_model"] = str(
+            normalized.get("productModel")
+            or normalized.get("product_model")
+            or ""
+        ).strip()
+    elif entity_type == "product_category":
+        normalized["product_category"] = str(
+            normalized.get("productCategory")
+            or normalized.get("product_category")
+            or ""
+        ).strip()
+    elif entity_type == "all":
+        normalized["telephone_number"] = str(
+            normalized.get("contactNumber")
+            or normalized.get("telephone_number")
+            or normalized.get("telephone")
+            or ""
+        ).strip()
+        normalized["address"] = str(
+            normalized.get("serviceAddress")
+            or normalized.get("address")
+            or ""
+        ).strip()
+        normalized["product_model"] = str(
+            normalized.get("productModel")
+            or normalized.get("product_model")
+            or ""
+        ).strip()
+        normalized["product_category"] = str(
+            normalized.get("productCategory")
+            or normalized.get("product_category")
+            or ""
+        ).strip()
+        normalized["last_name"] = str(
+            normalized.get("familyName")
+            or normalized.get("last_name")
+            or ""
+        ).strip()
+
+    return normalized
+
+
+def _ie_instruction(entity_type: str) -> str:
+    return _get_copied_customer_agent_sys_prompt(entity_type)
 
 
 def ie(
@@ -251,12 +359,13 @@ def ie(
         {"role": "system", "content": _ie_instruction(entity_type)},
         {"role": "user", "content": f"<conversation>\n{dialogue_text}\n</conversation>"},
     ]
-    return llm_client.complete_json(
+    response = llm_client.complete_json(
         model=resolved_model,
         messages=messages,
         temperature=0,
         max_tokens=400,
     )
+    return _normalize_customer_agent_ie_response(entity_type, response)
 
 
 def extract_address_from_confirmation(text: str) -> str:
@@ -682,6 +791,141 @@ def build_address_model_observation(
         }
 
 
+def normalize_number(number: str) -> str:
+    return number.replace("-", "").replace(" ", "")
+
+
+def _fallback_extract_phone_from_dialogue(dialogue: Sequence[Any] | str) -> str:
+    lines = _dialogue_lines(dialogue)
+    for line in reversed(lines):
+        digits = re.sub(r"\D", "", line)
+        if digits:
+            return digits
+    return ""
+
+
+def validate_phone_number(number_str: str, default_region: str = "CN") -> dict[str, str]:
+    clean_number = normalize_number(number_str)
+    try:
+        parsed_number = phonenumbers.parse(clean_number, default_region)
+        if phonenumbers.is_valid_number(parsed_number):
+            number_type = phonenumbers.number_type(parsed_number)
+            if number_type == phonenumbers.PhoneNumberType.MOBILE:
+                resolved_type = "手机号"
+            elif 10 <= len(clean_number) <= 12 and clean_number.startswith("0"):
+                resolved_type = "座机号(带区号)"
+            elif (len(clean_number) == 7 or len(clean_number) == 8) and not clean_number.startswith("1"):
+                resolved_type = "座机号(无区号)"
+            else:
+                resolved_type = "无效号码"
+        elif 10 <= len(clean_number) <= 12 and clean_number.startswith("0"):
+            resolved_type = "座机号(带区号)"
+        elif (len(clean_number) == 7 or len(clean_number) == 8) and not clean_number.startswith("1"):
+            resolved_type = "座机号(无区号)"
+        else:
+            resolved_type = "无效号码"
+        return {"number": clean_number, "type": resolved_type}
+    except Exception as exc:
+        logger.error("phone number validate Error: %s", exc)
+        return {"number": clean_number, "type": "无效号码"}
+
+
+def build_telephone_model_observation(
+    dialogue: Sequence[Any] | str,
+    *,
+    client: OpenAIChatClient | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    try:
+        telephone_result = ie(dialogue, "telephone_number", client=client, model=model)
+        telephone = str(
+            telephone_result.get("telephone_number")
+            or telephone_result.get("telephone")
+            or ""
+        ).strip()
+        if not telephone:
+            return {
+                "telephone": "",
+                "numberType": "无效号码",
+                "error_code": 1,
+                "error_msg": "无效号码",
+            }
+
+        normalized = validate_phone_number(telephone)
+        number = str(normalized.get("number") or "").strip()
+        number_type = str(normalized.get("type") or "无效号码").strip() or "无效号码"
+        if number_type in {"无效号码", "座机号(无区号)"}:
+            return {
+                "telephone": number,
+                "numberType": number_type,
+                "error_code": 1,
+                "error_msg": "无效号码",
+            }
+        return {
+            "telephone": number,
+            "numberType": number_type,
+            "error_code": 0,
+            "error_msg": "有效号码",
+        }
+    except Exception as exc:
+        logger.exception("构造电话 observation 失败: %s", exc)
+        fallback_digits = _fallback_extract_phone_from_dialogue(dialogue)
+        if fallback_digits:
+            normalized = validate_phone_number(fallback_digits)
+            number = str(normalized.get("number") or "").strip()
+            number_type = str(normalized.get("type") or "无效号码").strip() or "无效号码"
+            return {
+                "telephone": number,
+                "numberType": number_type,
+                "error_code": 0 if number_type in {"手机号", "座机号(带区号)"} else 1,
+                "error_msg": "有效号码" if number_type in {"手机号", "座机号(带区号)"} else "无效号码",
+            }
+        return {
+            "telephone": "",
+            "numberType": "无效号码",
+            "error_code": 1,
+            "error_msg": str(exc) or "failed to build telephone observation",
+        }
+
+
+def build_ie_model_observation(
+    dialogue: Sequence[Any] | str,
+    entity_type: str,
+    *,
+    client: OpenAIChatClient | None = None,
+    model: str | None = None,
+    brand: str | None = None,
+    product: str | None = None,
+) -> dict[str, Any]:
+    if entity_type in {"address", "addressInfo"}:
+        return build_address_model_observation(dialogue, client=client, model=model)
+    if entity_type in {"telephone", "telephone_number"}:
+        return build_telephone_model_observation(dialogue, client=client, model=model)
+    response = ie(
+        dialogue,
+        entity_type,
+        client=client,
+        model=model,
+    )
+    if isinstance(response, Mapping):
+        return dict(response)
+    return {"error_code": 1, "error_msg": "unexpected ie response type"}
+
+
+def format_telephone_observation_line(
+    dialogue: Sequence[Any] | str,
+    *,
+    client: OpenAIChatClient | None = None,
+    model: str | None = None,
+) -> str:
+    observation = build_telephone_model_observation(
+        dialogue,
+        client=client,
+        model=model,
+    )
+    return f"observation: {json.dumps(observation, ensure_ascii=False)}"
+
+
 def format_address_observation_line(
     dialogue: Sequence[Any] | str,
     *,
@@ -790,6 +1034,7 @@ def run_function_call_for_text(
 if __name__ == "__main__":
     """
     [{"name": "ie", "arguments": {"entity_type": "addressInfo"}}]
+    [{"name": "ie", "arguments": {"entity_type": "telephone"}}]
     """
     sample_dialogue = [
         "用户：空气能热水器需要维修",
@@ -807,6 +1052,12 @@ if __name__ == "__main__":
         "用户：姑苏区",
         # "客服：请问具体是在哪个小区或村呢？尽量详细到门牌号。",
         # "用户：西郊一区40号楼 402 室",
+    ]
+    sample_phone_dialogue = [
+        "客服：请问您当前这个来电号码能联系到您吗？",
+        "用户：这个号码不太方便，您记一下我的新号码吧。",
+        "客服：好的，麻烦您说一下联系电话。",
+        "用户：13800138000。",
     ]
     sample_address = os.environ.get("ADDRESS_TEST_INPUT", "").strip()
     sample_dialogue_text = os.environ.get("DIALOGUE_TEXT_INPUT", "").strip()
@@ -868,3 +1119,12 @@ if __name__ == "__main__":
                 )
         except Exception as exc:
             print(f"ie地址提取测试失败: {exc}")
+        
+        print("telephone_test_dialogue =")
+        print("\n".join(sample_phone_dialogue))
+        try:
+            telephone_result = build_telephone_model_observation(sample_phone_dialogue)
+            print("telephone_model_dict =")
+            print(json.dumps(telephone_result, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            print(f"ie电话提取测试失败: {exc}")

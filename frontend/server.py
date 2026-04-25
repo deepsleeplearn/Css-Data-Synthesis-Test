@@ -48,6 +48,8 @@ try:
     from css_data_synthesis_test.config import load_config
     from css_data_synthesis_test.function_call import (
         build_address_model_observation,
+        build_ie_model_observation,
+        build_telephone_model_observation,
         format_address_observation_line,
     )
     from css_data_synthesis_test.hidden_settings_tool import (
@@ -209,8 +211,11 @@ def _session_redis_key(session_id: str) -> str:
 class StartSessionRequest(BaseModel):
     scenario_id: str = ""
     scenario_index: int = 0
+    product_category: str = ""
+    request_type: str = ""
     auto_generate_hidden_settings: bool = False
     known_address: str = ""
+    ivr_utterance: str = ""
     call_start_time: str = ""
     use_session_start_time_as_call_start_time: bool = False
     max_rounds: int | None = None
@@ -239,7 +244,8 @@ class AddressIeDisplayRequest(BaseModel):
     enabled: bool = True
 
 
-class RewriteAddressObservationRequest(BaseModel):
+class RewriteIeObservationRequest(BaseModel):
+    entity_type: str = "addressInfo"
     dialogue_lines: list[str] = []
 
 
@@ -970,11 +976,205 @@ def _resolve_manual_call_start_time(req: StartSessionRequest, scenario: Scenario
     return scenario_value or _current_display_timestamp()
 
 
-def _prepare_manual_test_scenario(req: StartSessionRequest) -> tuple[Scenario, str, int]:
-    scenario = _resolve_scenario(
-        scenario_id=req.scenario_id,
-        scenario_index=req.scenario_index,
+def _normalize_ivr_request_type(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"installation", "install", "安装"}:
+        return "installation"
+    if normalized in {"fault", "repair", "maintenance", "维修", "报修"}:
+        return "fault"
+    return ""
+
+
+def _normalize_manual_product_category(value: str) -> str:
+    normalized = str(value or "").strip()
+    mapping = {
+        "空气能热水机": "空气能热水机",
+        "空气能热水器": "空气能热水机",
+        "热水器": "热水器",
+        "燃气热水器": "燃气热水器",
+        "电热水器": "电热水器",
+    }
+    return mapping.get(normalized, "")
+
+
+def _manual_product_category_slug(category: str) -> str:
+    mapping = {
+        "空气能热水机": "air_energy",
+        "热水器": "water_heater",
+        "燃气热水器": "gas_water_heater",
+        "电热水器": "electric_water_heater",
+    }
+    return mapping.get(str(category or "").strip(), "air_energy")
+
+
+def _resolve_manual_base_scenario(request_type: str) -> Scenario:
+    normalized_request_type = _normalize_ivr_request_type(request_type) or "fault"
+    scenarios = _load_scenarios()
+    for scenario in scenarios:
+        if str(scenario.request.request_type or "").strip() == normalized_request_type:
+            return scenario
+    return scenarios[0]
+
+
+def _apply_manual_session_configuration(
+    scenario: Scenario,
+    *,
+    product_category: str,
+    request_type: str,
+    ivr_utterance: str,
+) -> tuple[Scenario, str, bool]:
+    normalized_product_category = _normalize_manual_product_category(product_category) or "空气能热水机"
+    normalized_request_type = _normalize_ivr_request_type(request_type) or "fault"
+    action = "安装" if normalized_request_type == "installation" else "维修"
+    sanitized_ivr = _sanitize_manual_user_text(ivr_utterance)
+    hidden_context = dict(scenario.hidden_context)
+    hidden_context.update(
+        {
+            "manual_product_category": normalized_product_category,
+            "manual_request_type": normalized_request_type,
+            "ivr_utterance": sanitized_ivr,
+            "ivr_request_type": normalized_request_type,
+            "ivr_product_kind": "water_heater" if normalized_product_category == "热水器" else "",
+            "ivr_opening_overridden": normalized_product_category == "热水器",
+        }
     )
+    configured = replace(
+        scenario,
+        scenario_id=f"manual_config_{_manual_product_category_slug(normalized_product_category)}_{normalized_request_type}",
+        product=replace(scenario.product, category=normalized_product_category),
+        request=replace(
+            scenario.request,
+            request_type=normalized_request_type,
+            issue=f"{normalized_product_category}需要{action}",
+            desired_resolution=f"安排{action}",
+        ),
+        hidden_context=hidden_context,
+    )
+    ivr_notice = (
+        f"已记录 IVR 原话: {sanitized_ivr}；首轮仍按当前产品和诉求配置启动。"
+        if sanitized_ivr
+        else f"首轮将按当前配置固定生成: 美的{normalized_product_category}需要{action}"
+    )
+    return configured, ivr_notice, True
+
+
+def _infer_ivr_request_type(text: str) -> str:
+    normalized = str(text or "").strip()
+    if re.search(r"(安装|装机|安装一下|上门安装)", normalized):
+        return "installation"
+    if re.search(r"(维修|报修|修一下|坏了|故障|不出热水|漏水|不启动|异常)", normalized):
+        return "fault"
+    return ""
+
+
+def _infer_ivr_product_kind(text: str) -> str:
+    normalized = str(text or "").strip()
+    if "空气能" in normalized:
+        return "air_energy"
+    if re.search(r"(热水器|热水机)", normalized):
+        return "water_heater"
+    return ""
+
+
+def _classify_ivr_opening_with_model(ivr_text: str) -> dict[str, str]:
+    sanitized = _sanitize_manual_user_text(ivr_text)
+    if not sanitized:
+        return {"product_kind": "", "request_type": ""}
+    system_prompt = """你是家电客服电话 IVR 首轮意图识别助手。
+
+任务：只根据用户在进入人工客服前的一句 IVR 诉求，判断产品意图和诉求类型。
+
+分类规则：
+1. product_kind 只允许输出：
+   - air_energy: 用户明确表达的是空气能、空气能热水器、空气能热水机
+   - water_heater: 用户只表达热水器/热水机，看不出是空气能
+   - unknown: 看不出来
+2. request_type 只允许输出：
+   - installation: 安装
+   - fault: 维修/报修/故障处理
+   - unknown: 看不出来
+3. 只有明确出现“空气能”或等价表达时，才能判为 air_energy。
+4. 只说“热水器”“热水机”时，一律判为 water_heater。
+
+只返回 JSON：
+{
+  "product_kind": "air_energy|water_heater|unknown",
+  "request_type": "installation|fault|unknown"
+}"""
+    try:
+        payload = llm_client.complete_json(
+            model=config.service_agent_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"IVR原话: {sanitized}\n只返回 JSON。"},
+            ],
+            temperature=0.0,
+        )
+    except Exception:
+        return {"product_kind": "", "request_type": ""}
+    return {
+        "product_kind": str(payload.get("product_kind", "")).strip(),
+        "request_type": str(payload.get("request_type", "")).strip(),
+    }
+
+
+def _apply_ivr_opening_override(
+    scenario: Scenario,
+    ivr_utterance: str,
+) -> tuple[Scenario, str, bool]:
+    sanitized = _sanitize_manual_user_text(ivr_utterance)
+    if not sanitized:
+        return scenario, "", False
+
+    inferred_request_type = _infer_ivr_request_type(sanitized)
+    inferred_product_kind = _infer_ivr_product_kind(sanitized)
+    model_result = _classify_ivr_opening_with_model(sanitized)
+
+    request_type = _normalize_ivr_request_type(model_result.get("request_type", "")) or inferred_request_type
+    product_kind = str(model_result.get("product_kind", "")).strip().lower() or inferred_product_kind
+
+    if product_kind not in {"air_energy", "water_heater"} or request_type not in {"installation", "fault"}:
+        return scenario, f"已记录 IVR 原话，但未触发首轮固定覆写: {sanitized}", False
+
+    category = "空气能热水机" if product_kind == "air_energy" else "热水器"
+    action = "安装" if request_type == "installation" else "维修"
+    hidden_context = dict(scenario.hidden_context)
+    hidden_context.update(
+        {
+            "ivr_utterance": sanitized,
+            "ivr_product_kind": product_kind,
+            "ivr_request_type": request_type,
+            "ivr_opening_overridden": True,
+        }
+    )
+    updated_scenario = replace(
+        scenario,
+        product=replace(scenario.product, category=category),
+        request=replace(
+            scenario.request,
+            request_type=request_type,
+            issue=sanitized,
+            desired_resolution=f"安排{action}",
+        ),
+        hidden_context=hidden_context,
+    )
+    return (
+        updated_scenario,
+        f"IVR 首轮固定为: 美的{category}需要{action}",
+        True,
+    )
+
+
+def _prepare_manual_test_scenario(req: StartSessionRequest) -> tuple[Scenario, str, int, str, bool]:
+    manual_request_type = _normalize_ivr_request_type(req.request_type)
+    manual_product_category = _normalize_manual_product_category(req.product_category)
+    if manual_request_type or manual_product_category:
+        scenario = _resolve_manual_base_scenario(manual_request_type or "fault")
+    else:
+        scenario = _resolve_scenario(
+            scenario_id=req.scenario_id,
+            scenario_index=req.scenario_index,
+        )
 
     if req.auto_generate_hidden_settings:
         if not config.openai_api_key or "YOUR_API_KEY" in config.openai_api_key:
@@ -989,6 +1189,18 @@ def _prepare_manual_test_scenario(req: StartSessionRequest) -> tuple[Scenario, s
 
     scenario = scenario.with_call_start_time(_resolve_manual_call_start_time(req, scenario))
     scenario, known_address_notice = _apply_known_address(scenario, req.known_address)
+    if manual_request_type or manual_product_category:
+        scenario, ivr_notice, ivr_opening_enabled = _apply_manual_session_configuration(
+            scenario,
+            product_category=manual_product_category or "空气能热水机",
+            request_type=manual_request_type or "fault",
+            ivr_utterance=req.ivr_utterance,
+        )
+    else:
+        scenario, ivr_notice, ivr_opening_enabled = _apply_ivr_opening_override(
+            scenario,
+            req.ivr_utterance,
+        )
     scenario.hidden_context["interactive_test_freeform"] = True
     scenario.hidden_context["manual_test_address_precision_reference"] = False
     ensure_product_routing_plan(
@@ -1002,11 +1214,11 @@ def _prepare_manual_test_scenario(req: StartSessionRequest) -> tuple[Scenario, s
         scenario_max_turns=scenario.max_turns,
         config_max_rounds=config.max_rounds,
     )
-    return scenario, known_address_notice, rounds_limit
+    return scenario, known_address_notice, rounds_limit, ivr_notice, ivr_opening_enabled
 
 
 def _create_auto_mode_job(req: StartSessionRequest) -> tuple[str, dict[str, Any]]:
-    scenario, known_address_notice, rounds_limit = _prepare_manual_test_scenario(req)
+    scenario, known_address_notice, rounds_limit, ivr_notice, ivr_opening_enabled = _prepare_manual_test_scenario(req)
     scenario = replace(scenario, max_turns=rounds_limit)
     required_slots = effective_required_slots(scenario)
     collected_slots = {slot: "" for slot in required_slots}
@@ -1032,7 +1244,11 @@ def _create_auto_mode_job(req: StartSessionRequest) -> tuple[str, dict[str, Any]
         "ended_at": "",
         "session_config": {
             "scenario_id": scenario.scenario_id,
+            "product_category": str(req.product_category or "").strip(),
+            "request_type": str(req.request_type or "").strip(),
             "known_address": _sanitize_manual_user_text(req.known_address),
+            "ivr_utterance": _sanitize_manual_user_text(req.ivr_utterance),
+            "ivr_opening_enabled": bool(ivr_opening_enabled),
             "call_start_time": scenario.call_start_time,
             "use_session_start_time_as_call_start_time": bool(req.use_session_start_time_as_call_start_time),
             "max_rounds": req.max_rounds,
@@ -1046,6 +1262,7 @@ def _create_auto_mode_job(req: StartSessionRequest) -> tuple[str, dict[str, Any]
             f"自动模式场景: {scenario.scenario_id}",
             f"轮次上限: {rounds_limit}",
             known_address_notice,
+            ivr_notice or "未设置 IVR 首轮覆写。",
             "自动模式正在逐轮生成，请稍候...",
         ],
         tone="system",
@@ -1239,6 +1456,12 @@ async def _run_auto_mode_job_async(job_id: str) -> None:
                     speaker=USER_SPEAKER,
                     text=user_action["reply"],
                     round_index=round_index,
+                )
+                _append_phone_ie_display_lines(
+                    policy=service_agent.policy,
+                    turn=user_turn,
+                    transcript=transcript + [user_turn],
+                    runtime_state=runtime_state,
                 )
                 auto_address_observation = _append_address_ie_display_lines(
                     policy=service_agent.policy,
@@ -1466,6 +1689,31 @@ def _append_checkpoint(session: dict[str, Any], *, source_round_index: int) -> N
     )
 
 
+def _restore_checkpoint_index_for_round(
+    session: dict[str, Any],
+    *,
+    round_index: int,
+) -> int:
+    checkpoints = list(session.get("checkpoints", []))
+    if not checkpoints:
+        return max(int(round_index) - 1, 0)
+
+    target_round = int(round_index or 0)
+    best_index = 0
+    best_source_round = -1
+    for checkpoint in checkpoints:
+        if not isinstance(checkpoint, dict):
+            continue
+        checkpoint_index = int(checkpoint.get("checkpoint_index", 0) or 0)
+        source_round_index = int(checkpoint.get("source_round_index", 0) or 0)
+        if source_round_index >= target_round:
+            continue
+        if source_round_index >= best_source_round:
+            best_source_round = source_round_index
+            best_index = checkpoint_index
+    return max(best_index, 0)
+
+
 def _serialize_session_for_storage(session: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "username": str(session.get("username", "")).strip(),
@@ -1651,7 +1899,10 @@ def _append_turn_entry(session: dict[str, Any], turn: DialogueTurn) -> None:
         "has_address_ie_display": has_address_ie_display,
     }
     if turn.speaker == USER_SPEAKER:
-        entry["restore_checkpoint_index"] = max(int(display_turn["round_index"]) - 1, 0)
+        entry["restore_checkpoint_index"] = _restore_checkpoint_index_for_round(
+            session,
+            round_index=int(display_turn["round_index"] or 0),
+        )
     terminal_entries.append(entry)
     for line in turn.post_display_lines:
         normalized_line = str(line).strip()
@@ -1759,6 +2010,32 @@ def _append_address_ie_display_lines(
         client=llm_client,
     )
     turn.post_display_lines.append(policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY)
+    turn.post_display_lines.append(f"observation: {json.dumps(observation, ensure_ascii=False)}")
+    return observation
+
+
+def _append_phone_ie_display_lines(
+    *,
+    policy: ServiceDialoguePolicy,
+    turn: DialogueTurn,
+    transcript: list[DialogueTurn],
+    runtime_state: ServiceRuntimeState,
+) -> dict[str, Any] | None:
+    if not runtime_state.awaiting_phone_keypad_input:
+        return None
+    previous_service_text = ""
+    for previous_turn in reversed(transcript[:-1]):
+        if previous_turn.speaker == SERVICE_SPEAKER:
+            previous_service_text = previous_turn.text
+            break
+    if not policy.is_phone_keypad_prompt(previous_service_text):
+        return None
+    observation = build_telephone_model_observation(
+        transcript,
+        client=llm_client,
+    )
+    runtime_state.pending_phone_ie_observation = dict(observation)
+    turn.post_display_lines.append(policy.PHONE_IE_FUNCTION_CALL_DISPLAY)
     turn.post_display_lines.append(f"observation: {json.dumps(observation, ensure_ascii=False)}")
     return observation
 
@@ -2838,9 +3115,8 @@ def start_session(
     current_user: dict[str, str] = Depends(_require_authenticated_user),
 ):
     try:
-        scenario, known_address_notice, rounds_limit = _prepare_manual_test_scenario(req)
+        scenario, known_address_notice, rounds_limit, ivr_notice, ivr_opening_enabled = _prepare_manual_test_scenario(req)
         required_slots, collected_slots = _build_collected_slots(scenario)
-        initial_runtime_state = asdict(ServiceRuntimeState())
         initial_lines = _build_initial_lines(
             scenario,
             rounds_limit=rounds_limit,
@@ -2848,11 +3124,12 @@ def start_session(
         )
 
         session_id = str(uuid.uuid4())
+        policy = _build_service_policy()
         sessions[session_id] = {
             "username": current_user["username"],
             "scenario": scenario,
             "base_scenario": scenario.to_dict(),
-            "policy": _build_service_policy(),
+            "policy": policy,
             "runtime_state": ServiceRuntimeState(),
             "transcript": [],
             "trace": [],
@@ -2860,8 +3137,8 @@ def start_session(
             "checkpoints": [],
             "required_slots": required_slots,
             "collected_slots": collected_slots,
-            "initial_runtime_state": dict(initial_runtime_state),
-            "initial_collected_slots": dict(collected_slots),
+            "initial_runtime_state": {},
+            "initial_collected_slots": {},
             "rounds_limit": rounds_limit,
             "status": "active",
             "aborted_reason": "",
@@ -2870,7 +3147,11 @@ def start_session(
             "review_submitted": False,
             "session_config": {
                 "scenario_id": scenario.scenario_id,
+                "product_category": str(req.product_category or "").strip(),
+                "request_type": str(req.request_type or "").strip(),
                 "known_address": _sanitize_manual_user_text(req.known_address),
+                "ivr_utterance": _sanitize_manual_user_text(req.ivr_utterance),
+                "ivr_opening_enabled": bool(ivr_opening_enabled),
                 "call_start_time": scenario.call_start_time,
                 "use_session_start_time_as_call_start_time": bool(req.use_session_start_time_as_call_start_time),
                 "max_rounds": req.max_rounds,
@@ -2878,11 +3159,48 @@ def start_session(
                 "persist_to_db": bool(req.persist_to_db),
             },
         }
+        sessions[session_id]["initial_runtime_state"] = asdict(sessions[session_id]["runtime_state"])
+        sessions[session_id]["initial_collected_slots"] = dict(collected_slots)
         _append_checkpoint(sessions[session_id], source_round_index=0)
+        if ivr_opening_enabled:
+            opening_user_turn = DialogueTurn(
+                speaker=USER_SPEAKER,
+                text=policy.build_initial_user_utterance(scenario),
+                round_index=1,
+            )
+            sessions[session_id]["transcript"].append(opening_user_turn)
+            _append_turn_entry(sessions[session_id], opening_user_turn)
+            opening_action = policy.respond(
+                scenario=scenario,
+                transcript=sessions[session_id]["transcript"],
+                collected_slots=sessions[session_id]["collected_slots"],
+                runtime_state=sessions[session_id]["runtime_state"],
+            )
+            _merge_slots(collected_slots, opening_action.slot_updates, required_slots)
+            _merge_slots(
+                collected_slots,
+                opening_action.slot_updates,
+                list(SUPPLEMENTARY_COLLECTED_SLOTS),
+            )
+            opening_service_turn = DialogueTurn(
+                speaker=SERVICE_SPEAKER,
+                text=opening_action.reply,
+                round_index=1,
+                model_intent_inference_used=bool(
+                    getattr(policy, "last_used_model_intent_inference", False)
+                ),
+                previous_user_intent_model_inference_used=bool(
+                    getattr(policy, "last_used_model_intent_inference", False)
+                ),
+            )
+            sessions[session_id]["transcript"].append(opening_service_turn)
+            _append_turn_entry(sessions[session_id], opening_service_turn)
+            _append_checkpoint(sessions[session_id], source_round_index=1)
         _persist_session(session_id, sessions[session_id])
         return {
             **_build_session_view(session_id, sessions[session_id]),
             "initial_lines": initial_lines,
+            "ivr_notice": ivr_notice,
             "persist_to_db_default": bool(req.persist_to_db),
         }
     except HTTPException:
@@ -3069,6 +3387,12 @@ def respond(
         round_index=round_index,
     )
     transcript.append(user_turn)
+    _append_phone_ie_display_lines(
+        policy=policy,
+        turn=user_turn,
+        transcript=transcript,
+        runtime_state=runtime_state,
+    )
     auto_address_observation = _append_address_ie_display_lines(
         policy=policy,
         turn=user_turn,
@@ -3246,11 +3570,14 @@ def update_address_ie_display(
     }
 
 
-@app.post("/api/rewrite/address-observation")
-def build_rewrite_address_observation(
-    req: RewriteAddressObservationRequest,
+@app.post("/api/rewrite/ie-observation")
+def build_rewrite_ie_observation(
+    req: RewriteIeObservationRequest,
     current_user: dict[str, str] = Depends(_require_authenticated_user),
 ):
+    entity_type = str(req.entity_type or "").strip() or "addressInfo"
+    if entity_type not in {"addressInfo", "address", "telephone", "telephone_number"}:
+        raise HTTPException(status_code=400, detail="当前仅支持地址或电话 observation。")
     dialogue_lines = [
         str(line).strip()
         for line in req.dialogue_lines
@@ -3259,8 +3586,9 @@ def build_rewrite_address_observation(
     if not dialogue_lines:
         raise HTTPException(status_code=400, detail="请先在 function_call 上方保留用户/客服对话内容。")
 
-    observation = build_address_model_observation(
+    observation = build_ie_model_observation(
         dialogue_lines,
+        entity_type,
         client=llm_client,
         model=config.service_agent_model,
     )

@@ -22,6 +22,7 @@ from css_data_synthesis_test.schemas import (
 from css_data_synthesis_test.scenario_factory import ScenarioFactory
 from css_data_synthesis_test.function_call import (
     build_address_model_observation,
+    build_telephone_model_observation,
 )
 from css_data_synthesis_test.service_policy import (
     ServiceDialoguePolicy,
@@ -225,6 +226,22 @@ def run_manual_test_session(
                 round_index=round_index,
             )
         )
+        previous_service_text = ""
+        for previous_turn in reversed(transcript[:-1]):
+            if previous_turn.speaker == SERVICE_SPEAKER:
+                previous_service_text = previous_turn.text
+                break
+        if runtime_state.awaiting_phone_keypad_input and resolved_policy.is_phone_keypad_prompt(previous_service_text):
+            auto_phone_observation = build_telephone_model_observation(transcript)
+            runtime_state.pending_phone_ie_observation = dict(auto_phone_observation)
+            transcript[-1].post_display_lines.append(
+                resolved_policy.PHONE_IE_FUNCTION_CALL_DISPLAY
+            )
+            transcript[-1].post_display_lines.append(
+                f"observation: {json.dumps(auto_phone_observation, ensure_ascii=False)}"
+            )
+            for line in transcript[-1].post_display_lines:
+                print_func(line)
         should_insert_for_collection = False
         if hasattr(resolved_policy, "should_insert_address_ie_function_call"):
             should_insert_for_collection = bool(

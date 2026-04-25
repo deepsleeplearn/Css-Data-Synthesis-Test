@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from css_data_synthesis_test.function_call import build_telephone_model_observation
 from css_data_synthesis_test.address_utils import (
     BUILDING_SUFFIXES,
     LANDMARK_LOCALITY_SUFFIXES,
@@ -56,8 +57,14 @@ class ServiceRuntimeState:
     expected_contactable_confirmation: bool = False
     awaiting_phone_keypad_input: bool = False
     expected_phone_number_confirmation: bool = False
+    expected_phone_sms_fill_confirmation: bool = False
+    expected_water_heater_opening_confirmation: bool = False
+    expected_water_heater_type_selection: bool = False
     phone_input_attempts: int = 0
     pending_phone_number_confirmation: str = ""
+    pending_phone_ie_observation: dict[str, Any] = field(default_factory=dict)
+    pending_water_heater_brand: str = ""
+    pending_water_heater_request_type: str = ""
     expected_address_confirmation: bool = False
     address_confirmation_triggered_by_observation: bool = False
     expected_product_arrival_confirmation: bool = False
@@ -87,14 +94,18 @@ class ServicePolicyResult:
 
 
 class ServiceDialoguePolicy:
-    FAULT_ACKNOWLEDGEMENT_PREFIX = "非常抱歉，给您添麻烦了，我这就安排师傅上门维修"
+    FAULT_ACKNOWLEDGEMENT_PREFIX = "非常抱歉，给您添麻烦了，我帮您安排售后处理"
     HUMAN_HANDOFF_REPLY = "请稍等，正在为您转接人工服务。"
     ADDRESS_IE_FUNCTION_CALL_DISPLAY = 'function_call: [{"name": "ie", "arguments": {"entity_type": "addressInfo"}}]'
+    PHONE_IE_FUNCTION_CALL_DISPLAY = 'function_call: [{"name": "ie", "arguments": {"entity_type": "telephone"}}]'
 
     SURNAME_PROMPT = "请问您贵姓？"
     CONTACTABLE_PROMPT = "请问您当前这个来电号码能联系到您吗？"
-    PHONE_KEYPAD_PROMPT = "请您在拨号盘上输入您的联系方式，并以#号键结束。"
-    PHONE_KEYPAD_RETRY_PROMPT = "您输入的号码有误，请重新在拨号盘上输入您的联系方式，并以#号键结束。"
+    PHONE_KEYPAD_PROMPT = "请您在电话拨号盘上输入您的联系号码，并以#号键结束。"
+    PHONE_KEYPAD_RETRY_PROMPT = "非常抱歉输入有误，请您在拨号盘输入上门服务时的联系号码，输完后按#号键结束。"
+    PHONE_KEYPAD_MISSING_AREA_CODE_PROMPT = "您好，您输入的固定电话缺少区号，请输入完整的联系号码，并以#号键结束。"
+    PHONE_SMS_FILL_PROMPT = "很抱歉，我们将为您下发短信，您可点击短信链接，补充信息并提交，您看是否可以？"
+    PHONE_SMS_SENT_PROMPT = "短信已发送，请稍后留意查看，感谢您的来电，再见！"
     PHONE_CONFIRMATION_TEMPLATE = "号码是{phone}，对吗？"
     FAULT_ISSUE_PROMPT = "请问{product}现在是出现了什么问题？"
     ADDRESS_PROMPT = "需要登记下您的地址，麻烦您完整的说下省、市、区、乡镇，精确到门牌号。"
@@ -121,9 +132,18 @@ class ServiceDialoguePolicy:
     # 每条话术支持配置为 [(文案, 权重), ...]，每次发送时使用 random.choices 按权重随机选择。
     SURNAME_PROMPT: PromptConfig = [("请问您贵姓？", 1.0)]
     CONTACTABLE_PROMPT: PromptConfig = [("请问您当前这个来电号码能联系到您吗？", 1.0)]
-    PHONE_KEYPAD_PROMPT: PromptConfig = [("请您在拨号盘上输入您的联系方式，并以#号键结束。", 1.0)]
+    PHONE_KEYPAD_PROMPT: PromptConfig = [("请您在电话拨号盘上输入您的联系号码，并以#号键结束。", 1.0)]
     PHONE_KEYPAD_RETRY_PROMPT: PromptConfig = [
-        ("您输入的号码有误，请重新在拨号盘上输入您的联系方式，并以#号键结束。", 1.0)
+        ("非常抱歉输入有误，请您在拨号盘输入上门服务时的联系号码，输完后按#号键结束。", 1.0)
+    ]
+    PHONE_KEYPAD_MISSING_AREA_CODE_PROMPT: PromptConfig = [
+        ("您好，您输入的固定电话缺少区号，请输入完整的联系号码，并以#号键结束。", 1.0)
+    ]
+    PHONE_SMS_FILL_PROMPT: PromptConfig = [
+        ("很抱歉，我们将为您下发短信，您可点击短信链接，补充信息并提交，您看是否可以？", 1.0)
+    ]
+    PHONE_SMS_SENT_PROMPT: PromptConfig = [
+        ("短信已发送，请稍后留意查看，感谢您的来电，再见！", 1.0)
     ]
     PHONE_CONFIRMATION_TEMPLATE: PromptConfig = [("号码是{phone}，对吗？", 1.0)]
     FAULT_ISSUE_PROMPT: PromptConfig = [("请问{product}现在是出现了什么问题？", 1.0)]
@@ -162,7 +182,9 @@ class ServiceDialoguePolicy:
         contact_intent_inference_callback: Callable[..., dict[str, Any] | None] | None = None,
         confirmation_intent_inference_callback: Callable[..., dict[str, Any] | None] | None = None,
         opening_intent_inference_callback: Callable[..., dict[str, Any] | None] | None = None,
+        water_heater_opening_resolution_callback: Callable[..., dict[str, Any] | None] | None = None,
         issue_description_extraction_callback: Callable[..., dict[str, Any] | None] | None = None,
+        phone_inference_callback: Callable[..., dict[str, Any] | None] | None = None,
         product_routing_intent_inference_callback: Callable[..., dict[str, Any] | None] | None = None,
         product_routing_enabled: bool = True,
     ):
@@ -174,7 +196,9 @@ class ServiceDialoguePolicy:
         self.contact_intent_inference_callback = contact_intent_inference_callback
         self.confirmation_intent_inference_callback = confirmation_intent_inference_callback
         self.opening_intent_inference_callback = opening_intent_inference_callback
+        self.water_heater_opening_resolution_callback = water_heater_opening_resolution_callback
         self.issue_description_extraction_callback = issue_description_extraction_callback
+        self.phone_inference_callback = phone_inference_callback
         self.product_routing_intent_inference_callback = product_routing_intent_inference_callback
         self.product_routing_enabled = product_routing_enabled
         self.last_used_model_intent_inference = False
@@ -240,11 +264,39 @@ class ServiceDialoguePolicy:
                 runtime_state=runtime_state,
             )
 
+        if runtime_state.expected_water_heater_opening_confirmation:
+            return self._handle_water_heater_opening_confirmation(
+                scenario=scenario,
+                user_text=last_user_turn.text,
+                user_round_index=last_user_turn.round_index,
+                collected_slots=merged_slots,
+                runtime_state=runtime_state,
+            )
+
+        if runtime_state.expected_water_heater_type_selection:
+            return self._handle_water_heater_type_selection(
+                scenario=scenario,
+                user_text=last_user_turn.text,
+                user_round_index=last_user_turn.round_index,
+                collected_slots=merged_slots,
+                runtime_state=runtime_state,
+            )
+
         if runtime_state.awaiting_phone_keypad_input:
             return self._handle_phone_keypad_input(
                 scenario=scenario,
+                transcript=transcript,
                 user_text=last_user_turn.text,
                 collected_slots=merged_slots,
+                runtime_state=runtime_state,
+            )
+
+        if runtime_state.expected_phone_sms_fill_confirmation:
+            return self._handle_phone_sms_fill_confirmation(
+                scenario=scenario,
+                user_text=last_user_turn.text,
+                user_round_index=last_user_turn.round_index,
+                slot_updates=slot_updates,
                 runtime_state=runtime_state,
             )
 
@@ -357,6 +409,12 @@ class ServiceDialoguePolicy:
                 reason="user_requested_human",
             )
 
+        if self._should_use_water_heater_opening_flow(scenario):
+            runtime_state.expected_water_heater_opening_confirmation = True
+            runtime_state.expected_water_heater_type_selection = False
+            runtime_state.pending_water_heater_brand = str(scenario.product.brand or "").strip() or "美的"
+            runtime_state.pending_water_heater_request_type = str(scenario.request.request_type or "").strip() or "fault"
+
         return ServicePolicyResult(
             reply=self._build_opening_prompt(scenario),
             slot_updates=slot_updates,
@@ -376,32 +434,7 @@ class ServiceDialoguePolicy:
         runtime_state.expected_contactable_confirmation = False
         has_known_phone = self._has_known_value(scenario.customer.phone)
         current_call_phone = self._current_call_phone(scenario)
-        direct_phone = self._extract_mobile_phone(user_text)
         contact_owner = self._extract_contact_phone_owner_from_text(user_text) or self._contact_phone_owner(scenario)
-
-        if (
-            self._interactive_test_freeform_enabled(scenario)
-            and not has_known_phone
-            and direct_phone
-        ):
-            runtime_state.expected_phone_number_confirmation = True
-            runtime_state.pending_phone_number_confirmation = direct_phone
-            runtime_state.phone_input_attempts = 0
-            slot_updates = {
-                "phone_collection_attempts": "0",
-            }
-            if intent == "no":
-                slot_updates["phone_contactable"] = "no"
-                if contact_owner:
-                    slot_updates["phone_contact_owner"] = contact_owner
-            else:
-                slot_updates["phone_contactable"] = "yes"
-                slot_updates["phone_contact_owner"] = "本人当前来电"
-            return ServicePolicyResult(
-                reply=self._phone_confirmation_prompt(direct_phone),
-                slot_updates=slot_updates,
-                is_ready_to_close=False,
-            )
 
         if intent == "yes":
             if not has_known_phone and current_call_phone:
@@ -453,7 +486,9 @@ class ServiceDialoguePolicy:
 
         if intent == "no":
             runtime_state.awaiting_phone_keypad_input = True
+            runtime_state.expected_phone_sms_fill_confirmation = False
             runtime_state.phone_input_attempts = 0
+            runtime_state.pending_phone_ie_observation = {}
             slot_updates = {"phone_contactable": "no"}
             if contact_owner:
                 slot_updates["phone_contact_owner"] = contact_owner
@@ -468,6 +503,163 @@ class ServiceDialoguePolicy:
             reply=self._contactable_prompt(),
             slot_updates={},
             is_ready_to_close=False,
+        )
+
+    def _handle_water_heater_opening_confirmation(
+        self,
+        *,
+        scenario: Scenario,
+        user_text: str,
+        user_round_index: int,
+        collected_slots: dict[str, str],
+        runtime_state: ServiceRuntimeState,
+    ) -> ServicePolicyResult:
+        current_brand = str(runtime_state.pending_water_heater_brand or scenario.product.brand or "").strip() or "美的"
+        current_request_type = (
+            str(runtime_state.pending_water_heater_request_type or scenario.request.request_type or "").strip()
+            or "fault"
+        )
+        previous_service_text = self._previous_service_text(
+            [
+                DialogueTurn(speaker=SERVICE_SPEAKER, text=self._build_opening_prompt(scenario), round_index=max(0, user_round_index - 1)),
+                DialogueTurn(speaker=USER_SPEAKER, text=user_text, round_index=user_round_index),
+            ]
+        ) or self._build_opening_prompt(scenario)
+        resolved = self._resolve_water_heater_opening(
+            user_text,
+            current_brand=current_brand,
+            current_request_type=current_request_type,
+            previous_service_text=previous_service_text,
+            user_round_index=user_round_index,
+        )
+
+        if resolved.get("brand"):
+            runtime_state.pending_water_heater_brand = resolved["brand"]
+        if resolved.get("request_type"):
+            runtime_state.pending_water_heater_request_type = resolved["request_type"]
+
+        current_brand = str(runtime_state.pending_water_heater_brand or current_brand).strip() or "美的"
+        current_request_type = str(
+            runtime_state.pending_water_heater_request_type or current_request_type
+        ).strip() or "fault"
+
+        heater_type = resolved.get("heater_type", "")
+        if heater_type in {"air_energy", "gas", "electric"}:
+            runtime_state.expected_water_heater_opening_confirmation = False
+            runtime_state.expected_water_heater_type_selection = True
+            return self._handle_water_heater_type_selection(
+                scenario=scenario,
+                user_text=user_text,
+                user_round_index=user_round_index,
+                collected_slots=collected_slots,
+                runtime_state=runtime_state,
+            )
+
+        if resolved.get("intent") == "unknown":
+            runtime_state.expected_water_heater_opening_confirmation = True
+            return ServicePolicyResult(
+                reply=self._build_opening_prompt(scenario),
+                slot_updates={},
+                is_ready_to_close=False,
+            )
+
+        include_brand = bool(resolved.get("request_type")) and bool(resolved.get("brand"))
+        if resolved.get("request_type") and not resolved.get("brand"):
+            include_brand = True
+            current_brand = str(scenario.product.brand or "").strip() or "美的"
+        if resolved.get("brand") and not resolved.get("request_type"):
+            include_brand = False
+
+        runtime_state.expected_water_heater_opening_confirmation = False
+        runtime_state.expected_water_heater_type_selection = True
+        return ServicePolicyResult(
+            reply=self._water_heater_type_prompt(
+                brand=current_brand,
+                request_type=current_request_type,
+                include_brand=include_brand,
+            ),
+            slot_updates={},
+            is_ready_to_close=False,
+        )
+
+    def _handle_water_heater_type_selection(
+        self,
+        *,
+        scenario: Scenario,
+        user_text: str,
+        user_round_index: int,
+        collected_slots: dict[str, str],
+        runtime_state: ServiceRuntimeState,
+    ) -> ServicePolicyResult:
+        current_brand = str(runtime_state.pending_water_heater_brand or scenario.product.brand or "").strip() or "美的"
+        current_request_type = (
+            str(runtime_state.pending_water_heater_request_type or scenario.request.request_type or "").strip()
+            or "fault"
+        )
+        previous_service_text = self._water_heater_type_prompt(
+            brand=current_brand,
+            request_type=current_request_type,
+            include_brand=(
+                current_brand != (str(scenario.product.brand or "").strip() or "美的")
+                or current_request_type != str(scenario.request.request_type or "").strip()
+            ),
+        )
+        resolved = self._resolve_water_heater_opening(
+            user_text,
+            current_brand=current_brand,
+            current_request_type=current_request_type,
+            previous_service_text=previous_service_text,
+            user_round_index=user_round_index,
+        )
+        heater_type = resolved.get("heater_type", "")
+        if heater_type not in {"air_energy", "gas", "electric"}:
+            runtime_state.expected_water_heater_type_selection = True
+            return ServicePolicyResult(
+                reply=self._water_heater_type_prompt(
+                    brand=current_brand,
+                    request_type=current_request_type,
+                    include_brand=(
+                        current_brand != (str(scenario.product.brand or "").strip() or "美的")
+                        or current_request_type != str(scenario.request.request_type or "").strip()
+                    ),
+                ),
+                slot_updates={},
+                is_ready_to_close=False,
+            )
+
+        runtime_state.expected_water_heater_type_selection = False
+        scenario.product.brand = current_brand
+        scenario.request.request_type = current_request_type
+
+        if heater_type == "air_energy":
+            scenario.product.category = "空气能热水机"
+            if isinstance(scenario.hidden_context, dict):
+                scenario.hidden_context["interactive_test_skip_product_routing"] = False
+            slot_updates = {"request_type": current_request_type}
+            merged_slots = dict(collected_slots)
+            merged_slots.update(slot_updates)
+            next_slot = self._next_slot_to_request(merged_slots, effective_required_slots(scenario))
+            return self._transition_to_next_slot(
+                scenario=scenario,
+                collected_slots=collected_slots,
+                slot_updates=slot_updates,
+                runtime_state=runtime_state,
+                next_slot=next_slot,
+            )
+
+        scenario.product.category = "燃气热水器" if heater_type == "gas" else "电热水器"
+        if isinstance(scenario.hidden_context, dict):
+            scenario.hidden_context["interactive_test_skip_product_routing"] = True
+        slot_updates = {"request_type": current_request_type}
+        merged_slots = dict(collected_slots)
+        merged_slots.update(slot_updates)
+        next_slot = self._next_slot_to_request(merged_slots, effective_required_slots(scenario))
+        return self._transition_to_next_slot(
+            scenario=scenario,
+            collected_slots=collected_slots,
+            slot_updates=slot_updates,
+            runtime_state=runtime_state,
+            next_slot=next_slot,
         )
 
     def _handle_phone_number_confirmation(
@@ -510,6 +702,16 @@ class ServiceDialoguePolicy:
         if intent == "no":
             runtime_state.expected_phone_number_confirmation = False
             runtime_state.pending_phone_number_confirmation = ""
+            if runtime_state.phone_input_attempts >= 3:
+                runtime_state.awaiting_phone_keypad_input = False
+                runtime_state.expected_phone_sms_fill_confirmation = True
+                return ServicePolicyResult(
+                    reply=self._phone_sms_fill_prompt(),
+                    slot_updates={
+                        "phone_collection_attempts": str(runtime_state.phone_input_attempts),
+                    },
+                    is_ready_to_close=False,
+                )
             runtime_state.awaiting_phone_keypad_input = True
             return ServicePolicyResult(
                 reply=self._phone_keypad_prompt(),
@@ -524,6 +726,34 @@ class ServiceDialoguePolicy:
             reply=self._phone_confirmation_prompt(pending_phone),
             slot_updates={},
             is_ready_to_close=False,
+        )
+
+    def _handle_phone_sms_fill_confirmation(
+        self,
+        *,
+        scenario: Scenario,
+        user_text: str,
+        user_round_index: int,
+        slot_updates: dict[str, str],
+        runtime_state: ServiceRuntimeState,
+    ) -> ServicePolicyResult:
+        intent = self._classify_confirmation_intent(
+            user_text,
+            prompt_kind="product_arrival_confirmation",
+            user_round_index=user_round_index,
+        )
+        runtime_state.expected_phone_sms_fill_confirmation = False
+        if intent == "yes":
+            return ServicePolicyResult(
+                reply=self._phone_sms_sent_prompt(),
+                slot_updates=slot_updates,
+                is_ready_to_close=True,
+            )
+        return self._handoff_to_human(
+            scenario=scenario,
+            runtime_state=runtime_state,
+            slot_updates=slot_updates,
+            reason="phone_collection_failed",
         )
 
     def _handle_address_confirmation(
@@ -647,34 +877,74 @@ class ServiceDialoguePolicy:
         self,
         *,
         scenario: Scenario,
+        transcript: list[DialogueTurn],
         user_text: str,
         collected_slots: dict[str, str],
         runtime_state: ServiceRuntimeState,
     ) -> ServicePolicyResult:
         runtime_state.phone_input_attempts += 1
-        digits = re.sub(r"\D", "", user_text or "")
         slot_updates = {
             "phone_collection_attempts": str(runtime_state.phone_input_attempts),
         }
+        observation = (
+            dict(runtime_state.pending_phone_ie_observation)
+            if isinstance(runtime_state.pending_phone_ie_observation, dict)
+            and runtime_state.pending_phone_ie_observation
+            else None
+        )
+        runtime_state.pending_phone_ie_observation = {}
+        if observation is None:
+            if self.phone_inference_callback is not None:
+                callback_result = self.phone_inference_callback(
+                    dialogue=transcript,
+                    user_text=user_text,
+                )
+                if isinstance(callback_result, dict):
+                    observation = callback_result
+            else:
+                observation = build_telephone_model_observation(transcript)
 
-        if MOBILE_PHONE_PATTERN.match(digits):
+        if not isinstance(observation, dict):
+            observation = {
+                "telephone": "",
+                "numberType": "无效号码",
+                "error_code": 1,
+                "error_msg": "无效号码",
+            }
+
+        try:
+            normalized_error_code = int(observation.get("error_code", 1))
+        except (TypeError, ValueError):
+            normalized_error_code = 1
+        phone_number = str(observation.get("telephone") or "").strip()
+        number_type = str(observation.get("numberType") or "").strip()
+
+        if normalized_error_code == 0 and phone_number:
             runtime_state.awaiting_phone_keypad_input = False
             runtime_state.expected_phone_number_confirmation = True
-            runtime_state.pending_phone_number_confirmation = digits
+            runtime_state.pending_phone_number_confirmation = phone_number
             return ServicePolicyResult(
-                reply=self._phone_confirmation_prompt(digits),
+                reply=self._phone_confirmation_prompt(phone_number),
                 slot_updates=slot_updates,
                 is_ready_to_close=False,
             )
 
-        if runtime_state.phone_input_attempts < 3:
+        runtime_state.awaiting_phone_keypad_input = True
+        if runtime_state.phone_input_attempts >= 3:
+            runtime_state.awaiting_phone_keypad_input = False
+            runtime_state.expected_phone_sms_fill_confirmation = True
             return ServicePolicyResult(
-                reply=self._phone_keypad_retry_prompt(),
+                reply=self._phone_sms_fill_prompt(),
                 slot_updates=slot_updates,
                 is_ready_to_close=False,
             )
+        retry_reply = (
+            self._phone_keypad_missing_area_code_prompt()
+            if number_type == "座机号(无区号)"
+            else self._phone_keypad_retry_prompt()
+        )
         return ServicePolicyResult(
-            reply=self._phone_keypad_retry_prompt(),
+            reply=retry_reply,
             slot_updates=slot_updates,
             is_ready_to_close=False,
         )
@@ -1240,6 +1510,32 @@ class ServiceDialoguePolicy:
         return f"您好，很高兴为您服务，请问是{scenario.product.brand}{self._product_name(scenario)}需要{action}吗？"
 
     @staticmethod
+    def _request_type_to_action(request_type: str) -> str:
+        return "安装" if str(request_type or "").strip() == "installation" else "维修"
+
+    @staticmethod
+    def _should_use_water_heater_opening_flow(scenario: Scenario) -> bool:
+        hidden_context = scenario.hidden_context if isinstance(scenario.hidden_context, dict) else {}
+        return (
+            str(scenario.product.category or "").strip() == "热水器"
+            and bool(hidden_context.get("ivr_opening_overridden", False))
+            and str(hidden_context.get("ivr_product_kind", "")).strip() == "water_heater"
+        )
+
+    def _water_heater_type_prompt(
+        self,
+        *,
+        brand: str,
+        request_type: str,
+        include_brand: bool,
+    ) -> str:
+        action = self._request_type_to_action(request_type)
+        normalized_brand = str(brand or "").strip() or "美的"
+        if include_brand:
+            return f"好的，请问您要{action}的{normalized_brand}热水器是空气能热水器，还是燃气热水器、还是电热水器？"
+        return "好的，请问您的热水器是空气能热水器，还是燃气热水器、还是电热水器？"
+
+    @staticmethod
     def _last_turn_by_speaker(
         transcript: list[DialogueTurn],
         speaker: str,
@@ -1706,6 +2002,63 @@ class ServiceDialoguePolicy:
             self.last_used_model_intent_inference = True
             return intent
         return ""
+
+    def _resolve_water_heater_opening_with_model(
+        self,
+        text: str,
+        *,
+        current_brand: str,
+        current_request_type: str,
+        previous_service_text: str = "",
+        user_round_index: int = 0,
+    ) -> dict[str, str]:
+        if self.water_heater_opening_resolution_callback is None:
+            return {}
+        try:
+            payload = self._invoke_inference_callback(
+                self.water_heater_opening_resolution_callback,
+                user_text=text,
+                current_brand=current_brand,
+                current_request_type=current_request_type,
+                previous_service_text=previous_service_text,
+                user_round_index=user_round_index,
+            )
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        resolved = {
+            "intent": str(payload.get("intent", "")).strip().lower(),
+            "brand": str(payload.get("brand", "")).strip(),
+            "request_type": str(payload.get("request_type", "")).strip().lower(),
+            "heater_type": str(payload.get("heater_type", "")).strip().lower(),
+        }
+        if any(resolved.values()):
+            self.last_used_model_intent_inference = True
+        return resolved
+
+    def _resolve_water_heater_opening(
+        self,
+        text: str,
+        *,
+        current_brand: str,
+        current_request_type: str,
+        previous_service_text: str = "",
+        user_round_index: int = 0,
+    ) -> dict[str, str]:
+        resolved = self._resolve_water_heater_opening_with_model(
+            text,
+            current_brand=current_brand,
+            current_request_type=current_request_type,
+            previous_service_text=previous_service_text,
+            user_round_index=user_round_index,
+        )
+        return {
+            "intent": resolved.get("intent", "") if resolved.get("intent", "") in {"yes", "no", "unknown"} else "unknown",
+            "brand": resolved.get("brand", ""),
+            "request_type": resolved.get("request_type", "") if resolved.get("request_type", "") in {"fault", "installation"} else "",
+            "heater_type": resolved.get("heater_type", "") if resolved.get("heater_type", "") in {"air_energy", "gas", "electric", "water_heater"} else "",
+        }
 
     def _extract_issue_description_with_model(
         self,
@@ -3837,10 +4190,19 @@ class ServiceDialoguePolicy:
         return self._choose_prompt_text(self.CONTACTABLE_PROMPT)
 
     def _phone_keypad_prompt(self) -> str:
-        return self._with_optional_ok_prefix(self._choose_prompt_text(self.PHONE_KEYPAD_PROMPT))
+        return self._choose_prompt_text(self.PHONE_KEYPAD_PROMPT)
 
     def _phone_keypad_retry_prompt(self) -> str:
         return self._choose_prompt_text(self.PHONE_KEYPAD_RETRY_PROMPT)
+
+    def _phone_keypad_missing_area_code_prompt(self) -> str:
+        return self._choose_prompt_text(self.PHONE_KEYPAD_MISSING_AREA_CODE_PROMPT)
+
+    def _phone_sms_fill_prompt(self) -> str:
+        return self._choose_prompt_text(self.PHONE_SMS_FILL_PROMPT)
+
+    def _phone_sms_sent_prompt(self) -> str:
+        return self._choose_prompt_text(self.PHONE_SMS_SENT_PROMPT)
 
     def _phone_confirmation_prompt(self, phone: str) -> str:
         return self._with_optional_ok_prefix(self._choose_prompt_text(self.PHONE_CONFIRMATION_TEMPLATE, phone=phone))
@@ -4838,7 +5200,9 @@ class ServiceDialoguePolicy:
         runtime_state.expected_contactable_confirmation = False
         runtime_state.awaiting_phone_keypad_input = False
         runtime_state.expected_phone_number_confirmation = False
+        runtime_state.expected_phone_sms_fill_confirmation = False
         runtime_state.pending_phone_number_confirmation = ""
+        runtime_state.pending_phone_ie_observation = {}
         runtime_state.expected_address_confirmation = False
         runtime_state.address_confirmation_triggered_by_observation = False
         runtime_state.address_confirmation_started_from_known_address = False
