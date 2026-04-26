@@ -153,6 +153,7 @@ def build_config(
         service_agent_model="qwen3.5-plus",
         default_temperature=0.7,
         service_ok_prefix_probability=0.7,
+        service_query_prefix_weights={"好的": 0.7, "嗯嗯": 0.0, "了解了": 0.0, "": 0.3},
         second_round_include_issue_probability=second_round_include_issue_probability,
         max_rounds=20,
         max_concurrency=5,
@@ -328,6 +329,144 @@ class HiddenSettingsToolTests(unittest.TestCase):
 
         self.assertEqual(first, "confirm_only")
         self.assertEqual(second, "confirm_with_issue")
+
+    def test_frontend_auto_configured_known_address_can_force_actual_address_match(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            known_address = "浙江省杭州市余杭区良渚街道玉鸟路88号1幢101室"
+            base = build_base_scenario()
+            scenario = base.with_generated_hidden_settings(
+                customer=base.customer,
+                request=base.request,
+                hidden_context={
+                    **dict(base.hidden_context),
+                    "frontend_auto_address_policy_enabled": True,
+                    "frontend_auto_configured_known_address": known_address,
+                },
+            )
+            tool = HiddenSettingsTool(
+                SequenceFakeClient(
+                    [
+                        build_candidate(
+                            full_name="赵欣",
+                            surname="赵",
+                            phone="13876543210",
+                            address="江苏省扬州市宝应县安宜镇宝应碧桂园3幢5层502室",
+                            persona="配合度正常。",
+                            speech_style="表达直接。",
+                            issue="空气能热水机不出热水。",
+                            desired_resolution="安排师傅上门维修。",
+                            availability="周六下午",
+                            emotion="平静",
+                            urgency="中",
+                            prior_attempts="还没处理过",
+                            special_constraints="白天有人",
+                        )
+                    ]
+                ),
+                build_config(
+                    Path(temp_dir) / "hidden_settings_history.jsonl",
+                    service_known_address_matches_probability=1.0,
+                ),
+            )
+
+            generated = tool.generate_for_scenario(scenario)
+
+            self.assertEqual(generated.customer.address, known_address)
+            self.assertTrue(generated.hidden_context["service_known_address"])
+            self.assertEqual(generated.hidden_context["service_known_address_value"], known_address)
+            self.assertTrue(generated.hidden_context["service_known_address_matches_actual"])
+
+    def test_frontend_auto_configured_known_address_can_force_actual_address_mismatch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            known_address = "浙江省杭州市余杭区良渚街道玉鸟路88号1幢101室"
+            actual_address = "江苏省扬州市宝应县安宜镇宝应碧桂园3幢5层502室"
+            base = build_base_scenario()
+            scenario = base.with_generated_hidden_settings(
+                customer=base.customer,
+                request=base.request,
+                hidden_context={
+                    **dict(base.hidden_context),
+                    "frontend_auto_address_policy_enabled": True,
+                    "frontend_auto_configured_known_address": known_address,
+                },
+            )
+            tool = HiddenSettingsTool(
+                SequenceFakeClient(
+                    [
+                        build_candidate(
+                            full_name="赵欣",
+                            surname="赵",
+                            phone="13876543210",
+                            address=actual_address,
+                            persona="配合度正常。",
+                            speech_style="表达直接。",
+                            issue="空气能热水机不出热水。",
+                            desired_resolution="安排师傅上门维修。",
+                            availability="周六下午",
+                            emotion="平静",
+                            urgency="中",
+                            prior_attempts="还没处理过",
+                            special_constraints="白天有人",
+                        )
+                    ]
+                ),
+                build_config(
+                    Path(temp_dir) / "hidden_settings_history.jsonl",
+                    service_known_address_matches_probability=0.0,
+                    address_confirmation_direct_correction_probability=1.0,
+                ),
+            )
+
+            generated = tool.generate_for_scenario(scenario)
+
+            self.assertEqual(generated.customer.address, actual_address)
+            self.assertTrue(generated.hidden_context["service_known_address"])
+            self.assertEqual(generated.hidden_context["service_known_address_value"], known_address)
+            self.assertFalse(generated.hidden_context["service_known_address_matches_actual"])
+            self.assertEqual(generated.hidden_context["service_known_address_correction_value"], actual_address)
+
+    def test_frontend_auto_empty_known_address_forces_unknown_service_address(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = build_base_scenario()
+            scenario = base.with_generated_hidden_settings(
+                customer=base.customer,
+                request=base.request,
+                hidden_context={
+                    **dict(base.hidden_context),
+                    "frontend_auto_address_policy_enabled": True,
+                    "frontend_auto_configured_known_address": "",
+                },
+            )
+            tool = HiddenSettingsTool(
+                SequenceFakeClient(
+                    [
+                        build_candidate(
+                            full_name="赵欣",
+                            surname="赵",
+                            phone="13876543210",
+                            address="江苏省扬州市宝应县安宜镇宝应碧桂园3幢5层502室",
+                            persona="配合度正常。",
+                            speech_style="表达直接。",
+                            issue="空气能热水机不出热水。",
+                            desired_resolution="安排师傅上门维修。",
+                            availability="周六下午",
+                            emotion="平静",
+                            urgency="中",
+                            prior_attempts="还没处理过",
+                            special_constraints="白天有人",
+                        )
+                    ]
+                ),
+                build_config(
+                    Path(temp_dir) / "hidden_settings_history.jsonl",
+                    service_known_address_probability=1.0,
+                ),
+            )
+
+            generated = tool.generate_for_scenario(scenario)
+
+            self.assertFalse(generated.hidden_context["service_known_address"])
+            self.assertEqual(generated.hidden_context["service_known_address_value"], "")
 
     def test_reply_noise_target_probabilities_scale_with_total_probability(self):
         with tempfile.TemporaryDirectory() as temp_dir:

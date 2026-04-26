@@ -47,6 +47,7 @@ class DialogueOrchestrator:
             model=config.service_agent_model,
             temperature=config.default_temperature,
             ok_prefix_probability=config.service_ok_prefix_probability,
+            query_prefix_weights=config.service_query_prefix_weights,
             product_routing_enabled=config.product_routing_enabled,
             product_routing_apply_probability=config.product_routing_apply_probability,
         )
@@ -101,6 +102,12 @@ class DialogueOrchestrator:
                 model_intent_inference_used=bool(
                     opening_action.get("used_model_intent_inference", False)
                 ),
+                model_intent_inference_attempted=bool(
+                    opening_action.get("model_intent_inference_attempted", opening_action.get("used_model_intent_inference", False))
+                ),
+                model_intent_inference_unapplied=bool(
+                    opening_action.get("model_intent_inference_unapplied", False)
+                ),
             )
         )
         if self.show_dialogue_progress:
@@ -108,8 +115,8 @@ class DialogueOrchestrator:
                 SERVICE_SPEAKER,
                 1,
                 opening_action["reply"],
-                used_model_intent_inference=bool(
-                    opening_action.get("used_model_intent_inference", False)
+                model_intent_inference_attempted=bool(
+                    opening_action.get("model_intent_inference_attempted", opening_action.get("used_model_intent_inference", False))
                 ),
             )
 
@@ -138,13 +145,14 @@ class DialogueOrchestrator:
                         round_index=round_index,
                     )
                 )
-                if self.service_agent.policy.should_insert_address_ie_function_call(
+                service_policy = getattr(self.service_agent, "policy", None)
+                if service_policy and service_policy.should_insert_address_ie_function_call(
                     user_text=user_action["reply"],
                     transcript=transcript,
                     runtime_state=runtime_state,
                 ):
                     transcript[-1].post_display_lines.append(
-                        self.service_agent.policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY
+                        service_policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY
                     )
                     transcript[-1].post_display_lines.append(
                         format_address_observation_line(
@@ -177,6 +185,12 @@ class DialogueOrchestrator:
                         model_intent_inference_used=bool(
                             service_action.get("used_model_intent_inference", False)
                         ),
+                        model_intent_inference_attempted=bool(
+                            service_action.get("model_intent_inference_attempted", service_action.get("used_model_intent_inference", False))
+                        ),
+                        model_intent_inference_unapplied=bool(
+                            service_action.get("model_intent_inference_unapplied", False)
+                        ),
                     )
                 )
                 if self.show_dialogue_progress and service_action["reply"]:
@@ -184,8 +198,8 @@ class DialogueOrchestrator:
                         SERVICE_SPEAKER,
                         round_index,
                         service_action["reply"],
-                        used_model_intent_inference=bool(
-                            service_action.get("used_model_intent_inference", False)
+                        model_intent_inference_attempted=bool(
+                            service_action.get("model_intent_inference_attempted", service_action.get("used_model_intent_inference", False))
                         ),
                     )
 
@@ -268,9 +282,11 @@ class DialogueOrchestrator:
         text: str,
         *,
         used_model_intent_inference: bool = False,
+        model_intent_inference_attempted: bool | None = None,
     ) -> None:
         round_label = str(round_index)
-        if speaker == SERVICE_SPEAKER and used_model_intent_inference:
+        attempted = used_model_intent_inference if model_intent_inference_attempted is None else model_intent_inference_attempted
+        if speaker == SERVICE_SPEAKER and attempted:
             round_label = f"{round_label}*"
         print(f"[{round_label}] {display_speaker(speaker)}: {text}")
 

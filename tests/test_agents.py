@@ -124,6 +124,11 @@ class RecordingRoutingClient:
                 "prompt_key": "capacity_or_hp",
                 "answer_key": "capacity.below_threshold",
             }
+        if "当前 prompt_key：usage_scene" in user_content:
+            return {
+                "prompt_key": "usage_scene",
+                "answer_key": "scene.family",
+            }
         if "当前 prompt_key：purchase_or_property" in user_content:
             return {
                 "prompt_key": "purchase_or_property",
@@ -315,6 +320,72 @@ class UserAgentTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("750升以下", result["reply"])
         self.assertNotIn("匹", result["reply"])
+
+    def test_respond_replaces_product_routing_reply_that_conflicts_with_plan(self):
+        scenario = build_scenario()
+        scenario.hidden_context["product_routing_plan"] = {
+            "enabled": True,
+            "result": "家用 + 可直接确认机型",
+            "trace": ["scene.family"],
+            "summary": "scene.family -> 家用 + 可直接确认机型",
+            "steps": [
+                {
+                    "prompt_key": "usage_scene",
+                    "prompt": "请问空气能是在哪里使用的呢？家庭、别墅、公寓、理发店还是其他地方呢？",
+                    "answer_key": "scene.family",
+                    "answer_value": "家庭使用",
+                    "answer_instruction": "自然表达空气能是在家庭场所使用。",
+                }
+            ],
+        }
+        agent = UserAgent(
+            ReplyClient("这个我不太清楚，应该不是家里用的吧。"),
+            model="qwen3-32b",
+            temperature=0.7,
+            second_round_include_issue_probability=0.5,
+        )
+
+        result = agent.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(
+                    speaker="service",
+                    text="请问空气能是在哪里使用的呢？家庭、别墅、公寓、理发店还是其他地方呢？",
+                    round_index=4,
+                )
+            ],
+            round_index=5,
+        )
+
+        self.assertIn(result["reply"], {"家庭使用", "在家庭用。"})
+        self.assertNotIn("不太清楚", result["reply"])
+        self.assertNotIn("不是", result["reply"])
+
+    def test_respond_forces_air_energy_when_auto_water_heater_type_selection(self):
+        scenario = build_scenario()
+        scenario.product.category = "热水器"
+        scenario.hidden_context["ivr_product_kind"] = "water_heater"
+        agent = UserAgent(
+            ReplyClient("是电热水器。"),
+            model="qwen3-32b",
+            temperature=0.7,
+            second_round_include_issue_probability=0.5,
+        )
+
+        result = agent.respond(
+            scenario=scenario,
+            transcript=[
+                DialogueTurn(
+                    speaker="service",
+                    text="好的，请问您的热水器是空气能热水器，还是燃气热水器、还是电热水器？",
+                    round_index=2,
+                )
+            ],
+            round_index=3,
+        )
+
+        self.assertEqual(result["reply"], "空气能的。")
+        self.assertFalse(result["call_complete"])
 
     async def test_respond_async_forces_numeric_satisfaction_rating(self):
         agent = UserAgent(
@@ -735,7 +806,7 @@ class ServiceAgentTests(unittest.TestCase):
         self.assertIn("房子自己就有", system_prompt)
         self.assertIn("purchase.property_bundle", system_prompt)
 
-    def test_product_routing_model_prompt_contains_capacity_disambiguation(self):
+    def test_product_routing_model_prompt_contains_usage_scene_disambiguation(self):
         client = RecordingRoutingClient()
         agent = ServiceAgent(
             client,
@@ -745,16 +816,16 @@ class ServiceAgentTests(unittest.TestCase):
         )
 
         agent._infer_product_routing_intent_with_model(
-            prompt_key="capacity_or_hp",
-            user_text="七八百升吧",
+            prompt_key="usage_scene",
+            user_text="家里用的",
             user_round_index=6,
         )
 
         system_prompt = str(client.calls[0]["messages"][0]["content"])
-        self.assertIn("五六百升", system_prompt)
-        self.assertIn("七八百升", system_prompt)
+        self.assertIn("scene.family", system_prompt)
+        self.assertIn("scene.villa_apartment_barber", system_prompt)
+        self.assertIn("scene.other_unknown", system_prompt)
         self.assertIn("answer_key 必须属于当前 prompt_key", system_prompt)
-        self.assertIn("三四匹", system_prompt)
 
     def test_service_agent_uses_model_fallback_for_opening_intent(self):
         client = RecordingOpeningClient()

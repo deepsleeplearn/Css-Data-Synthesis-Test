@@ -5,7 +5,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -69,6 +69,7 @@ class FrontendServerTests(unittest.TestCase):
             service_agent_model="gpt-4o",
             default_temperature=0.0,
             service_ok_prefix_probability=0.0,
+            service_query_prefix_weights={"好的": 0.0, "嗯嗯": 0.0, "了解了": 0.0, "": 1.0},
             max_rounds=6,
             installation_request_probability=0.5,
         )
@@ -152,6 +153,27 @@ class FrontendServerTests(unittest.TestCase):
         payload = response.json()
         self.assertIn("known_address", payload)
         self.assertRegex(payload["known_address"], r"(省|市).*(区|县|市|镇).*(街道|镇).*(幢|号|栋|座|楼)")
+
+    def test_mock_known_address_auto_mode_can_return_empty_by_env_probability(self):
+        self._login()
+        frontend_server.config.service_known_address_probability = 0.0
+
+        response = self.client.get(
+            "/api/mock-known-address",
+            params={"scenario_id": "frontend_case", "auto_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["known_address"], "")
+
+    def test_mock_known_address_manual_mode_ignores_auto_empty_probability(self):
+        self._login()
+        frontend_server.config.service_known_address_probability = 0.0
+
+        response = self.client.get("/api/mock-known-address", params={"scenario_id": "frontend_case"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertRegex(response.json()["known_address"], r"(省|市).*(区|县|市|镇).*(街道|镇).*(幢|号|栋|座|楼)")
 
     def test_fault_issue_categories_endpoint_returns_repair_reference_keys(self):
         self._login()
@@ -673,6 +695,211 @@ class FrontendServerTests(unittest.TestCase):
             base_scenario,
             use_utterance_reference=True,
         )
+
+    def test_auto_generated_issue_is_preserved_with_manual_product_configuration(self):
+        self._login()
+        frontend_server.config.openai_api_key = "test-key"
+        base_scenario = frontend_server.factory.load_from_file(Path(self.temp_dir.name) / "seed_scenarios.json")[0]
+        generated_scenario = base_scenario.with_generated_hidden_settings(
+            customer=base_scenario.customer,
+            request=replace(
+                base_scenario.request,
+                request_type="fault",
+                issue="空气能热水机开机后一直报E1故障码。",
+                desired_resolution="希望尽快安排师傅上门检修。",
+            ),
+            hidden_context=dict(base_scenario.hidden_context),
+        )
+
+        with patch("frontend.server.HiddenSettingsTool") as tool_cls:
+            tool_cls.return_value.generate_for_scenario.return_value = generated_scenario
+            start_response = self.client.post(
+                "/api/session/start",
+                json={
+                    "auto_generate_hidden_settings": True,
+                    "product_category": "空气能热水机",
+                    "request_type": "fault",
+                },
+            )
+
+        self.assertEqual(start_response.status_code, 200)
+        session = frontend_server.sessions[start_response.json()["session_id"]]
+        self.assertEqual(session["scenario"].request.issue, "空气能热水机开机后一直报E1故障码。")
+        self.assertEqual(session["scenario"].request.desired_resolution, "希望尽快安排师傅上门检修。")
+
+    def test_auto_mode_ivr_product_kind_and_opening_reply_plan_follow_weights(self):
+        frontend_server.config.auto_mode_ivr_product_kind_weights = {
+            "air_energy": 0.0,
+            "water_heater": 1.0,
+        }
+        frontend_server.config.auto_mode_water_heater_opening_reply_weights = {
+            "confirm": 0.0,
+            "change_brand": 0.0,
+            "change_product_type": 0.0,
+            "change_request": 1.0,
+            "change_brand_request": 0.0,
+        }
+
+        req, product_kind = frontend_server._auto_mode_ivr_request(
+            frontend_server.StartSessionRequest(request_type="fault")
+        )
+        self.assertEqual(product_kind, "water_heater")
+        self.assertEqual(req.product_category, "热水器")
+        self.assertEqual(req.ivr_utterance, "热水器需要维修")
+
+        base_scenario = frontend_server.factory.load_from_file(Path(self.temp_dir.name) / "seed_scenarios.json")[0]
+        scenario = replace(
+            base_scenario,
+            product=replace(base_scenario.product, category="热水器"),
+            request=replace(base_scenario.request, request_type="fault"),
+            hidden_context={
+                **dict(base_scenario.hidden_context),
+                "ivr_product_kind": "water_heater",
+                "ivr_opening_overridden": True,
+            },
+        )
+
+        frontend_server._attach_auto_mode_opening_reply_plan(scenario)
+
+        self.assertEqual(
+            scenario.hidden_context["auto_mode_water_heater_opening_reply_strategy"],
+            "change_request",
+        )
+        self.assertEqual(scenario.hidden_context["auto_mode_water_heater_opening_reply"], "不是，是安装。")
+        preview_lines = frontend_server._build_auto_mode_preview_lines(scenario)
+        self.assertTrue(any("用户品牌品类确认策略" in line and "不是，是安装。" in line for line in preview_lines))
+
+    def test_auto_mode_preview_uses_actual_air_energy_category_when_ivr_kind_is_empty(self):
+        base_scenario = frontend_server.factory.load_from_file(Path(self.temp_dir.name) / "seed_scenarios.json")[0]
+        scenario = replace(
+            base_scenario,
+            product=replace(base_scenario.product, category="空气能热水机"),
+            request=replace(base_scenario.request, request_type="fault"),
+            hidden_context=dict(base_scenario.hidden_context),
+        )
+
+        preview_lines = frontend_server._build_auto_mode_preview_lines(scenario)
+
+        self.assertIn("IVR首轮: 美的空气能热水机需要维修", preview_lines)
+        self.assertNotIn("IVR首轮: 美的热水器需要维修", preview_lines)
+
+    def test_known_address_denial_with_correction_inserts_address_ie_before_confirming(self):
+        policy = frontend_server.ServiceDialoguePolicy()
+        runtime_state = frontend_server.ServiceRuntimeState(
+            expected_address_confirmation=True,
+            address_confirmation_started_from_known_address=True,
+            pending_address_confirmation="浙江省宁波市江北区孔浦街道恒大绿洲69号3栋601室",
+        )
+        service_turn = frontend_server.DialogueTurn(
+            speaker=frontend_server.SERVICE_SPEAKER,
+            text="好的，您的地址是浙江省宁波市江北区孔浦街道恒大绿洲69号3栋601室，对吗？",
+            round_index=7,
+        )
+        user_turn = frontend_server.DialogueTurn(
+            speaker=frontend_server.USER_SPEAKER,
+            text="不是，得是四川成都锦江区成龙路街道和平村3组20号。",
+            round_index=8,
+        )
+        observation = {
+            "address": "四川省成都市锦江区成龙路街道和平村3组20号",
+            "error_code": 0,
+            "error_msg": "已成功获取完整地址",
+        }
+
+        with patch("frontend.server.build_address_model_observation", return_value=observation) as mocked_observation:
+            result = frontend_server._append_address_ie_display_lines(
+                policy=policy,
+                turn=user_turn,
+                transcript=[service_turn, user_turn],
+                runtime_state=runtime_state,
+            )
+
+        self.assertEqual(result, observation)
+        mocked_observation.assert_called_once()
+        self.assertIn(policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY, user_turn.post_display_lines)
+        self.assertTrue(any(line.startswith("observation:") for line in user_turn.post_display_lines))
+
+    def test_pending_ie_prediction_uses_current_policy_for_known_address_confirmation(self):
+        policy = frontend_server.ServiceDialoguePolicy()
+        runtime_state = frontend_server.ServiceRuntimeState(
+            expected_address_confirmation=True,
+            address_confirmation_started_from_known_address=True,
+            pending_address_confirmation="浙江省杭州市拱墅区和睦街道幸福花园15栋2单元7楼701室",
+        )
+        service_turn = frontend_server.DialogueTurn(
+            speaker=frontend_server.SERVICE_SPEAKER,
+            text="了解了，您的地址是浙江省杭州市拱墅区和睦街道幸福花园15栋2单元7楼701室，对吗？",
+            round_index=6,
+        )
+        user_turn = frontend_server.DialogueTurn(
+            speaker=frontend_server.USER_SPEAKER,
+            text="是的。",
+            round_index=7,
+        )
+
+        entity_type = frontend_server._predict_ie_entity_type_for_turn(
+            policy=policy,
+            turn=user_turn,
+            transcript=[service_turn, user_turn],
+            runtime_state=runtime_state,
+        )
+
+        self.assertEqual(entity_type, "addressInfo")
+
+    def test_pending_ie_prediction_uses_current_policy_for_phone_keypad_input(self):
+        policy = frontend_server.ServiceDialoguePolicy()
+        runtime_state = frontend_server.ServiceRuntimeState(awaiting_phone_keypad_input=True)
+        service_turn = frontend_server.DialogueTurn(
+            speaker=frontend_server.SERVICE_SPEAKER,
+            text="请您在电话拨号盘上输入您的联系号码，并以#号键结束。",
+            round_index=6,
+        )
+        user_turn = frontend_server.DialogueTurn(
+            speaker=frontend_server.USER_SPEAKER,
+            text="13773341553。",
+            round_index=7,
+        )
+
+        entity_type = frontend_server._predict_ie_entity_type_for_turn(
+            policy=policy,
+            turn=user_turn,
+            transcript=[service_turn, user_turn],
+            runtime_state=runtime_state,
+        )
+
+        self.assertEqual(entity_type, "telephone")
+
+    def test_auto_mode_history_device_request_follows_probability_and_brand_category_weights(self):
+        frontend_server.config.auto_mode_history_device_probability = 1.0
+        frontend_server.config.auto_mode_history_device_brand_weights = {
+            "美的": 0.0,
+            "烈焰": 1.0,
+        }
+        frontend_server.config.auto_mode_history_device_category_weights = {
+            "家用空气能热水机": 1.0,
+            "空气能热水机": 0.0,
+        }
+
+        req = frontend_server._auto_mode_history_device_request(frontend_server.StartSessionRequest())
+
+        self.assertEqual(req.history_device_brand, "烈焰")
+        self.assertEqual(req.history_device_category, "空气能热水机")
+        self.assertRegex(req.history_device_purchase_date, r"^\d{4}-\d{2}-\d{2}$")
+
+    def test_auto_mode_history_device_request_can_clear_history_by_probability(self):
+        frontend_server.config.auto_mode_history_device_probability = 0.0
+
+        req = frontend_server._auto_mode_history_device_request(
+            frontend_server.StartSessionRequest(
+                history_device_brand="美的",
+                history_device_category="家用空气能热水机",
+                history_device_purchase_date="2024-01-02",
+            )
+        )
+
+        self.assertEqual(req.history_device_brand, "")
+        self.assertEqual(req.history_device_category, "")
+        self.assertEqual(req.history_device_purchase_date, "")
 
     def test_rewind_endpoint_restores_session_snapshot_and_reopens_session(self):
         self._login()

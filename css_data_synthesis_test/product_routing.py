@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import re
+import copy
 from typing import Any
 
 from css_data_synthesis_test.schemas import DialogueTurn, SERVICE_SPEAKER, normalize_speaker
@@ -10,13 +11,23 @@ from css_data_synthesis_test.schemas import DialogueTurn, SERVICE_SPEAKER, norma
 ROUTING_RESULT_HOME = "家用 + 可直接确认机型"
 ROUTING_RESULT_BUILDING = "楼宇 + 可直接确认机型"
 ROUTING_RESULT_HUMAN = "转人工"
+ROUTING_RESULT_DIRECT = "可直接确认归属与机型"
 
-PROMPT_BRAND_OR_SERIES = "请问您的空气能热水器具体是什么品牌或系列的呢？"
+PROMPT_BRAND_OR_SERIES = "请问您的空气能具体是什么品牌或系列的呢？"
 PROMPT_USAGE_PURPOSE = "请问是生活用水加采暖使用，还是单独生活用水，或者单独采暖的呢？"
-PROMPT_USAGE_SCENE = "请问是在家庭、别墅、公寓或理发店使用的吗？"
+PROMPT_USAGE_SCENE = "请问空气能是在哪里使用的呢？家庭、别墅、公寓、理发店还是其他地方呢？"
 PROMPT_PURCHASE_OR_PROPERTY = "请问是您自己购买的，还是楼盘配套赠送的呢？"
 PROMPT_PROPERTY_YEAR = "请问是21年之前的楼盘，还是之后的呢？"
 PROMPT_CAPACITY = "请问机器是多少升的，或者多少匹数的呢？"
+PROMPT_HISTORY_DEVICE_CONFIRMATION = "请问是您名下查询到的空气能设备吗？"
+PRODUCT_ROUTING_WEIGHT_CONTEXT_KEYS = {
+    "entry": "product_routing_entry_weights",
+    "brand_series": "product_routing_brand_series_weights",
+    "usage_scene": "product_routing_usage_scene_weights",
+    "purchase_or_property": "product_routing_purchase_or_property_weights",
+    "property_year": "product_routing_property_year_weights",
+    "history_confirmation": "product_routing_history_confirmation_weights",
+}
 PRODUCT_ROUTING_ALLOWED_ANSWER_KEYS = {
     "brand_or_series": {
         "brand_series.colmo",
@@ -33,9 +44,16 @@ PRODUCT_ROUTING_ALLOWED_ANSWER_KEYS = {
         "purpose.both",
     },
     "usage_scene": {
+        "scene.family",
+        "scene.villa_apartment_barber",
+        "scene.other_unknown",
         "scene.yes",
         "scene.no",
         "scene.unknown",
+    },
+    "history_device_confirmation": {
+        "history_device.yes",
+        "history_device.no_unknown",
     },
     "capacity_or_hp": {
         "capacity.above_threshold",
@@ -65,6 +83,31 @@ BRAND_SERIES_WEIGHTS = {
     "home_series": 0.40,
     "lieyan": 0.22,
 }
+COLMO_HOMOPHONE_TOKENS = ("COLMO", "科目", "科慕", "可么", "可木", "可慕", "扣摸", "扣慕")
+LIEYAN_HOMOPHONE_TOKENS = ("烈焰", "烈炎", "列焰", "列炎", "莲焰", "莲炎", "莲叶", "连焰", "连炎", "连叶")
+COOLING_OR_LITTLE_SWAN_HOMOPHONE_TOKENS = (
+    "酷风",
+    "库风",
+    "酷丰",
+    "苦风",
+    "小天鹅",
+    "小天娥",
+    "小天额",
+)
+HOME_SERIES_HOMOPHONE_TOKENS = (
+    "真暖",
+    "真蓝",
+    "真省",
+    "真神",
+    "雪焰",
+    "雪燕",
+    "暖家",
+    "暖佳",
+    "煤改电",
+    "煤改点",
+    "真享",
+    "真想",
+)
 MODEL_LOOKUP_WEIGHTS = {
     "home": 0.43,
     "unknown": 0.15,
@@ -76,15 +119,10 @@ UNKNOWN_PURPOSE_WEIGHTS = {
     "water": 0.5,
     "both": 0.2,
 }
-HEATING_SCENE_WEIGHTS = {
-    "yes": 0.62,
-    "no": 0.22,
-    "unknown": 0.16,
-}
-UNKNOWN_SCENE_WEIGHTS = {
-    "yes": 0.48,
-    "unknown": 0.26,
-    "no": 0.26,
+USAGE_SCENE_WEIGHTS = {
+    "family": 0.56,
+    "villa_apartment_barber": 0.2,
+    "other_unknown": 0.24,
 }
 PURCHASE_OR_PROPERTY_WEIGHTS = {
     "self_buy": 0.65,
@@ -99,6 +137,10 @@ WATER_CAPACITY_WEIGHTS = {
     "above_threshold": 0.3,
     "below_threshold": 0.5,
     "unknown": 0.2,
+}
+HISTORY_CONFIRMATION_WEIGHTS = {
+    "yes": 0.68,
+    "no_unknown": 0.32,
 }
 COOLING_OR_LITTLE_SWAN_NAMES = ("酷风", "小天鹅")
 HOME_SERIES_NAMES = ("真暖", "真省", "雪焰", "暖家", "煤改电", "真享")
@@ -286,6 +328,37 @@ ROUTING_SCENE_NO_TOKENS = (
     "不属于这个",
     "不属于这种",
 )
+FAMILY_SCENE_TOKENS = (
+    "家庭",
+    "家里",
+    "家用",
+    "自家",
+    "自己家",
+    "家里的",
+    "住宅",
+    "住家",
+)
+BUILDING_SCENE_TOKENS = (
+    "别墅",
+    "公寓",
+    "理发店",
+)
+OTHER_SCENE_TOKENS = (
+    "其他",
+    "别的",
+    "别处",
+    "商用",
+    "工程",
+    "学校",
+    "工厂",
+    "酒店",
+    "宿舍",
+    "医院",
+    "办公",
+    "办公室",
+    "门店",
+    "店里",
+)
 
 
 def _normalize_text(text: str) -> str:
@@ -342,12 +415,22 @@ def _answer_value(rng: random.Random, answer_key: str, *, model_hint: str = "") 
         return "单独生活用水"
     if answer_key == "purpose.both":
         return "生活用水和采暖都有"
+    if answer_key == "scene.family":
+        return "家庭使用"
+    if answer_key == "scene.villa_apartment_barber":
+        return rng.choice(("别墅使用", "公寓使用", "理发店使用"))
+    if answer_key == "scene.other_unknown":
+        return "不清楚具体使用场所"
     if answer_key == "scene.yes":
         return "是家庭/别墅/公寓/理发店使用"
     if answer_key == "scene.no":
         return "不是家庭/别墅/公寓/理发店使用"
     if answer_key == "scene.unknown":
         return "不确定是不是家庭/别墅/公寓/理发店使用"
+    if answer_key == "history_device.yes":
+        return "是查询到的那台设备"
+    if answer_key == "history_device.no_unknown":
+        return "不是或不清楚查询到的设备"
     if answer_key == "purchase.self_buy":
         return "自己购买"
     if answer_key == "purchase.unknown":
@@ -381,9 +464,14 @@ def _answer_instruction(answer_key: str, *, answer_value: str) -> str:
         "purpose.unknown": "优先用一小句直接表达自己不清楚机器用途；不要先猜生活用水还是采暖再反复改口。",
         "purpose.water": "自然表达机器是单独生活用水/洗澡热水用途。",
         "purpose.both": "自然表达机器同时用于生活用水和采暖。",
+        "scene.family": "自然表达空气能是在家庭场所使用，只说这一个明确场所。",
+        "scene.villa_apartment_barber": "自然表达空气能是在别墅、公寓或理发店中的一个场所使用，只能围绕关键信息里的单个场所回答。",
+        "scene.other_unknown": "自然表达空气能是在其他地方使用，或者自己不清楚具体场所。",
         "scene.yes": "自然表达这是用户本人居住或单体经营空间内的使用场景。“公寓”仅指用户自己居住的公寓住房。",
         "scene.no": "自然表达这不是用户本人居住或单体经营空间内的使用场景，不算这里的“公寓”。不要为了回答问题刻意复述提示语里的分类解释。",
         "scene.unknown": "优先用一小句直接表达自己不确定使用场景；不要一边猜是家庭一边又反复否定。",
+        "history_device.yes": "自然确认客服查询到的历史空气能设备就是本次要处理的设备。",
+        "history_device.no_unknown": "自然表达不是查询到的那台设备，或者自己不清楚是否一致。",
         "purchase.self_buy": "自然表达机器是自己购买的。",
         "purchase.unknown": "优先用一小句直接表达自己不清楚是不是自己购买的；不要铺垫太多背景。",
         "purchase.property_bundle": "自然表达机器是楼盘配套赠送的。",
@@ -437,6 +525,75 @@ def _is_generic_midea_brand_expression(text: str) -> bool:
     return normalized == "美的"
 
 
+def _has_air_energy_history_device(hidden_context: dict[str, Any] | None) -> bool:
+    if not isinstance(hidden_context, dict):
+        return False
+    for key in (
+        "product_routing_has_history_device",
+        "has_air_energy_history_device",
+        "air_energy_history_device_exists",
+    ):
+        if isinstance(hidden_context.get(key), bool):
+            return bool(hidden_context.get(key))
+    for key in (
+        "air_energy_history_device",
+        "air_energy_history_device_info",
+        "air_energy_history_equipment",
+        "known_air_energy_device",
+    ):
+        value = hidden_context.get(key)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, dict) and value:
+            return True
+        if isinstance(value, list) and value:
+            return True
+    return False
+
+
+def _history_device_confirmation_prompt(hidden_context: dict[str, Any] | None) -> str:
+    if not isinstance(hidden_context, dict):
+        return PROMPT_HISTORY_DEVICE_CONFIRMATION
+    value = hidden_context.get("air_energy_history_device")
+    if not isinstance(value, dict):
+        value = hidden_context.get("air_energy_history_device_info")
+    if not isinstance(value, dict):
+        return PROMPT_HISTORY_DEVICE_CONFIRMATION
+    brand = str(value.get("brand") or value.get("series") or "").strip()
+    category = str(value.get("category") or value.get("product_category") or "").strip()
+    year = str(value.get("purchase_year") or "").strip()
+    month = str(value.get("purchase_month") or "").strip()
+    purchase_date = str(value.get("purchase_date") or "").strip()
+    if (not year or not month) and purchase_date:
+        match = re.match(r"^(\d{4})-(\d{1,2})-\d{1,2}$", purchase_date)
+        if match:
+            year = match.group(1)
+            month = str(int(match.group(2)))
+    if brand and category and year and month:
+        return f"这边看到您{year}年{month}月有购买一台{brand}{category}，请问是这台吗？"
+    return PROMPT_HISTORY_DEVICE_CONFIRMATION
+
+
+def _routing_weights(
+    hidden_context: dict[str, Any] | None,
+    group: str,
+    default: dict[str, float],
+) -> dict[str, float]:
+    if not isinstance(hidden_context, dict):
+        return dict(default)
+    override = hidden_context.get(PRODUCT_ROUTING_WEIGHT_CONTEXT_KEYS.get(group, ""))
+    if not isinstance(override, dict):
+        return dict(default)
+    weights = dict(default)
+    for key, value in override.items():
+        normalized_key = str(key).strip()
+        if normalized_key in weights:
+            weights[normalized_key] = max(0.0, float(value))
+    if sum(weights.values()) <= 0:
+        return dict(default)
+    return weights
+
+
 def allowed_product_routing_answer_keys(prompt_key: str) -> set[str]:
     return set(PRODUCT_ROUTING_ALLOWED_ANSWER_KEYS.get(str(prompt_key or "").strip(), set()))
 
@@ -445,7 +602,8 @@ def default_unknown_product_routing_answer_key(prompt_key: str) -> str:
     unknown_mapping = {
         "brand_or_series": "entry.unknown",
         "usage_purpose": "purpose.unknown",
-        "usage_scene": "scene.unknown",
+        "usage_scene": "scene.other_unknown",
+        "history_device_confirmation": "history_device.no_unknown",
         "capacity_or_hp": "capacity.unknown",
         "purchase_or_property": "purchase.unknown",
         "property_year": "property_year.unknown",
@@ -794,13 +952,15 @@ def infer_product_routing_answer_key(prompt_key: str, user_text: str) -> str:
         if prompt_key == "brand_or_series":
             if _contains_unknown_intent(compact):
                 return "entry.unknown"
-            if any(token in compact.upper() for token in ("COLMO",)):
+            if "COLMO" in compact.upper() or any(token in compact for token in COLMO_HOMOPHONE_TOKENS[1:]):
                 return "brand_series.colmo"
-            if any(token in compact for token in ("酷风", "小天鹅")):
+            if any(token in compact for token in COOLING_OR_LITTLE_SWAN_HOMOPHONE_TOKENS):
                 return "brand_series.cooling_or_little_swan"
-            if any(token in compact for token in HOME_SERIES_NAMES):
+            if any(token in compact for token in HOME_SERIES_NAMES) or any(
+                token in compact for token in HOME_SERIES_HOMOPHONE_TOKENS
+            ):
                 return "brand_series.home_series"
-            if "烈焰" in compact:
+            if any(token in compact for token in LIEYAN_HOMOPHONE_TOKENS):
                 return "brand_series.lieyan"
             if re.search(r"[A-Za-z]{1,4}\d{1,4}|(?:KF|RSJ)[A-Za-z0-9/\-()]+", compact, flags=re.IGNORECASE):
                 return "entry.model"
@@ -823,15 +983,28 @@ def infer_product_routing_answer_key(prompt_key: str, user_text: str) -> str:
 
         if prompt_key == "usage_scene":
             if _contains_unknown_intent(compact):
-                return "scene.unknown"
+                return "scene.other_unknown"
+            if any(token in compact for token in BUILDING_SCENE_TOKENS):
+                return "scene.villa_apartment_barber"
+            if any(token in compact for token in FAMILY_SCENE_TOKENS):
+                return "scene.family"
+            if compact in ROUTING_SCENE_NO_TOKENS or compact in ROUTING_SCENE_YES_TOKENS:
+                return "scene.other_unknown"
+            if any(token in compact for token in OTHER_SCENE_TOKENS):
+                return "scene.other_unknown"
+            continue
+
+        if prompt_key == "history_device_confirmation":
+            if _contains_unknown_intent(compact):
+                return "history_device.no_unknown"
             if compact in ROUTING_SCENE_NO_TOKENS:
-                return "scene.no"
+                return "history_device.no_unknown"
+            if any(token in compact for token in ("不是这台", "不是查询到的", "不是名下的", "不对")):
+                return "history_device.no_unknown"
             if compact in ROUTING_SCENE_YES_TOKENS:
-                return "scene.yes"
-            if any(token in compact for token in ("不是家庭", "不是家用", "不是别墅", "不是公寓", "不是理发店", "工程", "商用", "学校", "工厂")):
-                return "scene.no"
-            if any(token in compact for token in ("家庭", "家里", "家用", "别墅", "公寓", "理发店")):
-                return "scene.yes"
+                return "history_device.yes"
+            if any(token in compact for token in ("是这台", "就是这台", "是查询到的", "是名下的")):
+                return "history_device.yes"
             continue
 
         if prompt_key == "capacity_or_hp":
@@ -870,52 +1043,106 @@ def infer_product_routing_answer_key(prompt_key: str, user_text: str) -> str:
     return ""
 
 
+def _planned_next_answer_key(
+    hidden_context: dict[str, Any] | None,
+    observed_trace: list[str],
+    *,
+    prompt_key: str,
+) -> str:
+    steps = get_initial_product_routing_steps(hidden_context) or get_product_routing_steps(hidden_context)
+    if not steps or not observed_trace:
+        return ""
+
+    matched_count = 0
+    for step in steps:
+        answer_key = str(step.get("answer_key", "")).strip()
+        if matched_count < len(observed_trace):
+            if answer_key == str(observed_trace[matched_count]).strip():
+                matched_count += 1
+            continue
+        if str(step.get("prompt_key", "")).strip() == prompt_key:
+            return answer_key
+    return ""
+
+
+def planned_product_routing_step(
+    hidden_context: dict[str, Any] | None,
+    observed_trace: list[str],
+    *,
+    prompt_key: str,
+) -> dict[str, Any] | None:
+    steps = get_initial_product_routing_steps(hidden_context) or get_product_routing_steps(hidden_context)
+    if not steps:
+        return None
+
+    matched_count = 0
+    for step in steps:
+        answer_key = str(step.get("answer_key", "")).strip()
+        if matched_count < len(observed_trace):
+            if answer_key == str(observed_trace[matched_count]).strip():
+                matched_count += 1
+            continue
+        if str(step.get("prompt_key", "")).strip() == prompt_key:
+            return copy.deepcopy(step)
+    return None
+
+
+def _planned_next_step(
+    hidden_context: dict[str, Any] | None,
+    observed_trace: list[str],
+    *,
+    prompt_key: str,
+    allowed_answer_keys: set[str],
+    fallback_answer_key: str,
+    rng: random.Random,
+    model_hint: str = "",
+) -> dict[str, str]:
+    planned_step = planned_product_routing_step(
+        hidden_context,
+        observed_trace,
+        prompt_key=prompt_key,
+    )
+    planned_answer_key = str((planned_step or {}).get("answer_key", "")).strip()
+    if planned_answer_key not in allowed_answer_keys:
+        planned_answer_key = fallback_answer_key
+    prompt_by_key = {
+        "usage_scene": PROMPT_USAGE_SCENE,
+        "history_device_confirmation": _history_device_confirmation_prompt(hidden_context),
+        "purchase_or_property": PROMPT_PURCHASE_OR_PROPERTY,
+        "property_year": PROMPT_PROPERTY_YEAR,
+    }
+    return _make_step(
+        prompt_key,
+        prompt_by_key[prompt_key],
+        planned_answer_key,
+        _answer_value(rng, planned_answer_key, model_hint=model_hint),
+    )
+
+
 def next_product_routing_steps_from_observed_trace(
     observed_trace: list[str],
     *,
     model_hint: str = "",
+    hidden_context: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, str]], str]:
     if not observed_trace:
         return [], ""
 
     current_answer_key = observed_trace[-1]
-    previous_answer_key = observed_trace[-2] if len(observed_trace) >= 2 else ""
     rng = _stable_routing_rng("|".join(observed_trace) + f"|{model_hint}")
 
-    if current_answer_key == "entry.unknown":
+    if current_answer_key in {"entry.unknown", "entry.model"}:
         return [
-            _make_step(
-                "usage_purpose",
-                PROMPT_USAGE_PURPOSE,
-                "purpose.unknown",
-                _answer_value(rng, "purpose.unknown", model_hint=model_hint),
+            _planned_next_step(
+                hidden_context,
+                observed_trace,
+                prompt_key="usage_scene",
+                allowed_answer_keys={"scene.family", "scene.villa_apartment_barber", "scene.other_unknown"},
+                fallback_answer_key="scene.other_unknown",
+                rng=rng,
+                model_hint=model_hint,
             )
         ], ""
-
-    if current_answer_key == "entry.model":
-        fallback_model_lookup = infer_model_lookup_answer_key(model_hint)
-        if fallback_model_lookup == "model_lookup.building":
-            return [], ROUTING_RESULT_BUILDING
-        return [
-            _make_step(
-                "purchase_or_property",
-                PROMPT_PURCHASE_OR_PROPERTY,
-                "purchase.self_buy",
-                _answer_value(rng, "purchase.self_buy", model_hint=model_hint),
-            )
-        ], ""
-
-    if current_answer_key in {"model_lookup.home", "model_lookup.unknown"}:
-        return [
-            _make_step(
-                "purchase_or_property",
-                PROMPT_PURCHASE_OR_PROPERTY,
-                "purchase.self_buy",
-                _answer_value(rng, "purchase.self_buy", model_hint=model_hint),
-            )
-        ], ""
-    if current_answer_key == "model_lookup.building":
-        return [], ROUTING_RESULT_BUILDING
 
     if current_answer_key in {"brand_series.colmo", "brand_series.home_series"}:
         return [], ROUTING_RESULT_HOME
@@ -924,80 +1151,65 @@ def next_product_routing_steps_from_observed_trace(
     if current_answer_key == "brand_series.lieyan":
         return [], ROUTING_RESULT_BUILDING
 
-    if current_answer_key == "purpose.heating":
+    if current_answer_key == "scene.family":
+        if _has_air_energy_history_device(hidden_context):
+            return [
+                _planned_next_step(
+                    hidden_context,
+                    observed_trace,
+                    prompt_key="history_device_confirmation",
+                    allowed_answer_keys={"history_device.yes", "history_device.no_unknown"},
+                    fallback_answer_key="history_device.yes",
+                    rng=rng,
+                    model_hint=model_hint,
+                )
+            ], ""
         return [
-            _make_step(
-                "usage_scene",
-                PROMPT_USAGE_SCENE,
-                "scene.yes",
-                _answer_value(rng, "scene.yes", model_hint=model_hint),
-            )
-        ], ""
-    if current_answer_key == "purpose.unknown":
-        return [
-            _make_step(
-                "usage_scene",
-                PROMPT_USAGE_SCENE,
-                "scene.unknown",
-                _answer_value(rng, "scene.unknown", model_hint=model_hint),
-            )
-        ], ""
-    if current_answer_key == "purpose.water":
-        return [
-            _make_step(
-                "capacity_or_hp",
-                PROMPT_CAPACITY,
-                "capacity.unknown",
-                _answer_value(rng, "capacity.unknown", model_hint=model_hint),
-            )
-        ], ""
-    if current_answer_key == "purpose.both":
-        return [], ROUTING_RESULT_BUILDING
-
-    if current_answer_key == "scene.no":
-        return [], ROUTING_RESULT_BUILDING
-    if current_answer_key in {"scene.yes", "scene.unknown"}:
-        if previous_answer_key == "purpose.heating":
-            return [], ROUTING_RESULT_HOME if current_answer_key == "scene.yes" else ROUTING_RESULT_BUILDING
-        return [
-            _make_step(
-                "purchase_or_property",
-                PROMPT_PURCHASE_OR_PROPERTY,
-                "purchase.self_buy",
-                _answer_value(rng, "purchase.self_buy", model_hint=model_hint),
+            _planned_next_step(
+                hidden_context,
+                observed_trace,
+                prompt_key="purchase_or_property",
+                allowed_answer_keys={"purchase.self_buy", "purchase.unknown", "purchase.property_bundle"},
+                fallback_answer_key="purchase.self_buy",
+                rng=rng,
+                model_hint=model_hint,
             )
         ], ""
 
-    if current_answer_key == "capacity.above_threshold":
+    if current_answer_key in {"history_device.no_unknown"}:
+        return [
+            _planned_next_step(
+                hidden_context,
+                observed_trace,
+                prompt_key="purchase_or_property",
+                allowed_answer_keys={"purchase.self_buy", "purchase.unknown", "purchase.property_bundle"},
+                fallback_answer_key="purchase.self_buy",
+                rng=rng,
+                model_hint=model_hint,
+            )
+        ], ""
+    if current_answer_key == "history_device.yes":
+        return [], ROUTING_RESULT_DIRECT
+
+    if current_answer_key in {"scene.villa_apartment_barber", "scene.other_unknown", "scene.no", "scene.unknown"}:
         return [], ROUTING_RESULT_BUILDING
-    if current_answer_key == "capacity.below_threshold":
-        return [
-            _make_step(
-                "purchase_or_property",
-                PROMPT_PURCHASE_OR_PROPERTY,
-                "purchase.self_buy",
-                _answer_value(rng, "purchase.self_buy", model_hint=model_hint),
-            )
-        ], ""
-    if current_answer_key == "capacity.unknown":
-        return [
-            _make_step(
-                "usage_scene",
-                PROMPT_USAGE_SCENE,
-                "scene.unknown",
-                _answer_value(rng, "scene.unknown", model_hint=model_hint),
-            )
-        ], ""
 
     if current_answer_key in {"purchase.self_buy", "purchase.unknown"}:
         return [], ROUTING_RESULT_HOME
     if current_answer_key == "purchase.property_bundle":
         return [
-            _make_step(
-                "property_year",
-                PROMPT_PROPERTY_YEAR,
-                "property_year.before_2021",
-                _answer_value(rng, "property_year.before_2021", model_hint=model_hint),
+            _planned_next_step(
+                hidden_context,
+                observed_trace,
+                prompt_key="property_year",
+                allowed_answer_keys={
+                    "property_year.before_2021",
+                    "property_year.after_2021",
+                    "property_year.unknown",
+                },
+                fallback_answer_key="property_year.before_2021",
+                rng=rng,
+                model_hint=model_hint,
             )
         ], ""
 
@@ -1015,8 +1227,12 @@ def _append_purchase_chain(
     steps: list[dict[str, str]],
     trace: list[str],
     model_hint: str,
+    hidden_context: dict[str, Any] | None = None,
 ) -> str:
-    purchase = _weighted_choice(rng, PURCHASE_OR_PROPERTY_WEIGHTS)
+    purchase = _weighted_choice(
+        rng,
+        _routing_weights(hidden_context, "purchase_or_property", PURCHASE_OR_PROPERTY_WEIGHTS),
+    )
     purchase_answer_key = f"purchase.{purchase}"
     steps.append(
         _make_step(
@@ -1031,7 +1247,10 @@ def _append_purchase_chain(
     if purchase in {"self_buy", "unknown"}:
         return ROUTING_RESULT_HOME
 
-    property_year = _weighted_choice(rng, PROPERTY_YEAR_WEIGHTS)
+    property_year = _weighted_choice(
+        rng,
+        _routing_weights(hidden_context, "property_year", PROPERTY_YEAR_WEIGHTS),
+    )
     property_year_answer_key = f"property_year.{property_year}"
     steps.append(
         _make_step(
@@ -1051,14 +1270,18 @@ def build_product_routing_plan(
     *,
     rng: random.Random | None = None,
     model_hint: str = "",
+    hidden_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_rng = rng or random.Random()
     steps: list[dict[str, str]] = []
     trace: list[str] = []
 
-    entry = _weighted_choice(resolved_rng, ENTRY_WEIGHTS)
+    entry = _weighted_choice(resolved_rng, _routing_weights(hidden_context, "entry", ENTRY_WEIGHTS))
     if entry == "brand_series":
-        brand_choice = _weighted_choice(resolved_rng, BRAND_SERIES_WEIGHTS)
+        brand_choice = _weighted_choice(
+            resolved_rng,
+            _routing_weights(hidden_context, "brand_series", BRAND_SERIES_WEIGHTS),
+        )
         brand_answer_key = f"brand_series.{brand_choice}"
         steps.append(
             _make_step(
@@ -1076,28 +1299,50 @@ def build_product_routing_plan(
             "lieyan": ROUTING_RESULT_BUILDING,
         }[brand_choice]
     elif entry == "model":
-        fallback_lookup_answer_key = infer_model_lookup_answer_key(model_hint)
-        if fallback_lookup_answer_key in {"model_lookup.home", "model_lookup.building", "model_lookup.unknown"}:
-            lookup_result = fallback_lookup_answer_key.removeprefix("model_lookup.")
-        else:
-            lookup_result = _weighted_choice(resolved_rng, MODEL_LOOKUP_WEIGHTS)
-        model_step = _make_step(
-            "brand_or_series",
-            PROMPT_BRAND_OR_SERIES,
-            "entry.model",
-            _answer_value(resolved_rng, "entry.model", model_hint=model_hint),
-        )
-        model_step["post_answer_trace"] = [f"model_lookup.{lookup_result}"]
-        steps.append(model_step)
-        trace.append("entry.model")
-        trace.append(f"model_lookup.{lookup_result}")
-        if lookup_result in {"home", "unknown"}:
-            result = _append_purchase_chain(
-                rng=resolved_rng,
-                steps=steps,
-                trace=trace,
-                model_hint=model_hint,
+        steps.append(
+            _make_step(
+                "brand_or_series",
+                PROMPT_BRAND_OR_SERIES,
+                "entry.model",
+                _answer_value(resolved_rng, "entry.model", model_hint=model_hint),
             )
+        )
+        trace.append("entry.model")
+        scene = _weighted_choice(
+            resolved_rng,
+            _routing_weights(hidden_context, "usage_scene", USAGE_SCENE_WEIGHTS),
+        )
+        scene_answer_key = f"scene.{scene}"
+        steps.append(
+            _make_step(
+                "usage_scene",
+                PROMPT_USAGE_SCENE,
+                scene_answer_key,
+                _answer_value(resolved_rng, scene_answer_key, model_hint=model_hint),
+            )
+        )
+        trace.append(scene_answer_key)
+        if scene == "family":
+            if _has_air_energy_history_device(hidden_context):
+                history_answer_key = "history_device.yes"
+                steps.append(
+                    _make_step(
+                        "history_device_confirmation",
+                        _history_device_confirmation_prompt(hidden_context),
+                        history_answer_key,
+                        _answer_value(resolved_rng, history_answer_key, model_hint=model_hint),
+                    )
+                )
+                trace.append(history_answer_key)
+                result = ROUTING_RESULT_DIRECT
+            else:
+                result = _append_purchase_chain(
+                    rng=resolved_rng,
+                    steps=steps,
+                    trace=trace,
+                    model_hint=model_hint,
+                    hidden_context=hidden_context,
+                )
         else:
             result = ROUTING_RESULT_BUILDING
     else:
@@ -1110,94 +1355,59 @@ def build_product_routing_plan(
             )
         )
         trace.append("entry.unknown")
-        purpose = _weighted_choice(resolved_rng, UNKNOWN_PURPOSE_WEIGHTS)
-        purpose_answer_key = f"purpose.{purpose}"
+        scene = _weighted_choice(
+            resolved_rng,
+            _routing_weights(hidden_context, "usage_scene", USAGE_SCENE_WEIGHTS),
+        )
+        scene_answer_key = f"scene.{scene}"
         steps.append(
             _make_step(
-                "usage_purpose",
-                PROMPT_USAGE_PURPOSE,
-                purpose_answer_key,
-                _answer_value(resolved_rng, purpose_answer_key, model_hint=model_hint),
+                "usage_scene",
+                PROMPT_USAGE_SCENE,
+                scene_answer_key,
+                _answer_value(resolved_rng, scene_answer_key, model_hint=model_hint),
             )
         )
-        trace.append(purpose_answer_key)
+        trace.append(scene_answer_key)
 
-        if purpose == "heating":
-            scene = _weighted_choice(resolved_rng, HEATING_SCENE_WEIGHTS)
-            scene_answer_key = f"scene.{scene}"
-            steps.append(
-                _make_step(
-                    "usage_scene",
-                    PROMPT_USAGE_SCENE,
-                    scene_answer_key,
-                    _answer_value(resolved_rng, scene_answer_key, model_hint=model_hint),
+        if scene == "family":
+            if _has_air_energy_history_device(hidden_context):
+                history_choice = _weighted_choice(
+                    resolved_rng,
+                    _routing_weights(
+                        hidden_context,
+                        "history_confirmation",
+                        HISTORY_CONFIRMATION_WEIGHTS,
+                    ),
                 )
-            )
-            trace.append(scene_answer_key)
-            result = ROUTING_RESULT_HOME if scene == "yes" else ROUTING_RESULT_BUILDING
-        elif purpose == "unknown":
-            scene = _weighted_choice(resolved_rng, UNKNOWN_SCENE_WEIGHTS)
-            scene_answer_key = f"scene.{scene}"
-            steps.append(
-                _make_step(
-                    "usage_scene",
-                    PROMPT_USAGE_SCENE,
-                    scene_answer_key,
-                    _answer_value(resolved_rng, scene_answer_key, model_hint=model_hint),
-                )
-            )
-            trace.append(scene_answer_key)
-            if scene == "no":
-                result = ROUTING_RESULT_BUILDING
-            else:
-                result = _append_purchase_chain(
-                    rng=resolved_rng,
-                    steps=steps,
-                    trace=trace,
-                    model_hint=model_hint,
-                )
-        elif purpose == "water":
-            capacity = _weighted_choice(resolved_rng, WATER_CAPACITY_WEIGHTS)
-            capacity_answer_key = f"capacity.{capacity}"
-            steps.append(
-                _make_step(
-                    "capacity_or_hp",
-                    PROMPT_CAPACITY,
-                    capacity_answer_key,
-                    _answer_value(resolved_rng, capacity_answer_key, model_hint=model_hint),
-                )
-            )
-            trace.append(capacity_answer_key)
-            if capacity == "above_threshold":
-                result = ROUTING_RESULT_BUILDING
-            elif capacity == "below_threshold":
-                result = _append_purchase_chain(
-                    rng=resolved_rng,
-                    steps=steps,
-                    trace=trace,
-                    model_hint=model_hint,
-                )
-            else:
-                scene = _weighted_choice(resolved_rng, UNKNOWN_SCENE_WEIGHTS)
-                scene_answer_key = f"scene.{scene}"
+                history_answer_key = f"history_device.{history_choice}"
                 steps.append(
                     _make_step(
-                        "usage_scene",
-                        PROMPT_USAGE_SCENE,
-                        scene_answer_key,
-                        _answer_value(resolved_rng, scene_answer_key, model_hint=model_hint),
+                        "history_device_confirmation",
+                        _history_device_confirmation_prompt(hidden_context),
+                        history_answer_key,
+                        _answer_value(resolved_rng, history_answer_key, model_hint=model_hint),
                     )
                 )
-                trace.append(scene_answer_key)
-                if scene == "no":
-                    result = ROUTING_RESULT_BUILDING
+                trace.append(history_answer_key)
+                if history_answer_key == "history_device.yes":
+                    result = ROUTING_RESULT_DIRECT
                 else:
                     result = _append_purchase_chain(
                         rng=resolved_rng,
                         steps=steps,
                         trace=trace,
                         model_hint=model_hint,
+                        hidden_context=hidden_context,
                     )
+            else:
+                result = _append_purchase_chain(
+                    rng=resolved_rng,
+                    steps=steps,
+                    trace=trace,
+                    model_hint=model_hint,
+                    hidden_context=hidden_context,
+                )
         else:
             result = ROUTING_RESULT_BUILDING
 
@@ -1223,6 +1433,7 @@ def ensure_product_routing_plan(
 
     existing_plan = get_product_routing_plan(hidden_context)
     if existing_plan:
+        hidden_context.setdefault("product_routing_initial_plan", copy.deepcopy(existing_plan))
         return existing_plan
 
     resolved_rng = rng or random.Random()
@@ -1240,8 +1451,10 @@ def ensure_product_routing_plan(
     plan = build_product_routing_plan(
         rng=resolved_rng,
         model_hint=model_hint,
+        hidden_context=hidden_context,
     )
     hidden_context["product_routing_plan"] = plan
+    hidden_context["product_routing_initial_plan"] = copy.deepcopy(plan)
     hidden_context["product_routing_result"] = str(plan.get("result", "")).strip()
     hidden_context["product_routing_trace"] = list(plan.get("trace", []))
     hidden_context["product_routing_summary"] = str(plan.get("summary", "")).strip()
@@ -1262,8 +1475,21 @@ def get_product_routing_plan(hidden_context: dict[str, Any] | None) -> dict[str,
     return plan
 
 
-def get_product_routing_steps(hidden_context: dict[str, Any] | None) -> list[dict[str, Any]]:
-    plan = get_product_routing_plan(hidden_context)
+def get_initial_product_routing_plan(hidden_context: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(hidden_context, dict):
+        return None
+    plan = hidden_context.get("product_routing_initial_plan")
+    if not isinstance(plan, dict):
+        return None
+    if not bool(plan.get("enabled", False)):
+        return None
+    steps = plan.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return None
+    return plan
+
+
+def _product_routing_steps_from_plan(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not plan:
         return []
     steps = plan.get("steps", [])
@@ -1294,6 +1520,14 @@ def get_product_routing_steps(hidden_context: dict[str, Any] | None) -> list[dic
     return normalized_steps
 
 
+def get_product_routing_steps(hidden_context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    return _product_routing_steps_from_plan(get_product_routing_plan(hidden_context))
+
+
+def get_initial_product_routing_steps(hidden_context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    return _product_routing_steps_from_plan(get_initial_product_routing_plan(hidden_context))
+
+
 def current_product_routing_step(
     transcript: list[DialogueTurn],
     hidden_context: dict[str, Any] | None,
@@ -1311,7 +1545,12 @@ def current_product_routing_step(
             continue
         if matched_index >= len(steps):
             break
-        if _normalize_text(turn.text) != _normalize_text(steps[matched_index]["prompt"]):
+        normalized_turn_text = _normalize_text(turn.text)
+        normalized_step_prompt = _normalize_text(steps[matched_index]["prompt"])
+        if (
+            normalized_turn_text != normalized_step_prompt
+            and not normalized_turn_text.endswith(normalized_step_prompt)
+        ):
             continue
         if index == len(transcript) - 1:
             return steps[matched_index]

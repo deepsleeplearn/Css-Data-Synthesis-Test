@@ -352,6 +352,20 @@ def run_interactive_test(args: argparse.Namespace) -> None:
         scenario = _hydrate_manual_test_scenario_locally(scenario)
     scenario = _configure_manual_test_known_address(scenario)
     scenario.hidden_context["interactive_test_freeform"] = True
+    scenario.hidden_context.update(
+        {
+            "product_routing_entry_weights": dict(config.product_routing_entry_weights),
+            "product_routing_brand_series_weights": dict(config.product_routing_brand_series_weights),
+            "product_routing_usage_scene_weights": dict(config.product_routing_usage_scene_weights),
+            "product_routing_purchase_or_property_weights": dict(
+                config.product_routing_purchase_or_property_weights
+            ),
+            "product_routing_property_year_weights": dict(config.product_routing_property_year_weights),
+            "product_routing_history_confirmation_weights": dict(
+                config.product_routing_history_confirmation_weights
+            ),
+        }
+    )
     ensure_product_routing_plan(
         scenario.hidden_context,
         enabled=config.product_routing_enabled,
@@ -363,6 +377,7 @@ def run_interactive_test(args: argparse.Namespace) -> None:
         model=config.service_agent_model,
         temperature=config.default_temperature,
         ok_prefix_probability=config.service_ok_prefix_probability,
+        query_prefix_weights=config.service_query_prefix_weights,
         product_routing_enabled=config.product_routing_enabled,
         product_routing_apply_probability=config.product_routing_apply_probability,
     )

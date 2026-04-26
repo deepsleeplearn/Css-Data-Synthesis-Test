@@ -24,6 +24,7 @@ def build_config() -> AppConfig:
         service_agent_model="gpt-4o",
         default_temperature=0.7,
         service_ok_prefix_probability=0.0,
+        service_query_prefix_weights={"好的": 0.0, "嗯嗯": 0.0, "了解了": 0.0, "": 1.0},
         second_round_include_issue_probability=0.5,
         max_rounds=4,
         max_concurrency=2,

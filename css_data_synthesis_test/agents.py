@@ -10,7 +10,11 @@ from css_data_synthesis_test.product_routing import (
     ensure_product_routing_plan,
     product_routing_instruction_for_prompt,
 )
-from css_data_synthesis_test.prompts import build_user_agent_messages, next_address_input_value
+from css_data_synthesis_test.prompts import (
+    build_user_agent_messages,
+    is_replying_to_service_opening,
+    next_address_input_value,
+)
 from css_data_synthesis_test.schemas import DialogueTurn, Scenario, SERVICE_SPEAKER
 from css_data_synthesis_test.service_policy import (
     ServiceDialoguePolicy,
@@ -34,6 +38,9 @@ class UserAgent:
     )
     CAPACITY_LITER_PATTERN = re.compile(r"[零一二三四五六七八九十两\d]+\s*升(?:以上|以下)?")
     CAPACITY_HP_PATTERN = re.compile(r"[零一二三四五六七八九十两\d]+\s*匹(?:及以上|以上|以下)?")
+    WATER_HEATER_TYPE_SELECTION_PATTERN = re.compile(
+        r"空气能热水器.*燃气热水器.*电热水器|空气能.*燃气.*电热"
+    )
 
     def __init__(
         self,
@@ -175,6 +182,47 @@ class UserAgent:
             return sanitized
         return text
 
+    @staticmethod
+    def _is_unknown_routing_answer(answer_key: str) -> bool:
+        normalized = str(answer_key or "").strip()
+        return (
+            normalized.endswith(".unknown")
+            or normalized in {"entry.unknown", "scene.other_unknown", "history_device.no_unknown"}
+        )
+
+    @classmethod
+    def _routing_reply_conflicts_with_plan(
+        cls,
+        reply: str,
+        answer_key: str,
+        prompt_key: str = "",
+    ) -> bool:
+        normalized_reply = re.sub(r"\s+", "", str(reply or "").strip())
+        normalized_answer_key = str(answer_key or "").strip()
+        if not normalized_reply or not normalized_answer_key:
+            return False
+        if cls._is_unknown_routing_answer(normalized_answer_key):
+            return False
+        if re.search(r"(不太清楚|不清楚|不知道|不确定|记不清|说不上来|应该不是|可能不是|好像不是)", normalized_reply):
+            return True
+        if str(prompt_key or "").strip() == "usage_scene":
+            if re.search(r"(可能|或者|还是|其他地方|具体是在哪里|具体在哪里)", normalized_reply):
+                return True
+            scene_hits = sum(
+                1
+                for pattern in (r"家里|家庭|家用|自家", r"别墅", r"公寓", r"理发店")
+                if re.search(pattern, normalized_reply)
+            )
+            if scene_hits > 1:
+                return True
+        if normalized_answer_key == "scene.family" and re.search(r"(不是家里|不是家庭|不在家里|不在家庭|不是自家|不算家用)", normalized_reply):
+            return True
+        if normalized_answer_key == "purchase.self_buy" and re.search(r"(不是自己买|不是我买|楼盘|开发商|送的|配套)", normalized_reply):
+            return True
+        if normalized_answer_key == "purchase.property_bundle" and re.search(r"(自己买|我买|单独买|后来买)", normalized_reply):
+            return True
+        return False
+
     @classmethod
     def _fallback_reply_for_turn(
         cls,
@@ -187,10 +235,19 @@ class UserAgent:
         if routing_step:
             answer_value = str(routing_step.get("answer_value", "")).strip()
             answer_key = str(routing_step.get("answer_key", "")).strip()
+            prompt_key = str(routing_step.get("prompt_key", "")).strip()
             if answer_key.startswith("capacity.") and answer_value:
                 suffix_options = ("吧", "呢", "")
                 suffix = cls._stable_pick(f"{seed}:capacity", suffix_options)
                 return f"{answer_value}{suffix}".strip()
+            if prompt_key == "usage_scene" and answer_value:
+                return cls._stable_pick(
+                    f"{seed}:usage-scene",
+                    (
+                        answer_value,
+                        f"在{answer_value.replace('使用', '')}用。",
+                    ),
+                )
             if answer_value:
                 return cls._stable_pick(
                     f"{seed}:routing",
@@ -277,6 +334,33 @@ class UserAgent:
             return cls._stable_pick(f"{seed}:closing", ("好的。", "知道了。", "行，知道了。"))
         return ""
 
+    @staticmethod
+    def _planned_water_heater_opening_reply(
+        scenario: Scenario,
+        transcript: list[DialogueTurn],
+        round_index: int,
+    ) -> str:
+        hidden_context = scenario.hidden_context if isinstance(scenario.hidden_context, dict) else {}
+        if str(hidden_context.get("ivr_product_kind", "")).strip() != "water_heater":
+            return ""
+        if not is_replying_to_service_opening(scenario, transcript, round_index):
+            return ""
+        return str(hidden_context.get("auto_mode_water_heater_opening_reply", "")).strip()
+
+    @classmethod
+    def _planned_water_heater_type_reply(
+        cls,
+        scenario: Scenario,
+        transcript: list[DialogueTurn],
+    ) -> str:
+        hidden_context = scenario.hidden_context if isinstance(scenario.hidden_context, dict) else {}
+        if str(hidden_context.get("ivr_product_kind", "")).strip() != "water_heater":
+            return ""
+        last_service_text = cls._last_service_text(transcript)
+        if not cls.WATER_HEATER_TYPE_SELECTION_PATTERN.search(last_service_text or ""):
+            return ""
+        return "空气能的。"
+
     @classmethod
     def _sanitize_reply_for_turn(
         cls,
@@ -293,6 +377,14 @@ class UserAgent:
             return cls._sanitize_address_collection_reply(text)
         if routing_step:
             text = cls._sanitize_capacity_reply(text, str(routing_step.get("answer_value", "")).strip())
+            if cls._routing_reply_conflicts_with_plan(
+                text,
+                str(routing_step.get("answer_key", "")).strip(),
+                str(routing_step.get("prompt_key", "")).strip(),
+            ):
+                fallback = cls._fallback_reply_for_turn(scenario, transcript, last_service_text)
+                if fallback:
+                    text = fallback
 
         narrow_prompt = bool(routing_step) or any(
             predicate(last_service_text)
@@ -328,6 +420,18 @@ class UserAgent:
                 "reply": self._forced_satisfaction_rating(scenario, round_index),
                 "call_complete": True,
             }
+        planned_type_reply = self._planned_water_heater_type_reply(scenario, transcript)
+        if planned_type_reply:
+            return {
+                "reply": planned_type_reply,
+                "call_complete": False,
+            }
+        planned_reply = self._planned_water_heater_opening_reply(scenario, transcript, round_index)
+        if planned_reply:
+            return {
+                "reply": planned_reply,
+                "call_complete": False,
+            }
         second_round_reply_strategy = resolve_second_round_reply_strategy(
             scenario_id=scenario.scenario_id,
             hidden_context=scenario.hidden_context,
@@ -360,6 +464,18 @@ class UserAgent:
             return {
                 "reply": self._forced_satisfaction_rating(scenario, round_index),
                 "call_complete": True,
+            }
+        planned_type_reply = self._planned_water_heater_type_reply(scenario, transcript)
+        if planned_type_reply:
+            return {
+                "reply": planned_type_reply,
+                "call_complete": False,
+            }
+        planned_reply = self._planned_water_heater_opening_reply(scenario, transcript, round_index)
+        if planned_reply:
+            return {
+                "reply": planned_reply,
+                "call_complete": False,
             }
         second_round_reply_strategy = resolve_second_round_reply_strategy(
             scenario_id=scenario.scenario_id,
@@ -401,6 +517,7 @@ class ServiceAgent:
         model: str,
         temperature: float,
         ok_prefix_probability: float = 1.0,
+        query_prefix_weights: dict[str, float] | None = None,
         product_routing_enabled: bool = True,
         product_routing_apply_probability: float = 1.0,
     ):
@@ -411,6 +528,7 @@ class ServiceAgent:
         self.product_routing_apply_probability = max(0.0, min(1.0, float(product_routing_apply_probability)))
         self.policy = ServiceDialoguePolicy(
             ok_prefix_probability=ok_prefix_probability,
+            query_prefix_weights=query_prefix_weights,
             address_inference_callback=self._infer_address_candidate_with_model,
             address_collection_acceptance_inference_callback=self._infer_address_collection_acceptance_with_model,
             surname_inference_callback=self._infer_surname_with_model,
@@ -785,6 +903,8 @@ class ServiceAgent:
 8. “是的，是安装”“对，但是安装”“不是维修，是安装”“海尔的，要安装”“是空气能热水器” 这些都不是纯确认。
 9. 忽略寒暄和语气词，例如“你好啊”“您好啊”“嗯”“哦”“啊”“呀”“哈”“呢”“吧”“嘛”，只看真正表达的品牌/诉求/类型信息。
 10. “你好啊，是安装啊。”“嗯，是安装的。”“您好，不是维修，是安装。” 都属于修改诉求，intent 必须是 no。
+11. “科目”“科慕”“可么”“扣摸”是 COLMO 的常见同音/近音说法，提取品牌时统一输出 COLMO。
+12. “打不开了”“不加热”“没反应”等是故障现象，不是品牌，也不是修改诉求；如果当前确认诉求已经是维修，不要因为故障描述输出 request_type=fault。
 
 示例：
 - “对，是美的的，维修” -> {"intent":"yes","brand":"","request_type":"","heater_type":""}
@@ -799,6 +919,7 @@ class ServiceAgent:
 - “是空气能热水器” -> {"intent":"no","brand":"","request_type":"","heater_type":"air_energy"}
 - “对，是空气能热水器。” -> {"intent":"no","brand":"","request_type":"","heater_type":"air_energy"}
 - “海尔的，安装空气能” -> {"intent":"no","brand":"海尔","request_type":"installation","heater_type":"air_energy"}
+- “是的，科目的设备打不开了。” -> {"intent":"no","brand":"COLMO","request_type":"","heater_type":""}
 
 只返回 JSON：
 {
@@ -860,6 +981,8 @@ class ServiceAgent:
 5. 如果当前确认诉求是维修，而用户说“是安装”“安装”，就输出 {"intent":"no","request_type":"installation"}。
 6. 如果当前确认诉求是安装，而用户说“是维修”“维修”，就输出 {"intent":"no","request_type":"fault"}。
 7. 忽略寒暄和语气词，例如“你好啊”“您好啊”“嗯”“啊”“呀”“哈”“呢”，只看真正表达的品牌/诉求/类型信息。
+8. “科目”“科慕”“可么”“扣摸”是 COLMO 的常见同音/近音说法，提取品牌时统一输出 COLMO。
+9. “打不开了”“不加热”“没反应”等是故障现象，不是品牌，也不是修改诉求；如果当前确认诉求已经是维修，不要因为故障描述输出 request_type=fault。
 
 只返回 JSON：
 {
@@ -878,7 +1001,8 @@ class ServiceAgent:
 - “是维修。” -> {"intent":"no","brand":"","request_type":"fault","heater_type":""}
 - “维修。” -> {"intent":"no","brand":"","request_type":"fault","heater_type":""}
 - “对，是安装。” -> {"intent":"no","brand":"","request_type":"installation","heater_type":""}
-- “对，是维修。” -> {"intent":"no","brand":"","request_type":"fault","heater_type":""}"""
+- “对，是维修。” -> {"intent":"no","brand":"","request_type":"fault","heater_type":""}
+- “是的，科目的设备打不开了。” -> {"intent":"no","brand":"COLMO","request_type":"","heater_type":""}"""
             repaired_payload = self.client.complete_json(
                 model=self.model,
                 messages=[
@@ -914,6 +1038,8 @@ class ServiceAgent:
 5. 如果用户说“空气能热水器”“燃气热水器”“电热水器”，heater_type 必须输出对应值。
 6. 没明确说就留空。
 7. 忽略寒暄和语气词，例如“你好啊”“您好”“嗯”“啊”“呀”，不要因为这些词漏掉后面的安装/维修信息。
+8. “科目”“科慕”“可么”“扣摸”是 COLMO 的常见同音/近音说法，提取品牌时统一输出 COLMO。
+9. “打不开了”“不加热”“没反应”等是故障现象，不是品牌，也不是修改诉求；如果当前确认诉求已经是维修，不要因为故障描述输出 request_type=fault。
 
 只返回 JSON：
 {
@@ -1006,7 +1132,7 @@ class ServiceAgent:
         user_text: str,
         user_round_index: int = 0,
     ) -> dict[str, Any]:
-        system_prompt = """你是家电客服对话里的产品归属分支识别助手。
+        system_prompt = """你是家电客服对话里的空气能产品归属分支识别助手。
 
 任务：
 1. 根据当前客服问题类型和用户原话，判断用户命中了哪个产品归属分支。
@@ -1014,26 +1140,44 @@ class ServiceAgent:
 3. 不要脑补用户没说出的信息。
 4. answer_key 必须属于当前 prompt_key 对应的候选集合；如果拿不准或跨到了别的节点，返回空字符串。
 5. 要忽略常见口头语、犹豫前缀、附带闲聊后再判断真实意图，例如“这个我不清楚，家里人帮我找”“我瞅瞅，单独生活用水的”“应该是送的”“好像是自己买的吧”，都应按核心事实判断，而不是因为前缀口语返回空。
-6. 对 purchase_or_property 节点要特别注意：
+6. 对 brand_or_series 节点要特别注意：
+   - 用户在电话里说品牌/系列时，常会出现同音、近音、方言、口误、错别字、音译写法。你需要按“听起来像哪个候选品牌/系列”判断，但前提是该说法不是另一个明确市面品牌。
+   - 用户表示 COLMO，判为 brand_series.colmo
+   - 如果用户表达的是疑似 COLMO 的中文音译、谐音、近音、口误说法，且该说法不是另一个明确市面品牌，也判为 brand_series.colmo；例如“科目”“科慕”“可么”“可木”“可慕”“扣摸”“扣慕”等。
+   - 但如果用户说的是另一个明确市面品牌或系列，例如海尔、格力、奥克斯、小天鹅、酷风、真暖、真省、雪焰、暖家、煤改电、真享、烈焰等，不能因为发音相近而归为 COLMO，必须按对应分支判断。
+   - 用户表示酷风或小天鹅，判为 brand_series.cooling_or_little_swan
+   - 酷风、小天鹅也要识别听起来像的说法或错别字，例如“库风”“酷丰”“苦风”“小天娥”“小天额”“小天鹅的”。
+   - 用户表示真暖、真省、雪焰、暖家、煤改电、真享，判为 brand_series.home_series
+   - 真暖、真省、雪焰、暖家、煤改电、真享也要识别听起来像的说法或错别字，例如“真蓝/真暖”“真神/真省”“雪燕/雪焰”“暖佳/暖家”“煤改点/煤改电”“真想/真享”。
+   - 用户表示烈焰，判为 brand_series.lieyan
+   - 如果用户表达的是疑似“烈焰”的中文音译、谐音、近音、口误说法，且该说法不是另一个明确市面品牌，也判为 brand_series.lieyan；例如“烈炎”“列焰”“列炎”“莲焰”“莲炎”“莲叶”“连焰”“连炎”“连叶”等。
+   - 用户直接或主动提供具体型号，判为 entry.model
+   - 用户说不清楚、提供不了、只知道是美的，判为 entry.unknown
+7. 对 usage_scene 节点要特别注意：
+   - 家庭、家里、家用、自家、自己家、住宅，判为 scene.family
+   - 别墅、公寓、理发店，判为 scene.villa_apartment_barber
+   - 其他场所、不知道、不清楚，判为 scene.other_unknown
+   - 用户只说“是/不是/对/不对”但没有给出场所，也判为 scene.other_unknown
+8. 对 history_device_confirmation 节点要特别注意：
+   - 用户确认查询到的历史空气能设备就是本次设备，判为 history_device.yes
+   - 用户否定、不确定、不清楚是否一致，判为 history_device.no_unknown
+   - 用户先说“对/是/没错/就是这台”等肯定词，后面补充“买了五六年了/时间差不多/确实买过/是那台老机器”等购买时间或背景信息，也必须判为 history_device.yes。
+   - 像“不是这台”“不对，不是这个”“不是查询到的那台”“不是名下这台”必须判为 history_device.no_unknown；不要因为句子里包含“是这台”三个字就误判为 yes。
+9. 对 purchase_or_property 节点要特别注意：
    - “自己购买 / 我买的 / 后来单独买的” 才是 purchase.self_buy
    - “买房送的 / 交房就有 / 房子原来就有 / 开发商配的 / 楼盘自带” 都是 purchase.property_bundle
    - “应该是送的 / 好像送的 / 可能是送的 / 估计是送的” 也按 purchase.property_bundle
    - “应该是自己买的 / 好像自己买的 / 估计自己买的” 按 purchase.self_buy
    - 句子里出现“自己”这个词，不等于就是 self_buy；例如“房子自己就有”应判为 purchase.property_bundle
-7. 对 capacity_or_hp 节点要特别注意：
-   - 明确在 750 升以下或 3 匹以下，判为 capacity.below_threshold，例如“五六百升”“四五百升”“两匹多”
-   - 明确在 750 升以上或 3 匹及以上，判为 capacity.above_threshold，例如“八百升”“三匹”“3匹以上”
-   - 如果口语范围跨过阈值，统一判为 capacity.unknown，例如“七八百升”“两三匹”“三四匹”
-8. 对 property_year 节点要特别注意：
+10. 对 property_year 节点要特别注意：
    - “21年前 / 2020年 / 19年的楼盘 / 2018年交付” 判为 property_year.before_2021
    - “21年后 / 2022年 / 22年的楼盘” 判为 property_year.after_2021
    - “忘了 / 记不清 / 太久了不记得 / 说不好 / 不清楚”，且用户没提供可辅助判断的大概年份时，判为 property_year.unknown
 
 可选 prompt_key / answer_key：
 - brand_or_series: brand_series.colmo | brand_series.cooling_or_little_swan | brand_series.home_series | brand_series.lieyan | entry.model | entry.unknown
-- usage_purpose: purpose.heating | purpose.unknown | purpose.water | purpose.both
-- usage_scene: scene.yes | scene.no | scene.unknown
-- capacity_or_hp: capacity.above_threshold | capacity.below_threshold | capacity.unknown
+- usage_scene: scene.family | scene.villa_apartment_barber | scene.other_unknown
+- history_device_confirmation: history_device.yes | history_device.no_unknown
 - purchase_or_property: purchase.self_buy | purchase.unknown | purchase.property_bundle
 - property_year: property_year.before_2021 | property_year.after_2021 | property_year.unknown
 
@@ -1086,6 +1230,11 @@ class ServiceAgent:
             "close_status": result.close_status,
             "close_reason": result.close_reason,
             "used_model_intent_inference": self.policy.last_used_model_intent_inference,
+            "model_intent_inference_attempted": self.policy.last_model_intent_inference_attempted,
+            "model_intent_inference_unapplied": (
+                self.policy.last_model_intent_inference_attempted
+                and not self.policy.last_used_model_intent_inference
+            ),
         }
 
     def build_initial_user_utterance(self, scenario: Scenario) -> str:

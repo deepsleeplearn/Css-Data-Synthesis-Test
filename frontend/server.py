@@ -16,6 +16,7 @@ import copy
 import subprocess
 import atexit
 import time
+import random
 from datetime import datetime, timedelta, timezone
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -45,7 +46,19 @@ try:
         _manual_test_requires_generated_hidden_settings,
         _resolve_interactive_max_rounds,
     )
-    from css_data_synthesis_test.config import load_config
+    from css_data_synthesis_test.config import (
+        DEFAULT_PRODUCT_ROUTING_BRAND_SERIES_WEIGHTS,
+        DEFAULT_PRODUCT_ROUTING_ENTRY_WEIGHTS,
+        DEFAULT_PRODUCT_ROUTING_HISTORY_CONFIRMATION_WEIGHTS,
+        DEFAULT_AUTO_MODE_IVR_PRODUCT_KIND_WEIGHTS,
+        DEFAULT_AUTO_MODE_HISTORY_DEVICE_BRAND_WEIGHTS,
+        DEFAULT_AUTO_MODE_HISTORY_DEVICE_CATEGORY_WEIGHTS,
+        DEFAULT_AUTO_MODE_WATER_HEATER_OPENING_REPLY_WEIGHTS,
+        DEFAULT_PRODUCT_ROUTING_PROPERTY_YEAR_WEIGHTS,
+        DEFAULT_PRODUCT_ROUTING_PURCHASE_OR_PROPERTY_WEIGHTS,
+        DEFAULT_PRODUCT_ROUTING_USAGE_SCENE_WEIGHTS,
+        load_config,
+    )
     from css_data_synthesis_test.function_call import (
         build_address_model_observation,
         build_ie_model_observation,
@@ -79,6 +92,7 @@ try:
         PROMPT_USAGE_SCENE,
         default_unknown_product_routing_answer_key,
         ensure_product_routing_plan,
+        planned_product_routing_step,
     )
     from css_data_synthesis_test.scenario_factory import ScenarioFactory
     from css_data_synthesis_test.schemas import (
@@ -169,6 +183,7 @@ def _build_service_policy():
         model=config.service_agent_model,
         temperature=config.default_temperature,
         ok_prefix_probability=config.service_ok_prefix_probability,
+        query_prefix_weights=config.service_query_prefix_weights,
         product_routing_enabled=config.product_routing_enabled,
         product_routing_apply_probability=config.product_routing_apply_probability,
     )
@@ -181,6 +196,7 @@ def _build_service_agent() -> ServiceAgent:
         model=config.service_agent_model,
         temperature=config.default_temperature,
         ok_prefix_probability=config.service_ok_prefix_probability,
+        query_prefix_weights=config.service_query_prefix_weights,
         product_routing_enabled=config.product_routing_enabled,
         product_routing_apply_probability=config.product_routing_apply_probability,
     )
@@ -213,6 +229,9 @@ class StartSessionRequest(BaseModel):
     scenario_index: int = 0
     product_category: str = ""
     request_type: str = ""
+    history_device_brand: str = ""
+    history_device_category: str = ""
+    history_device_purchase_date: str = ""
     auto_generate_hidden_settings: bool = False
     known_address: str = ""
     ivr_utterance: str = ""
@@ -242,6 +261,7 @@ class AddressIeDisplayRequest(BaseModel):
     session_id: str
     round_index: int
     enabled: bool = True
+    entity_type: str = "addressInfo"
 
 
 class RewriteIeObservationRequest(BaseModel):
@@ -964,6 +984,136 @@ def _apply_known_address(scenario: Scenario, known_address: str) -> tuple[Scenar
     )
 
 
+def _apply_frontend_auto_address_policy_seed(scenario: Scenario, known_address: str) -> Scenario:
+    hidden_context = dict(scenario.hidden_context)
+    sanitized = _sanitize_manual_user_text(known_address)
+    hidden_context.update(
+        {
+            "frontend_auto_address_policy_enabled": True,
+            "frontend_auto_configured_known_address": sanitized,
+        }
+    )
+    return scenario.with_generated_hidden_settings(
+        customer=scenario.customer,
+        request=scenario.request,
+        hidden_context=hidden_context,
+    )
+
+
+def _frontend_auto_known_address_notice(scenario: Scenario, known_address: str) -> str:
+    sanitized = _sanitize_manual_user_text(known_address)
+    if sanitized:
+        matches = bool(scenario.hidden_context.get("service_known_address_matches_actual", False))
+        suffix = "真实地址与已知地址一致" if matches else "真实地址按概率生成为不同地址"
+        return f"使用会话配置中的已知地址，客服将优先核对: {sanitized}；{suffix}。"
+    return "会话配置未设置已知地址，客服将按未知地址采集。"
+
+
+def _parse_history_device_purchase_date(value: str) -> tuple[str, str, str]:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return "", "", ""
+    try:
+        parsed = datetime.strptime(normalized, "%Y-%m-%d")
+    except ValueError:
+        return "", "", ""
+    return normalized, str(parsed.year), str(parsed.month)
+
+
+def _apply_manual_history_device(scenario: Scenario, req: StartSessionRequest) -> tuple[Scenario, str]:
+    brand = _sanitize_manual_user_text(req.history_device_brand)
+    category = _sanitize_manual_user_text(req.history_device_category)
+    purchase_date, purchase_year, purchase_month = _parse_history_device_purchase_date(
+        req.history_device_purchase_date
+    )
+    hidden_context = dict(scenario.hidden_context)
+    if not (brand and category and purchase_date):
+        hidden_context.update(
+            {
+                "product_routing_has_history_device": False,
+                "air_energy_history_device": {},
+            }
+        )
+        return (
+            scenario.with_generated_hidden_settings(
+                customer=scenario.customer,
+                request=scenario.request,
+                hidden_context=hidden_context,
+            ),
+            "未设置历史设备，归属流程按无历史设备处理。",
+        )
+
+    history_device = {
+        "brand": brand,
+        "category": category,
+        "purchase_date": purchase_date,
+        "purchase_year": purchase_year,
+        "purchase_month": purchase_month,
+    }
+    hidden_context.update(
+        {
+            "product_routing_has_history_device": True,
+            "air_energy_history_device": history_device,
+        }
+    )
+    return (
+        scenario.with_generated_hidden_settings(
+            customer=scenario.customer,
+            request=scenario.request,
+            hidden_context=hidden_context,
+        ),
+        f"已设置历史设备: {purchase_year}年{purchase_month}月 {brand}{category}",
+    )
+
+
+def _attach_product_routing_weight_overrides(hidden_context: dict[str, Any]) -> None:
+    def _config_weight_map(attr: str, default: dict[str, float]) -> dict[str, float]:
+        value = getattr(config, attr, None)
+        if isinstance(value, dict):
+            return dict(value)
+        return dict(default)
+
+    hidden_context.update(
+        {
+            "product_routing_entry_weights": _config_weight_map(
+                "product_routing_entry_weights",
+                DEFAULT_PRODUCT_ROUTING_ENTRY_WEIGHTS,
+            ),
+            "product_routing_brand_series_weights": _config_weight_map(
+                "product_routing_brand_series_weights",
+                DEFAULT_PRODUCT_ROUTING_BRAND_SERIES_WEIGHTS,
+            ),
+            "product_routing_usage_scene_weights": _config_weight_map(
+                "product_routing_usage_scene_weights",
+                DEFAULT_PRODUCT_ROUTING_USAGE_SCENE_WEIGHTS,
+            ),
+            "product_routing_purchase_or_property_weights": _config_weight_map(
+                "product_routing_purchase_or_property_weights",
+                DEFAULT_PRODUCT_ROUTING_PURCHASE_OR_PROPERTY_WEIGHTS,
+            ),
+            "product_routing_property_year_weights": _config_weight_map(
+                "product_routing_property_year_weights",
+                DEFAULT_PRODUCT_ROUTING_PROPERTY_YEAR_WEIGHTS,
+            ),
+            "product_routing_history_confirmation_weights": _config_weight_map(
+                "product_routing_history_confirmation_weights",
+                DEFAULT_PRODUCT_ROUTING_HISTORY_CONFIRMATION_WEIGHTS,
+            ),
+        }
+    )
+
+
+def _reset_product_routing_plan(hidden_context: dict[str, Any]) -> None:
+    for key in (
+        "product_routing_plan",
+        "product_routing_initial_plan",
+        "product_routing_result",
+        "product_routing_trace",
+        "product_routing_summary",
+    ):
+        hidden_context.pop(key, None)
+
+
 def _resolve_manual_call_start_time(req: StartSessionRequest, scenario: Scenario) -> str:
     if bool(req.use_session_start_time_as_call_start_time):
         return _current_display_timestamp()
@@ -997,6 +1147,30 @@ def _normalize_manual_product_category(value: str) -> str:
     return mapping.get(normalized, "")
 
 
+def _weighted_choice(weights: dict[str, float], default: str) -> str:
+    normalized_weights: dict[str, float] = {}
+    for key, value in (weights or {}).items():
+        try:
+            weight = max(0.0, float(value))
+        except (TypeError, ValueError):
+            weight = 0.0
+        if weight > 0.0:
+            normalized_weights[str(key)] = weight
+    if not normalized_weights:
+        return default
+    return random.choices(
+        population=list(normalized_weights.keys()),
+        weights=list(normalized_weights.values()),
+        k=1,
+    )[0]
+
+
+def _copy_start_request(req: StartSessionRequest, updates: dict[str, Any]) -> StartSessionRequest:
+    payload = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+    payload.update(updates)
+    return StartSessionRequest(**payload)
+
+
 def _manual_product_category_slug(category: str) -> str:
     mapping = {
         "空气能热水机": "air_energy",
@@ -1016,12 +1190,157 @@ def _resolve_manual_base_scenario(request_type: str) -> Scenario:
     return scenarios[0]
 
 
+def _auto_mode_ivr_request(req: StartSessionRequest) -> tuple[StartSessionRequest, str]:
+    request_type = _normalize_ivr_request_type(req.request_type) or "fault"
+    action = "安装" if request_type == "installation" else "维修"
+    product_kind = _weighted_choice(
+        getattr(config, "auto_mode_ivr_product_kind_weights", DEFAULT_AUTO_MODE_IVR_PRODUCT_KIND_WEIGHTS),
+        "air_energy",
+    )
+    if product_kind == "water_heater":
+        return (
+            _copy_start_request(
+                req,
+                {
+                    "product_category": "热水器",
+                    "request_type": request_type,
+                    "ivr_utterance": f"热水器需要{action}",
+                },
+            ),
+            "water_heater",
+        )
+    return (
+        _copy_start_request(
+            req,
+            {
+                "product_category": "空气能热水机",
+                "request_type": request_type,
+                "ivr_utterance": f"空气能热水器需要{action}",
+            },
+        ),
+        "air_energy",
+    )
+
+
+def _history_device_category_options_for_brand(brand: str) -> list[str]:
+    normalized_brand = str(brand or "").strip()
+    if normalized_brand in {"COLMO", "真暖", "真省", "雪焰", "暖家", "煤改电", "真享"}:
+        return ["家用空气能热水机"]
+    if normalized_brand == "烈焰":
+        return ["空气能热水机"]
+    return ["家用空气能热水机", "空气能热水机"]
+
+
+def _random_history_device_purchase_date() -> str:
+    today = datetime.now(DISPLAY_TIMEZONE).date()
+    start = today.replace(year=max(2018, today.year - 7), month=1, day=1)
+    span_days = max(1, (today - start).days)
+    return (start + timedelta(days=random.randint(0, span_days))).strftime("%Y-%m-%d")
+
+
+def _auto_mode_history_device_request(req: StartSessionRequest) -> StartSessionRequest:
+    probability = max(0.0, min(1.0, float(getattr(config, "auto_mode_history_device_probability", 0.35))))
+    if random.random() >= probability:
+        return _copy_start_request(
+            req,
+            {
+                "history_device_brand": "",
+                "history_device_category": "",
+                "history_device_purchase_date": "",
+            },
+        )
+
+    brand = _weighted_choice(
+        getattr(
+            config,
+            "auto_mode_history_device_brand_weights",
+            DEFAULT_AUTO_MODE_HISTORY_DEVICE_BRAND_WEIGHTS,
+        ),
+        "美的",
+    )
+    allowed_categories = set(_history_device_category_options_for_brand(brand))
+    raw_category_weights = getattr(
+        config,
+        "auto_mode_history_device_category_weights",
+        DEFAULT_AUTO_MODE_HISTORY_DEVICE_CATEGORY_WEIGHTS,
+    )
+    category_weights = {
+        key: value
+        for key, value in dict(raw_category_weights).items()
+        if str(key).strip() in allowed_categories
+    }
+    category = _weighted_choice(category_weights, next(iter(allowed_categories)))
+    return _copy_start_request(
+        req,
+        {
+            "history_device_brand": brand,
+            "history_device_category": category,
+            "history_device_purchase_date": _random_history_device_purchase_date(),
+        },
+    )
+
+
+def _opposite_request_type(request_type: str) -> str:
+    return "fault" if _normalize_ivr_request_type(request_type) == "installation" else "installation"
+
+
+def _request_action_label(request_type: str) -> str:
+    return "安装" if _normalize_ivr_request_type(request_type) == "installation" else "维修"
+
+
+def _build_water_heater_opening_reply_plan(scenario: Scenario) -> dict[str, str]:
+    hidden_context = scenario.hidden_context if isinstance(scenario.hidden_context, dict) else {}
+    if str(hidden_context.get("ivr_product_kind", "")).strip() != "water_heater":
+        return {}
+
+    strategy = _weighted_choice(
+        getattr(
+            config,
+            "auto_mode_water_heater_opening_reply_weights",
+            DEFAULT_AUTO_MODE_WATER_HEATER_OPENING_REPLY_WEIGHTS,
+        ),
+        "confirm",
+    )
+    current_request_type = _normalize_ivr_request_type(scenario.request.request_type) or "fault"
+    changed_request_type = _opposite_request_type(current_request_type)
+    changed_action = _request_action_label(changed_request_type)
+    reply_map = {
+        "confirm": "对，是的。",
+        "change_brand": "是的，COLMO的。",
+        "change_product_type": "对，是空气能热水器。",
+        "change_request": f"不是，是{changed_action}。",
+        "change_brand_request": f"COLMO的，是{changed_action}。",
+    }
+    label_map = {
+        "confirm": "仅确认品牌/品类/诉求，不修改",
+        "change_brand": "修改品牌为 COLMO",
+        "change_product_type": "补充细分品类为空气能热水器",
+        "change_request": f"修改诉求为{changed_action}",
+        "change_brand_request": f"修改品牌为 COLMO，并修改诉求为{changed_action}",
+    }
+    return {
+        "strategy": strategy,
+        "label": label_map.get(strategy, label_map["confirm"]),
+        "reply": reply_map.get(strategy, reply_map["confirm"]),
+    }
+
+
+def _attach_auto_mode_opening_reply_plan(scenario: Scenario) -> None:
+    plan = _build_water_heater_opening_reply_plan(scenario)
+    if not plan:
+        return
+    scenario.hidden_context["auto_mode_water_heater_opening_reply_strategy"] = plan["strategy"]
+    scenario.hidden_context["auto_mode_water_heater_opening_reply_label"] = plan["label"]
+    scenario.hidden_context["auto_mode_water_heater_opening_reply"] = plan["reply"]
+
+
 def _apply_manual_session_configuration(
     scenario: Scenario,
     *,
     product_category: str,
     request_type: str,
     ivr_utterance: str,
+    preserve_request_details: bool = False,
 ) -> tuple[Scenario, str, bool]:
     normalized_product_category = _normalize_manual_product_category(product_category) or "空气能热水机"
     normalized_request_type = _normalize_ivr_request_type(request_type) or "fault"
@@ -1034,7 +1353,13 @@ def _apply_manual_session_configuration(
             "manual_request_type": normalized_request_type,
             "ivr_utterance": sanitized_ivr,
             "ivr_request_type": normalized_request_type,
-            "ivr_product_kind": "water_heater" if normalized_product_category == "热水器" else "",
+            "ivr_product_kind": (
+                "water_heater"
+                if normalized_product_category == "热水器"
+                else "air_energy"
+                if normalized_product_category == "空气能热水机"
+                else ""
+            ),
             "ivr_opening_overridden": normalized_product_category == "热水器",
         }
     )
@@ -1045,8 +1370,16 @@ def _apply_manual_session_configuration(
         request=replace(
             scenario.request,
             request_type=normalized_request_type,
-            issue=f"{normalized_product_category}需要{action}",
-            desired_resolution=f"安排{action}",
+            issue=(
+                scenario.request.issue
+                if preserve_request_details and _sanitize_manual_user_text(scenario.request.issue)
+                else f"{normalized_product_category}需要{action}"
+            ),
+            desired_resolution=(
+                scenario.request.desired_resolution
+                if preserve_request_details and _sanitize_manual_user_text(scenario.request.desired_resolution)
+                else f"安排{action}"
+            ),
         ),
         hidden_context=hidden_context,
     )
@@ -1165,7 +1498,12 @@ def _apply_ivr_opening_override(
     )
 
 
-def _prepare_manual_test_scenario(req: StartSessionRequest) -> tuple[Scenario, str, int, str, bool]:
+def _prepare_manual_test_scenario(
+    req: StartSessionRequest,
+    *,
+    force_local_hidden_settings: bool = False,
+    frontend_auto_address_policy: bool = False,
+) -> tuple[Scenario, str, int, str, bool]:
     manual_request_type = _normalize_ivr_request_type(req.request_type)
     manual_product_category = _normalize_manual_product_category(req.product_category)
     if manual_request_type or manual_product_category:
@@ -1176,6 +1514,9 @@ def _prepare_manual_test_scenario(req: StartSessionRequest) -> tuple[Scenario, s
             scenario_index=req.scenario_index,
         )
 
+    if frontend_auto_address_policy:
+        scenario = _apply_frontend_auto_address_policy_seed(scenario, req.known_address)
+
     if req.auto_generate_hidden_settings:
         if not config.openai_api_key or "YOUR_API_KEY" in config.openai_api_key:
             raise ValueError("未配置 OPENAI_API_KEY，请检查 .env 文件。")
@@ -1184,23 +1525,33 @@ def _prepare_manual_test_scenario(req: StartSessionRequest) -> tuple[Scenario, s
             scenario,
             use_utterance_reference=True,
         )
+    elif force_local_hidden_settings:
+        tool = HiddenSettingsTool(llm_client, config)
+        scenario = tool.hydrate_scenario_locally(scenario)
     elif _manual_test_requires_generated_hidden_settings(scenario):
         scenario = _hydrate_manual_test_scenario_locally(scenario)
 
     scenario = scenario.with_call_start_time(_resolve_manual_call_start_time(req, scenario))
-    scenario, known_address_notice = _apply_known_address(scenario, req.known_address)
+    if frontend_auto_address_policy:
+        known_address_notice = _frontend_auto_known_address_notice(scenario, req.known_address)
+    else:
+        scenario, known_address_notice = _apply_known_address(scenario, req.known_address)
+    scenario, history_device_notice = _apply_manual_history_device(scenario, req)
     if manual_request_type or manual_product_category:
         scenario, ivr_notice, ivr_opening_enabled = _apply_manual_session_configuration(
             scenario,
             product_category=manual_product_category or "空气能热水机",
             request_type=manual_request_type or "fault",
             ivr_utterance=req.ivr_utterance,
+            preserve_request_details=bool(req.auto_generate_hidden_settings),
         )
     else:
         scenario, ivr_notice, ivr_opening_enabled = _apply_ivr_opening_override(
             scenario,
             req.ivr_utterance,
         )
+    _attach_product_routing_weight_overrides(scenario.hidden_context)
+    _reset_product_routing_plan(scenario.hidden_context)
     scenario.hidden_context["interactive_test_freeform"] = True
     scenario.hidden_context["manual_test_address_precision_reference"] = False
     ensure_product_routing_plan(
@@ -1214,12 +1565,92 @@ def _prepare_manual_test_scenario(req: StartSessionRequest) -> tuple[Scenario, s
         scenario_max_turns=scenario.max_turns,
         config_max_rounds=config.max_rounds,
     )
-    return scenario, known_address_notice, rounds_limit, ivr_notice, ivr_opening_enabled
+    combined_notice = (
+        f"{known_address_notice}；{history_device_notice}"
+        if history_device_notice.startswith("已设置历史设备")
+        else known_address_notice
+    )
+    return scenario, combined_notice, rounds_limit, ivr_notice, ivr_opening_enabled
+
+
+def _format_bool_zh(value: Any) -> str:
+    return "是" if bool(value) else "否"
+
+
+def _build_auto_mode_preview_lines(scenario: Scenario) -> list[str]:
+    hidden_context = scenario.hidden_context if isinstance(scenario.hidden_context, dict) else {}
+    request_action = _request_action_label(str(scenario.request.request_type or ""))
+    ivr_product_kind = str(hidden_context.get("ivr_product_kind", "")).strip()
+    scenario_category = str(scenario.product.category or "").strip()
+    if ivr_product_kind == "water_heater" or scenario_category == "热水器":
+        ivr_product_label = "热水器"
+    else:
+        ivr_product_label = "空气能热水机"
+    lines = [
+        f"IVR首轮: 美的{ivr_product_label}需要{request_action}",
+    ]
+
+    opening_reply = str(hidden_context.get("auto_mode_water_heater_opening_reply", "")).strip()
+    opening_label = str(hidden_context.get("auto_mode_water_heater_opening_reply_label", "")).strip()
+    if opening_reply:
+        lines.append(f"用户品牌品类确认策略: {opening_label}；预期回复: {opening_reply}")
+    else:
+        lines.append("用户品牌品类确认策略: 按常规开场确认/问题描述策略执行。")
+
+    history_device = hidden_context.get("air_energy_history_device")
+    if isinstance(history_device, dict) and history_device:
+        brand = str(history_device.get("brand", "")).strip()
+        category = str(history_device.get("category", "")).strip()
+        year = str(history_device.get("purchase_year", "")).strip()
+        month = str(history_device.get("purchase_month", "")).strip()
+        lines.append(f"历史设备相关信息: 有；{year}年{month}月 {brand}{category}。")
+    else:
+        lines.append("历史设备相关信息: 无。")
+
+    routing_summary = str(hidden_context.get("product_routing_summary", "")).strip()
+    if routing_summary:
+        lines.append(f"产品归属路径: {routing_summary}")
+    else:
+        lines.append("产品归属路径: 本次未预设或未触发产品归属中间路由。")
+
+    contactable = bool(hidden_context.get("current_call_contactable", True))
+    phone_attempts = str(hidden_context.get("phone_input_attempts_required", "0")).strip() or "0"
+    phone_owner = str(hidden_context.get("contact_phone_owner_spoken_label", "")).strip() or "本人当前来电"
+    if contactable:
+        lines.append("电话沟通策略: 当前来电号码可联系，用户会确认当前号码。")
+    else:
+        lines.append(f"电话沟通策略: 当前来电不可联系，登记{phone_owner}；拨号盘第 {phone_attempts} 次输入有效号码。")
+
+    service_known_address = bool(hidden_context.get("service_known_address", False))
+    service_address = str(hidden_context.get("service_known_address_value", "")).strip()
+    service_address_matches = bool(hidden_context.get("service_known_address_matches_actual", False))
+    address_rounds = hidden_context.get("address_input_rounds", [])
+    if not isinstance(address_rounds, list):
+        address_rounds = []
+    normalized_rounds = [str(item).strip() for item in address_rounds if str(item).strip()]
+    if service_known_address:
+        lines.append(
+            "地址沟通策略: 客服先核对已知地址；"
+            f"地址是否正确: {_format_bool_zh(service_address_matches)}；"
+            f"核对地址: {service_address or '未提供'}。"
+        )
+    else:
+        rounds_text = " / ".join(normalized_rounds) if normalized_rounds else str(scenario.customer.address or "").strip()
+        lines.append(f"地址沟通策略: 客服从零采集地址；用户分段回复计划: {rounds_text or '未设置'}。")
+    return lines
 
 
 def _create_auto_mode_job(req: StartSessionRequest) -> tuple[str, dict[str, Any]]:
-    scenario, known_address_notice, rounds_limit, ivr_notice, ivr_opening_enabled = _prepare_manual_test_scenario(req)
+    req, _ = _auto_mode_ivr_request(req)
+    req = _auto_mode_history_device_request(req)
+    scenario, _known_address_notice, rounds_limit, _ivr_notice, ivr_opening_enabled = _prepare_manual_test_scenario(
+        req,
+        force_local_hidden_settings=not bool(req.auto_generate_hidden_settings),
+        frontend_auto_address_policy=True,
+    )
+    _attach_auto_mode_opening_reply_plan(scenario)
     scenario = replace(scenario, max_turns=rounds_limit)
+    auto_mode_preview_lines = _build_auto_mode_preview_lines(scenario)
     required_slots = effective_required_slots(scenario)
     collected_slots = {slot: "" for slot in required_slots}
     for slot in SUPPLEMENTARY_COLLECTED_SLOTS:
@@ -1236,6 +1667,7 @@ def _create_auto_mode_job(req: StartSessionRequest) -> tuple[str, dict[str, Any]
         "runtime_state": ServiceRuntimeState(),
         "transcript": [],
         "terminal_entries": [],
+        "auto_mode_preview_lines": auto_mode_preview_lines,
         "required_slots": required_slots,
         "collected_slots": collected_slots,
         "rounds_limit": rounds_limit,
@@ -1246,6 +1678,9 @@ def _create_auto_mode_job(req: StartSessionRequest) -> tuple[str, dict[str, Any]
             "scenario_id": scenario.scenario_id,
             "product_category": str(req.product_category or "").strip(),
             "request_type": str(req.request_type or "").strip(),
+            "history_device_brand": str(req.history_device_brand or "").strip(),
+            "history_device_category": str(req.history_device_category or "").strip(),
+            "history_device_purchase_date": str(req.history_device_purchase_date or "").strip(),
             "known_address": _sanitize_manual_user_text(req.known_address),
             "ivr_utterance": _sanitize_manual_user_text(req.ivr_utterance),
             "ivr_opening_enabled": bool(ivr_opening_enabled),
@@ -1256,18 +1691,6 @@ def _create_auto_mode_job(req: StartSessionRequest) -> tuple[str, dict[str, Any]
             "persist_to_db": bool(req.persist_to_db),
         },
     }
-    _append_terminal_lines(
-        session,
-        lines=[
-            f"自动模式场景: {scenario.scenario_id}",
-            f"轮次上限: {rounds_limit}",
-            known_address_notice,
-            ivr_notice or "未设置 IVR 首轮覆写。",
-            "自动模式正在逐轮生成，请稍候...",
-        ],
-        tone="system",
-        round_count_snapshot=0,
-    )
     job_id = str(uuid.uuid4())
     job = {
         "session": session,
@@ -1302,6 +1725,11 @@ def _build_auto_mode_job_view(job_id: str, job: dict[str, Any]) -> dict[str, Any
         "next_round_index": _next_round_index(transcript),
         "completed_rounds": _completed_round_count(transcript),
         "terminal_entries": _copy_terminal_entries(session.get("terminal_entries", [])),
+        "auto_mode_preview_lines": [
+            str(line).strip()
+            for line in session.get("auto_mode_preview_lines", [])
+            if str(line).strip()
+        ],
         "job_done": bool(job.get("done")),
         "job_error": str(job.get("error", "")).strip(),
     }
@@ -1313,7 +1741,7 @@ def _normalize_auto_mode_service_action(
     policy: ServiceDialoguePolicy,
 ) -> dict[str, Any]:
     if isinstance(action, ServicePolicyResult):
-        return {
+        normalized = {
             "reply": action.reply,
             "slot_updates": dict(action.slot_updates),
             "is_ready_to_close": bool(action.is_ready_to_close),
@@ -1322,15 +1750,35 @@ def _normalize_auto_mode_service_action(
             "used_model_intent_inference": bool(
                 getattr(policy, "last_used_model_intent_inference", False)
             ),
+            "model_intent_inference_attempted": bool(
+                getattr(
+                    policy,
+                    "last_model_intent_inference_attempted",
+                    getattr(policy, "last_used_model_intent_inference", False),
+                )
+            ),
         }
-    return {
+        normalized["model_intent_inference_unapplied"] = bool(
+            normalized["model_intent_inference_attempted"]
+            and not normalized["used_model_intent_inference"]
+        )
+        return normalized
+    normalized = {
         "reply": str(action.get("reply", "")).strip(),
         "slot_updates": dict(action.get("slot_updates", {})),
         "is_ready_to_close": bool(action.get("is_ready_to_close", False)),
         "close_status": str(action.get("close_status", "")).strip(),
         "close_reason": str(action.get("close_reason", "")).strip(),
         "used_model_intent_inference": bool(action.get("used_model_intent_inference", False)),
+        "model_intent_inference_attempted": bool(
+            action.get("model_intent_inference_attempted", action.get("used_model_intent_inference", False))
+        ),
     }
+    normalized["model_intent_inference_unapplied"] = bool(
+        normalized["model_intent_inference_attempted"]
+        and not normalized["used_model_intent_inference"]
+    )
+    return normalized
 
 
 def _finalize_auto_mode_job(
@@ -1419,8 +1867,16 @@ async def _run_auto_mode_job_async(job_id: str) -> None:
             text=opening_action["reply"],
             round_index=1,
             model_intent_inference_used=bool(opening_action.get("used_model_intent_inference", False)),
+            model_intent_inference_attempted=bool(opening_action.get("model_intent_inference_attempted", False)),
+            model_intent_inference_unapplied=bool(opening_action.get("model_intent_inference_unapplied", False)),
             previous_user_intent_model_inference_used=bool(
                 opening_action.get("used_model_intent_inference", False)
+            ),
+            previous_user_intent_model_inference_attempted=bool(
+                opening_action.get("model_intent_inference_attempted", False)
+            ),
+            previous_user_intent_model_inference_unapplied=bool(
+                opening_action.get("model_intent_inference_unapplied", False)
             ),
         )
         with AUTO_MODE_JOB_LOCK:
@@ -1504,8 +1960,20 @@ async def _run_auto_mode_job_async(job_id: str) -> None:
                     model_intent_inference_used=bool(
                         service_action.get("used_model_intent_inference", False)
                     ),
+                    model_intent_inference_attempted=bool(
+                        service_action.get("model_intent_inference_attempted", False)
+                    ),
+                    model_intent_inference_unapplied=bool(
+                        service_action.get("model_intent_inference_unapplied", False)
+                    ),
                     previous_user_intent_model_inference_used=bool(
                         service_action.get("used_model_intent_inference", False)
+                    ),
+                    previous_user_intent_model_inference_attempted=bool(
+                        service_action.get("model_intent_inference_attempted", False)
+                    ),
+                    previous_user_intent_model_inference_unapplied=bool(
+                        service_action.get("model_intent_inference_unapplied", False)
                     ),
                 )
                 with AUTO_MODE_JOB_LOCK:
@@ -1645,7 +2113,11 @@ def _deserialize_turns_from_storage(items: list[dict[str, Any]] | None) -> list[
                 text=str(item.get("text", "")),
                 round_index=int(item.get("round_index", 0) or 0),
                 model_intent_inference_used=bool(item.get("model_intent_inference_used", False)),
+                model_intent_inference_attempted=bool(item.get("model_intent_inference_attempted", False)),
+                model_intent_inference_unapplied=bool(item.get("model_intent_inference_unapplied", False)),
                 previous_user_intent_model_inference_used=item.get("previous_user_intent_model_inference_used"),
+                previous_user_intent_model_inference_attempted=item.get("previous_user_intent_model_inference_attempted"),
+                previous_user_intent_model_inference_unapplied=item.get("previous_user_intent_model_inference_unapplied"),
                 post_display_lines=[
                     str(line)
                     for line in item.get("post_display_lines", [])
@@ -1813,7 +2285,12 @@ def _routing_prompt_key_from_text(text: str) -> str:
         PROMPT_PROPERTY_YEAR: "property_year",
         PROMPT_CAPACITY: "capacity_or_hp",
     }
-    return mapping.get(normalized, "")
+    if normalized in mapping:
+        return mapping[normalized]
+    for prompt, prompt_key in mapping.items():
+        if normalized.endswith(prompt):
+            return prompt_key
+    return ""
 
 
 def _rebuild_scenario_for_checkpoint(session: dict[str, Any], checkpoint: dict[str, Any]) -> Scenario:
@@ -1840,19 +2317,28 @@ def _rebuild_scenario_for_checkpoint(session: dict[str, Any], checkpoint: dict[s
     hidden_context = dict(scenario.hidden_context)
     prompt_key = _routing_prompt_key_from_text(last_service_text) if expected_routing else ""
     if prompt_key:
+        planned_step = planned_product_routing_step(
+            hidden_context,
+            observed_trace,
+            prompt_key=prompt_key,
+        )
+        fallback_step = {
+            "prompt_key": prompt_key,
+            "prompt": last_service_text,
+            "answer_key": default_unknown_product_routing_answer_key(prompt_key),
+            "answer_value": "",
+            "answer_instruction": "围绕当前问题直接回答。",
+        }
+        if planned_step:
+            planned_step = dict(planned_step)
+            planned_step["prompt"] = last_service_text
+        else:
+            planned_step = fallback_step
         hidden_context["product_routing_plan"] = {
             "enabled": True,
             "result": "",
             "trace": list(observed_trace),
-            "steps": [
-                {
-                    "prompt_key": prompt_key,
-                    "prompt": last_service_text,
-                    "answer_key": default_unknown_product_routing_answer_key(prompt_key),
-                    "answer_value": "",
-                    "answer_instruction": "围绕当前问题直接回答。",
-                }
-            ],
+            "steps": [planned_step],
             "summary": " -> ".join(item for item in observed_trace if str(item).strip()),
         }
         hidden_context["product_routing_trace"] = list(observed_trace)
@@ -1895,6 +2381,9 @@ def _append_turn_entry(session: dict[str, Any], turn: DialogueTurn) -> None:
         "text": display_turn["text"],
         "round_index": display_turn["round_index"],
         "round_label": display_turn["round_label"],
+        "model_intent_inference_used": bool(display_turn.get("model_intent_inference_used", False)),
+        "model_intent_inference_attempted": bool(display_turn.get("model_intent_inference_attempted", False)),
+        "model_intent_inference_unapplied": bool(display_turn.get("model_intent_inference_unapplied", False)),
         "round_count_snapshot": display_turn["round_index"],
         "has_address_ie_display": has_address_ie_display,
     }
@@ -1988,6 +2477,27 @@ def _append_address_ie_display_lines(
                     f"observation: {json.dumps(observation, ensure_ascii=False)}"
                 )
                 return None
+        if confirmation_intent == "no":
+            confirmation_address = str(
+                runtime_state.pending_address_confirmation or ""
+            ).strip()
+            denial_address = ""
+            if confirmation_address:
+                denial_address, _ = policy._resolve_confirmation_denial_address_candidate(
+                    transcript=transcript,
+                    user_text=turn.text,
+                    confirmation_address=confirmation_address,
+                )
+            if denial_address:
+                observation = build_address_model_observation(
+                    transcript,
+                    client=llm_client,
+                )
+                turn.post_display_lines.append(policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY)
+                turn.post_display_lines.append(
+                    f"observation: {json.dumps(observation, ensure_ascii=False)}"
+                )
+                return observation
 
     should_insert_for_collection = policy.should_insert_address_ie_function_call(
         user_text=turn.text,
@@ -2012,6 +2522,102 @@ def _append_address_ie_display_lines(
     turn.post_display_lines.append(policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY)
     turn.post_display_lines.append(f"observation: {json.dumps(observation, ensure_ascii=False)}")
     return observation
+
+
+def _predict_address_ie_entity_type(
+    *,
+    policy: ServiceDialoguePolicy,
+    turn: DialogueTurn,
+    transcript: list[DialogueTurn],
+    runtime_state: ServiceRuntimeState,
+) -> str:
+    previous_service_text = ""
+    for previous_turn in reversed(transcript[:-1]):
+        if previous_turn.speaker == SERVICE_SPEAKER:
+            previous_service_text = previous_turn.text
+            break
+    if (
+        runtime_state.expected_address_confirmation
+        and not runtime_state.address_confirmation_triggered_by_observation
+        and (
+            runtime_state.address_confirmation_started_from_known_address
+            or (
+                policy.is_address_confirmation_prompt(previous_service_text)
+                and policy._normalize_prompt_text(previous_service_text).startswith("您的地址是")
+            )
+        )
+    ):
+        confirmation_intent = policy._classify_confirmation_intent(
+            turn.text,
+            prompt_kind="address_confirmation",
+            user_round_index=turn.round_index,
+        )
+        confirmation_address = str(runtime_state.pending_address_confirmation or "").strip()
+        if confirmation_intent == "yes" and confirmation_address:
+            return "addressInfo"
+        if confirmation_intent == "no" and confirmation_address:
+            denial_address, _ = policy._resolve_confirmation_denial_address_candidate(
+                transcript=transcript,
+                user_text=turn.text,
+                confirmation_address=confirmation_address,
+            )
+            if denial_address:
+                return "addressInfo"
+
+    if policy.should_insert_address_ie_function_call(
+        user_text=turn.text,
+        transcript=transcript,
+        runtime_state=runtime_state,
+    ):
+        return "addressInfo"
+    if policy.should_insert_address_ie_after_observation_confirmation(
+        user_text=turn.text,
+        user_round_index=turn.round_index,
+        transcript=transcript,
+        runtime_state=runtime_state,
+    ):
+        return "addressInfo"
+    return ""
+
+
+def _predict_phone_ie_entity_type(
+    *,
+    policy: ServiceDialoguePolicy,
+    transcript: list[DialogueTurn],
+    runtime_state: ServiceRuntimeState,
+) -> str:
+    if not runtime_state.awaiting_phone_keypad_input:
+        return ""
+    previous_service_text = ""
+    for previous_turn in reversed(transcript[:-1]):
+        if previous_turn.speaker == SERVICE_SPEAKER:
+            previous_service_text = previous_turn.text
+            break
+    if policy.is_phone_keypad_prompt(previous_service_text):
+        return "telephone"
+    return ""
+
+
+def _predict_ie_entity_type_for_turn(
+    *,
+    policy: ServiceDialoguePolicy,
+    turn: DialogueTurn,
+    transcript: list[DialogueTurn],
+    runtime_state: ServiceRuntimeState,
+) -> str:
+    phone_entity_type = _predict_phone_ie_entity_type(
+        policy=policy,
+        transcript=transcript,
+        runtime_state=runtime_state,
+    )
+    if phone_entity_type:
+        return phone_entity_type
+    return _predict_address_ie_entity_type(
+        policy=policy,
+        turn=turn,
+        transcript=transcript,
+        runtime_state=runtime_state,
+    )
 
 
 def _append_phone_ie_display_lines(
@@ -2040,7 +2646,31 @@ def _append_phone_ie_display_lines(
     return observation
 
 
-def _address_ie_post_display_lines_for_transcript(transcript: list[DialogueTurn]) -> list[str]:
+def _normalize_manual_ie_entity_type(entity_type: str) -> str:
+    normalized = str(entity_type or "").strip() or "addressInfo"
+    if normalized in {"addressInfo", "address"}:
+        return "addressInfo"
+    if normalized in {"telephone", "telephone_number"}:
+        return "telephone"
+    raise HTTPException(status_code=400, detail="当前仅支持地址或电话 function_call。")
+
+
+def _ie_post_display_lines_for_transcript(
+    transcript: list[DialogueTurn],
+    *,
+    entity_type: str = "addressInfo",
+) -> list[str]:
+    normalized_entity_type = _normalize_manual_ie_entity_type(entity_type)
+    if normalized_entity_type == "telephone":
+        observation = build_telephone_model_observation(
+            transcript,
+            client=llm_client,
+        )
+        return [
+            ServiceDialoguePolicy.PHONE_IE_FUNCTION_CALL_DISPLAY,
+            f"observation: {json.dumps(observation, ensure_ascii=False)}",
+        ]
+
     observation = build_address_model_observation(
         transcript,
         client=llm_client,
@@ -2051,6 +2681,10 @@ def _address_ie_post_display_lines_for_transcript(transcript: list[DialogueTurn]
     ]
 
 
+def _address_ie_post_display_lines_for_transcript(transcript: list[DialogueTurn]) -> list[str]:
+    return _ie_post_display_lines_for_transcript(transcript, entity_type="addressInfo")
+
+
 def _find_user_turn_by_round_index(transcript: list[DialogueTurn], round_index: int) -> tuple[int, DialogueTurn] | None:
     for index, turn in enumerate(transcript):
         if turn.speaker == USER_SPEAKER and int(turn.round_index) == int(round_index):
@@ -2058,12 +2692,14 @@ def _find_user_turn_by_round_index(transcript: list[DialogueTurn], round_index: 
     return None
 
 
-def _apply_manual_address_ie_display_lines(
+def _apply_manual_ie_display_lines(
     session: dict[str, Any],
     *,
     round_index: int,
     enabled: bool,
+    entity_type: str = "addressInfo",
 ) -> bool:
+    normalized_entity_type = _normalize_manual_ie_entity_type(entity_type)
     transcript = session.get("transcript", [])
     turn_match = _find_user_turn_by_round_index(transcript, round_index)
     if turn_match is None:
@@ -2081,7 +2717,10 @@ def _apply_manual_address_ie_display_lines(
         changed = preserved_lines != list(user_turn.post_display_lines)
         user_turn.post_display_lines = preserved_lines
     else:
-        observation_lines = _address_ie_post_display_lines_for_transcript(transcript[: turn_position + 1])
+        observation_lines = _ie_post_display_lines_for_transcript(
+            transcript[: turn_position + 1],
+            entity_type=normalized_entity_type,
+        )
         updated_lines = preserved_lines + observation_lines
         changed = updated_lines != list(user_turn.post_display_lines)
         user_turn.post_display_lines = updated_lines
@@ -2107,8 +2746,9 @@ def _apply_manual_address_ie_display_lines(
             and not str(line).strip().startswith("observation:")
         ]
         if enabled:
-            checkpoint_observation_lines = _address_ie_post_display_lines_for_transcript(
-                checkpoint_transcript[: checkpoint_turn_position + 1]
+            checkpoint_observation_lines = _ie_post_display_lines_for_transcript(
+                checkpoint_transcript[: checkpoint_turn_position + 1],
+                entity_type=normalized_entity_type,
             )
             checkpoint_user_turn.post_display_lines = checkpoint_preserved_lines + checkpoint_observation_lines
         else:
@@ -3063,9 +3703,12 @@ def list_scenarios(current_user: dict[str, str] = Depends(_require_authenticated
 @app.get("/api/mock-known-address")
 def get_mock_known_address(
     scenario_id: str = "",
+    auto_mode: bool = False,
     current_user: dict[str, str] = Depends(_require_authenticated_user),
 ):
     _ = current_user
+    if auto_mode and random.random() >= max(0.0, min(1.0, float(config.service_known_address_probability))):
+        return {"known_address": ""}
     seed = scenario_id or "manual-test"
     address = generate_local_customer_address(
         f"{seed}:frontend-known-address:{secrets.token_hex(8)}",
@@ -3149,6 +3792,9 @@ def start_session(
                 "scenario_id": scenario.scenario_id,
                 "product_category": str(req.product_category or "").strip(),
                 "request_type": str(req.request_type or "").strip(),
+                "history_device_brand": str(req.history_device_brand or "").strip(),
+                "history_device_category": str(req.history_device_category or "").strip(),
+                "history_device_purchase_date": str(req.history_device_purchase_date or "").strip(),
                 "known_address": _sanitize_manual_user_text(req.known_address),
                 "ivr_utterance": _sanitize_manual_user_text(req.ivr_utterance),
                 "ivr_opening_enabled": bool(ivr_opening_enabled),
@@ -3189,8 +3835,38 @@ def start_session(
                 model_intent_inference_used=bool(
                     getattr(policy, "last_used_model_intent_inference", False)
                 ),
+                model_intent_inference_attempted=bool(
+                    getattr(
+                        policy,
+                        "last_model_intent_inference_attempted",
+                        getattr(policy, "last_used_model_intent_inference", False),
+                    )
+                ),
+                model_intent_inference_unapplied=bool(
+                    getattr(
+                        policy,
+                        "last_model_intent_inference_attempted",
+                        getattr(policy, "last_used_model_intent_inference", False),
+                    )
+                    and not getattr(policy, "last_used_model_intent_inference", False)
+                ),
                 previous_user_intent_model_inference_used=bool(
                     getattr(policy, "last_used_model_intent_inference", False)
+                ),
+                previous_user_intent_model_inference_attempted=bool(
+                    getattr(
+                        policy,
+                        "last_model_intent_inference_attempted",
+                        getattr(policy, "last_used_model_intent_inference", False),
+                    )
+                ),
+                previous_user_intent_model_inference_unapplied=bool(
+                    getattr(
+                        policy,
+                        "last_model_intent_inference_attempted",
+                        getattr(policy, "last_used_model_intent_inference", False),
+                    )
+                    and not getattr(policy, "last_used_model_intent_inference", False)
                 ),
             )
             sessions[session_id]["transcript"].append(opening_service_turn)
@@ -3424,12 +4100,22 @@ def respond(
     used_model_intent_inference = bool(
         getattr(policy, "last_used_model_intent_inference", False)
     )
+    attempted_model_intent_inference = bool(
+        getattr(policy, "last_model_intent_inference_attempted", used_model_intent_inference)
+    )
+    unapplied_model_intent_inference = bool(
+        attempted_model_intent_inference and not used_model_intent_inference
+    )
     service_turn = DialogueTurn(
         speaker=SERVICE_SPEAKER,
         text=service_result.reply,
         round_index=round_index,
         model_intent_inference_used=used_model_intent_inference,
+        model_intent_inference_attempted=attempted_model_intent_inference,
+        model_intent_inference_unapplied=unapplied_model_intent_inference,
         previous_user_intent_model_inference_used=used_model_intent_inference,
+        previous_user_intent_model_inference_attempted=attempted_model_intent_inference,
+        previous_user_intent_model_inference_unapplied=unapplied_model_intent_inference,
     )
     transcript.append(service_turn)
     _append_turn_entry(session, user_turn)
@@ -3441,7 +4127,11 @@ def respond(
             "user_text": punctuated_user_text,
             "service_reply": service_result.reply,
             "used_model_intent_inference": used_model_intent_inference,
+            "model_intent_inference_attempted": attempted_model_intent_inference,
+            "model_intent_inference_unapplied": unapplied_model_intent_inference,
             "previous_user_intent_model_inference_used": used_model_intent_inference,
+            "previous_user_intent_model_inference_attempted": attempted_model_intent_inference,
+            "previous_user_intent_model_inference_unapplied": unapplied_model_intent_inference,
             "slot_updates": dict(service_result.slot_updates),
             "collected_slots_snapshot": dict(collected_slots),
             "runtime_state_snapshot": asdict(runtime_state),
@@ -3484,6 +4174,44 @@ def respond(
         "close_reason": getattr(service_result, "close_reason", ""),
         **_build_session_view(req.session_id, session),
     }
+
+
+@app.post("/api/session/pending-ie")
+def predict_pending_ie(
+    req: RespondRequest,
+    current_user: dict[str, str] = Depends(_require_authenticated_user),
+):
+    session = _session_state(req.session_id)
+    if session["status"] != "active":
+        raise HTTPException(status_code=409, detail="当前会话已结束，请重新开始。")
+
+    raw_text = str(req.text or "")
+    sanitized = _sanitize_manual_user_text(raw_text)
+    if not sanitized:
+        raise HTTPException(status_code=400, detail="输入不能为空。")
+
+    transcript = session["transcript"]
+    round_index = _next_round_index(transcript)
+    if _manual_command_token(raw_text):
+        return {"entity_type": "", "round_index": round_index}
+    if round_index > int(session["rounds_limit"]):
+        return {"entity_type": "", "round_index": round_index}
+
+    punctuated_user_text = (
+        sanitized if round_index == 1 else _punctuate_user_text_for_session(sanitized)
+    )
+    user_turn = DialogueTurn(
+        speaker=USER_SPEAKER,
+        text=punctuated_user_text,
+        round_index=round_index,
+    )
+    entity_type = _predict_ie_entity_type_for_turn(
+        policy=session["policy"],
+        turn=user_turn,
+        transcript=transcript + [user_turn],
+        runtime_state=copy.deepcopy(session["runtime_state"]),
+    )
+    return {"entity_type": entity_type, "round_index": round_index}
 
 
 @app.post("/api/session/rewind")
@@ -3555,10 +4283,12 @@ def update_address_ie_display(
     session = _session_state(req.session_id)
     if session.get("review_submitted"):
         raise HTTPException(status_code=409, detail="当前会话评审已提交，不能再修改展示内容。")
-    changed = _apply_manual_address_ie_display_lines(
+    entity_type = _normalize_manual_ie_entity_type(req.entity_type)
+    changed = _apply_manual_ie_display_lines(
         session,
         round_index=req.round_index,
         enabled=bool(req.enabled),
+        entity_type=entity_type,
     )
     _persist_session(req.session_id, session)
     return {
@@ -3566,6 +4296,7 @@ def update_address_ie_display(
         "changed": changed,
         "round_index": int(req.round_index),
         "enabled": bool(req.enabled),
+        "entity_type": entity_type,
         **_build_session_view(req.session_id, session),
     }
 

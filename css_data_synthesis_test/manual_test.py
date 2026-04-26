@@ -294,20 +294,27 @@ def run_manual_test_session(
             list(SUPPLEMENTARY_COLLECTED_SLOTS),
         )
 
+        used_model_intent_inference = bool(
+            getattr(resolved_policy, "last_used_model_intent_inference", False)
+        )
+        attempted_model_intent_inference = bool(
+            getattr(resolved_policy, "last_model_intent_inference_attempted", used_model_intent_inference)
+        )
+        unapplied_model_intent_inference = bool(
+            attempted_model_intent_inference and not used_model_intent_inference
+        )
         transcript.append(
             DialogueTurn(
                 speaker=SERVICE_SPEAKER,
                 text=service_result.reply,
                 round_index=round_index,
+                model_intent_inference_used=used_model_intent_inference,
+                model_intent_inference_attempted=attempted_model_intent_inference,
+                model_intent_inference_unapplied=unapplied_model_intent_inference,
             )
         )
-        used_model_intent_inference = bool(
-            getattr(resolved_policy, "last_used_model_intent_inference", False)
-        )
         user_round_label = str(round_index)
-        service_round_label = f"{round_index}{'*' if used_model_intent_inference else ''}"
-        if used_model_intent_inference:
-            transcript[-1].model_intent_inference_used = True
+        service_round_label = f"{round_index}{'*' if attempted_model_intent_inference else ''}"
         print_func(f"[{service_round_label}] {display_speaker(SERVICE_SPEAKER)}: {service_result.reply}")
         if show_address_state and _should_print_address_state(
             runtime_state=runtime_state,
@@ -326,6 +333,8 @@ def run_manual_test_session(
                 "user_round_label": user_round_label,
                 "service_round_label": service_round_label,
                 "used_model_intent_inference": used_model_intent_inference,
+                "model_intent_inference_attempted": attempted_model_intent_inference,
+                "model_intent_inference_unapplied": unapplied_model_intent_inference,
                 "slot_updates": dict(service_result.slot_updates),
                 "collected_slots_snapshot": dict(collected_slots),
                 "runtime_state_snapshot": asdict(runtime_state),

@@ -784,6 +784,7 @@ class HiddenSettingsTool:
             self._attach_second_round_reply_plan(scenario.scenario_id, candidate)
             self._attach_product_routing_plan(scenario, candidate)
             self._attach_contact_plan(scenario.scenario_id, candidate)
+            self._apply_frontend_auto_address_policy(scenario, candidate, generation_plan)
             self._attach_address_plan(scenario.scenario_id, candidate)
             self._attach_installation_plan(candidate)
             duplicate_rate, max_similarity_score, most_similar_record = self._score_candidate(
@@ -841,6 +842,7 @@ class HiddenSettingsTool:
             "user_reply_noise_rounds",
             "user_reply_noise_instruction",
             "product_routing_plan",
+            "product_routing_initial_plan",
             "product_routing_result",
             "product_routing_trace",
             "product_routing_summary",
@@ -878,6 +880,7 @@ class HiddenSettingsTool:
         self._attach_second_round_reply_plan(scenario.scenario_id, candidate)
         self._attach_product_routing_plan(scenario, candidate)
         self._attach_contact_plan(scenario.scenario_id, candidate)
+        self._apply_frontend_auto_address_policy(scenario, candidate, generation_plan)
         self._attach_address_plan(scenario.scenario_id, candidate)
         self._attach_installation_plan(candidate)
         return scenario.with_generated_hidden_settings(
@@ -945,6 +948,7 @@ class HiddenSettingsTool:
             self._attach_user_generation_plan(candidate, generation_plan)
             self._attach_second_round_reply_plan(scenario.scenario_id, candidate)
             self._attach_contact_plan(scenario.scenario_id, candidate)
+            self._apply_frontend_auto_address_policy(scenario, candidate, generation_plan)
             self._attach_address_plan(scenario.scenario_id, candidate)
             self._attach_installation_plan(candidate)
 
@@ -1544,6 +1548,26 @@ class HiddenSettingsTool:
 
     def _attach_product_routing_plan(self, scenario: Scenario, candidate: dict[str, Any]) -> None:
         hidden_context = candidate["hidden_context"]
+        hidden_context.update(
+            {
+                "product_routing_entry_weights": dict(self.config.product_routing_entry_weights),
+                "product_routing_brand_series_weights": dict(
+                    self.config.product_routing_brand_series_weights
+                ),
+                "product_routing_usage_scene_weights": dict(
+                    self.config.product_routing_usage_scene_weights
+                ),
+                "product_routing_purchase_or_property_weights": dict(
+                    self.config.product_routing_purchase_or_property_weights
+                ),
+                "product_routing_property_year_weights": dict(
+                    self.config.product_routing_property_year_weights
+                ),
+                "product_routing_history_confirmation_weights": dict(
+                    self.config.product_routing_history_confirmation_weights
+                ),
+            }
+        )
         ensure_product_routing_plan(
             hidden_context,
             enabled=self.config.product_routing_enabled,
@@ -1619,6 +1643,49 @@ class HiddenSettingsTool:
             }
         )
 
+    def _apply_frontend_auto_address_policy(
+        self,
+        scenario: Scenario,
+        candidate: dict[str, Any],
+        generation_plan: UserGenerationPlan,
+    ) -> None:
+        hidden_context = scenario.hidden_context if isinstance(scenario.hidden_context, dict) else {}
+        if not bool(hidden_context.get("frontend_auto_address_policy_enabled", False)):
+            return
+
+        configured_known_address = str(
+            hidden_context.get("frontend_auto_configured_known_address", "")
+        ).strip()
+        if not configured_known_address:
+            candidate["_force_unknown_service_address"] = True
+            candidate["hidden_context"]["frontend_auto_address_policy"] = "unknown_service_address"
+            return
+
+        rng = random.Random()
+        matches_actual = rng.random() < self.config.service_known_address_matches_probability
+        customer = candidate.setdefault("customer", {})
+        if matches_actual:
+            customer["address"] = configured_known_address
+        else:
+            actual_address = str(customer.get("address", "")).strip()
+            if not _has_meaningful_text(actual_address) or actual_address == configured_known_address:
+                actual_address = self._generate_local_customer_address(
+                    f"{scenario.scenario_id}:configured-known-address-mismatch",
+                    generation_plan.address_style,
+                )
+            if actual_address == configured_known_address:
+                actual_address = f"{configured_known_address}东侧临街商铺"
+            customer["address"] = actual_address
+
+        candidate["_configured_service_known_address"] = configured_known_address
+        candidate["_configured_service_known_address_matches_actual"] = matches_actual
+        candidate["hidden_context"].update(
+            {
+                "frontend_auto_address_policy": "configured_known_address",
+                "frontend_auto_configured_known_address": configured_known_address,
+            }
+        )
+
     def _attach_address_plan(self, scenario_id: str, candidate: dict[str, Any]) -> None:
         rng = random.Random()
         actual_address = str(candidate["customer"].get("address", "")).strip()
@@ -1641,8 +1708,9 @@ class HiddenSettingsTool:
                 }
             )
             return
+        configured_known_address = str(candidate.get("_configured_service_known_address", "")).strip()
         force_unknown_service_address = bool(candidate.get("_force_unknown_service_address", False))
-        service_knows_address = (
+        service_knows_address = bool(configured_known_address) or (
             False
             if force_unknown_service_address
             else rng.random() < self.config.service_known_address_probability
@@ -1658,19 +1726,30 @@ class HiddenSettingsTool:
         mismatch_correction_value = actual_address
 
         if service_knows_address:
-            service_known_address_matches_actual = (
-                rng.random() < self.config.service_known_address_matches_probability
-            )
-            if service_known_address_matches_actual:
-                service_known_address_value = actual_address
+            if configured_known_address:
+                service_known_address_value = configured_known_address
+                service_known_address_matches_actual = bool(
+                    candidate.get("_configured_service_known_address_matches_actual", False)
+                ) and configured_known_address == actual_address
             else:
-                (
-                    service_known_address_value,
-                    service_known_address_mismatch_start_level,
-                    mismatch_correction_value,
-                    service_known_address_rewrite_levels,
-                    service_known_address_rewrite_end_level,
-                ) = self._build_known_address_mismatch_plan(actual_address, rng)
+                service_known_address_matches_actual = (
+                    rng.random() < self.config.service_known_address_matches_probability
+                )
+                if service_known_address_matches_actual:
+                    service_known_address_value = actual_address
+                else:
+                    (
+                        service_known_address_value,
+                        service_known_address_mismatch_start_level,
+                        mismatch_correction_value,
+                        service_known_address_rewrite_levels,
+                        service_known_address_rewrite_end_level,
+                    ) = self._build_known_address_mismatch_plan(actual_address, rng)
+            if configured_known_address and not service_known_address_matches_actual:
+                service_known_address_mismatch_start_level = "configured"
+                service_known_address_rewrite_levels = ["address"]
+                service_known_address_rewrite_end_level = "address"
+                mismatch_correction_value = actual_address
             if not service_known_address_matches_actual:
                 if rng.random() < self.config.address_confirmation_direct_correction_probability:
                     correction_address = mismatch_correction_value

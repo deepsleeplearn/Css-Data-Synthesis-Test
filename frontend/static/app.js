@@ -7,6 +7,7 @@ let sessionBusy = false;
 let sessionReviewLocked = false;
 let sessionTerminalEntries = [];
 let pendingManualUserEntry = null;
+let pendingManualIeDisplay = null;
 let terminalProcessingState = null;
 let reviewPending = false;
 let reviewAvailable = false;
@@ -17,6 +18,7 @@ let sessionStartedAt = '';
 let sessionEndedAt = '';
 let sessionTimerInterval = null;
 let autoKnownAddressValue = '';
+let knownAddressExplicitOverride = false;
 let autoCallStartTimeValue = '';
 let currentAutoModeId = '';
 let faultIssueReferenceCategories = null;
@@ -80,6 +82,7 @@ let activeAppMode = 'manual';
 let availableScenarios = [];
 let rewriteRecords = [];
 let rewriteImportedRecords = [];
+let rewriteRecordOrigins = [];
 let rewriteSelectedIndex = -1;
 let rewriteSourceName = '';
 let rewriteSourceFormat = '';
@@ -100,6 +103,7 @@ let rewriteConflictFocusTimer = null;
 let rewriteRecordSearchQuery = '';
 const rewriteObservationLoadingLineIds = new Set();
 let rewritePendingExportAction = null;
+let rewritePendingExportScope = 'all';
 let rewriteKeyPromptState = null;
 let rewriteTransferNoticeTimer = null;
 let blockingActionNoticeTimer = null;
@@ -136,12 +140,18 @@ const blockingActionNotice = document.getElementById('blocking-action-notice');
 const blockingActionNoticeText = document.getElementById('blocking-action-notice-text');
 const blockingActionNoticeCloseButton = document.getElementById('blocking-action-notice-close');
 const authUserName = document.getElementById('auth-user-name');
-const authUserMeta = document.getElementById('auth-user-meta');
 const knownAddressInput = document.getElementById('known-address');
-const ivrUtteranceInput = document.getElementById('ivr-utterance');
 const manualProductCategorySelect = document.getElementById('manual-product-category');
 const manualRequestTypeSelect = document.getElementById('manual-request-type');
-const manualMaxRoundsInput = document.getElementById('manual-max-rounds');
+const historyDeviceBrandSelect = document.getElementById('history-device-brand');
+const historyDeviceCategorySelect = document.getElementById('history-device-category');
+const historyDevicePurchaseDateInput = document.getElementById('history-device-purchase-date');
+const historyDeviceCalendarButton = document.getElementById('history-device-calendar-btn');
+const historyDevicePurchaseYearInput = document.getElementById('history-device-purchase-year');
+const historyDevicePurchaseMonthInput = document.getElementById('history-device-purchase-month');
+const historyDevicePurchaseDayInput = document.getElementById('history-device-purchase-day');
+const generateHistoryDeviceDateButton = document.getElementById('generate-history-device-date-btn');
+const clearHistoryDeviceButton = document.getElementById('clear-history-device-btn');
 const generateKnownAddressButton = document.getElementById('generate-known-address-btn');
 const clearKnownAddressButton = document.getElementById('clear-known-address-btn');
 const callStartTimeInput = document.getElementById('call-start-time');
@@ -170,6 +180,7 @@ const sendButton = document.getElementById('send-btn');
 const scenarioList = document.getElementById('scenario-list');
 const addressSlotsContainer = document.getElementById('address-slots-container');
 const addressSlotsPanel = document.getElementById('address-slots-panel');
+const autoModePreviewContainer = document.getElementById('auto-mode-preview-container');
 const sessionContextPanel = document.getElementById('session-context-panel');
 const sessionContextTitle = document.getElementById('session-context-title');
 const sessionContextMode = document.getElementById('session-context-mode');
@@ -202,7 +213,9 @@ const chatReplyButton = document.getElementById('chat-reply-btn');
 const chatEditButton = document.getElementById('chat-edit-btn');
 const chatRecallButton = document.getElementById('chat-recall-btn');
 const terminalTurnMenu = document.getElementById('terminal-turn-menu');
-const terminalToggleAddressIeButton = document.getElementById('terminal-toggle-address-ie-btn');
+const terminalInsertAddressIeButton = document.getElementById('terminal-insert-address-ie-btn');
+const terminalInsertTelephoneIeButton = document.getElementById('terminal-insert-telephone-ie-btn');
+const terminalRemoveIeButton = document.getElementById('terminal-remove-ie-btn');
 const chatWindow = document.getElementById('chat-window');
 const chatWindowHeader = document.getElementById('chat-window-header');
 const chatHideButton = document.getElementById('chat-hide-btn');
@@ -254,6 +267,7 @@ const rewriteAlternationText = document.getElementById('rewrite-alternation-text
 const rewriteAlternationList = document.getElementById('rewrite-alternation-list');
 const rewriteExportSummary = document.getElementById('rewrite-export-summary');
 const rewriteExportStats = document.getElementById('rewrite-export-stats');
+const rewriteExportScopeChoices = document.getElementById('rewrite-export-scope-choices');
 const rewriteExportCloseButton = document.getElementById('rewrite-export-close-btn');
 const rewriteExportCancelButton = document.getElementById('rewrite-export-cancel-btn');
 const rewriteExportConfirmButton = document.getElementById('rewrite-export-confirm-btn');
@@ -267,7 +281,6 @@ const rewriteKeyCloseButton = document.getElementById('rewrite-key-close-btn');
 const rewriteKeyCancelButton = document.getElementById('rewrite-key-cancel-btn');
 const rewriteKeyConfirmButton = document.getElementById('rewrite-key-confirm-btn');
 const PERSONA_HIDDEN_CONTEXT_FIELDS = [
-    ['gender', '性别'],
     ['emotion', '当前情绪'],
     ['urgency', '紧急程度'],
     ['prior_attempts', '过往尝试'],
@@ -1244,6 +1257,7 @@ function resetRewriteWorkspace() {
     closeRewriteRecordMenu();
     rewriteRecords = [];
     rewriteImportedRecords = [];
+    rewriteRecordOrigins = [];
     rewriteSelectedIndex = -1;
     rewriteSourceName = '';
     rewriteSourceFormat = '';
@@ -1554,7 +1568,7 @@ function updateAutoModeButtonState() {
     autoModeButton.disabled = !shouldShow
         || sessionBusy
         || (currentSessionId && !sessionClosed)
-        || reviewPending
+        || hasBlockingReviewPending()
         || isReviewModalVisible()
         || !isCallStartTimeValid();
     setSoftDisabledButton(autoModeButton, false);
@@ -1647,16 +1661,145 @@ function getManualRequestLabel(requestType) {
 }
 
 function getManualMaxRoundsValue() {
-    const parsed = Number.parseInt(String(manualMaxRoundsInput?.value || '').trim(), 10);
-    if (!Number.isFinite(parsed) || parsed < 1) return 32;
-    return parsed;
+    return 32;
 }
 
 function sanitizeManualMaxRoundsInput() {
-    if (!manualMaxRoundsInput) return getManualMaxRoundsValue();
-    const normalized = String(getManualMaxRoundsValue());
-    manualMaxRoundsInput.value = normalized;
-    return Number.parseInt(normalized, 10);
+    return getManualMaxRoundsValue();
+}
+
+function historyDeviceCategoryOptionsForBrand(brand) {
+    const normalizedBrand = String(brand || '').trim();
+    if (!normalizedBrand) {
+        return [''];
+    }
+    if (['COLMO', '真暖', '真省', '雪焰', '暖家', '煤改电', '真享'].includes(normalizedBrand)) {
+        return ['家用空气能热水机'];
+    }
+    if (normalizedBrand === '烈焰') {
+        return ['空气能热水机'];
+    }
+    return ['', '家用空气能热水机', '空气能热水机'];
+}
+
+function syncHistoryDeviceCategoryOptions() {
+    if (!historyDeviceCategorySelect) return;
+    const currentValue = historyDeviceCategorySelect.value;
+    const options = historyDeviceCategoryOptionsForBrand(historyDeviceBrandSelect?.value || '');
+    historyDeviceCategorySelect.innerHTML = '';
+    options.forEach((value) => {
+        const option = document.createElement('option');
+        option.value = value;
+        option.textContent = value || '未知';
+        historyDeviceCategorySelect.append(option);
+    });
+    if (options.includes(currentValue)) {
+        historyDeviceCategorySelect.value = currentValue;
+    } else {
+        historyDeviceCategorySelect.value = options[0] || '';
+    }
+}
+
+function formatDateForInput(date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
+function randomHistoryDevicePurchaseDate() {
+    const now = new Date();
+    const end = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const start = new Date(Math.max(2018, now.getFullYear() - 7), 0, 1);
+    const span = Math.max(1, end.getTime() - start.getTime());
+    return formatDateForInput(new Date(start.getTime() + Math.floor(Math.random() * span)));
+}
+
+function parseHistoryDeviceDateParts() {
+    const year = String(historyDevicePurchaseYearInput?.value || '').trim();
+    const month = String(historyDevicePurchaseMonthInput?.value || '').trim();
+    const day = String(historyDevicePurchaseDayInput?.value || '').trim();
+    return { year, month, day };
+}
+
+function isValidHistoryDeviceDateParts(year, month, day) {
+    if (!/^\d{4}$/.test(year) || !/^\d{1,2}$/.test(month) || !/^\d{1,2}$/.test(day)) return false;
+    const yearNumber = Number(year);
+    const monthNumber = Number(month);
+    const dayNumber = Number(day);
+    if (monthNumber < 1 || monthNumber > 12 || dayNumber < 1) return false;
+    const maxDay = new Date(yearNumber, monthNumber, 0).getDate();
+    return dayNumber <= maxDay;
+}
+
+function syncHistoryDeviceDateValueFromParts() {
+    if (!historyDevicePurchaseDateInput) return '';
+    const { year, month, day } = parseHistoryDeviceDateParts();
+    if (!isValidHistoryDeviceDateParts(year, month, day)) {
+        historyDevicePurchaseDateInput.value = '';
+        return '';
+    }
+    const normalized = `${year}-${String(Number(month)).padStart(2, '0')}-${String(Number(day)).padStart(2, '0')}`;
+    historyDevicePurchaseDateInput.value = normalized;
+    return normalized;
+}
+
+function setHistoryDeviceDateParts(dateValue) {
+    const match = String(dateValue || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) {
+        if (historyDevicePurchaseYearInput) historyDevicePurchaseYearInput.value = '';
+        if (historyDevicePurchaseMonthInput) historyDevicePurchaseMonthInput.value = '';
+        if (historyDevicePurchaseDayInput) historyDevicePurchaseDayInput.value = '';
+        if (historyDevicePurchaseDateInput) historyDevicePurchaseDateInput.value = '';
+        return;
+    }
+    const [, year, month, day] = match;
+    if (historyDevicePurchaseYearInput) historyDevicePurchaseYearInput.value = year;
+    if (historyDevicePurchaseMonthInput) historyDevicePurchaseMonthInput.value = String(Number(month));
+    if (historyDevicePurchaseDayInput) historyDevicePurchaseDayInput.value = String(Number(day));
+    if (historyDevicePurchaseDateInput) historyDevicePurchaseDateInput.value = `${year}-${month}-${day}`;
+}
+
+function openHistoryDeviceCalendarPicker() {
+    if (!historyDevicePurchaseDateInput) return;
+    const currentValue = syncHistoryDeviceDateValueFromParts();
+    if (currentValue) {
+        historyDevicePurchaseDateInput.value = currentValue;
+    }
+    if (typeof historyDevicePurchaseDateInput.showPicker === 'function') {
+        historyDevicePurchaseDateInput.showPicker();
+        return;
+    }
+    historyDevicePurchaseDateInput.focus();
+    historyDevicePurchaseDateInput.click();
+}
+
+function clearHistoryDeviceConfig() {
+    if (historyDeviceBrandSelect) historyDeviceBrandSelect.value = '';
+    syncHistoryDeviceCategoryOptions();
+    setHistoryDeviceDateParts('');
+    syncManualScenarioSelection({ refreshKnownAddress: false });
+}
+
+function getHistoryDeviceConfig() {
+    return {
+        brand: String(historyDeviceBrandSelect?.value || '').trim(),
+        category: String(historyDeviceCategorySelect?.value || '').trim(),
+        purchase_date: String(historyDevicePurchaseDateInput?.value || '').trim(),
+    };
+}
+
+function getKnownAddressPayloadValue({ includeAutoPrefill = true } = {}) {
+    const value = String(knownAddressInput?.value || '').trim();
+    if (
+        !includeAutoPrefill
+        && value
+        && value === String(autoKnownAddressValue || '').trim()
+        && !knownAddressExplicitOverride
+    ) {
+        return '';
+    }
+    return value;
 }
 
 function buildConfiguredScenarioSelection() {
@@ -2684,6 +2827,59 @@ function cloneRewriteRecordData(value) {
     return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
+function inferRewriteRecordOrigin(record) {
+    const source = String(record?.source || '').trim();
+    if (source === 'manual_test' || source === 'auto_mode') return 'test';
+    return 'file';
+}
+
+function getRewriteRecordOrigin(index) {
+    const origin = String(rewriteRecordOrigins[index] || '').trim();
+    if (origin === 'file' || origin === 'test') return origin;
+    return inferRewriteRecordOrigin(rewriteRecords[index]);
+}
+
+function getRewriteOriginIndexes(origin) {
+    return rewriteRecords
+        .map((_, index) => index)
+        .filter((index) => getRewriteRecordOrigin(index) === origin);
+}
+
+function summarizeRewriteRecordOrigins(indexes = rewriteRecords.map((_, index) => index)) {
+    return indexes.reduce((summary, index) => {
+        const origin = getRewriteRecordOrigin(index);
+        if (origin === 'test') {
+            summary.test += 1;
+        } else {
+            summary.file += 1;
+        }
+        return summary;
+    }, { file: 0, test: 0 });
+}
+
+function hasMixedRewriteRecordOrigins() {
+    const summary = summarizeRewriteRecordOrigins();
+    return summary.file > 0 && summary.test > 0;
+}
+
+function getRewriteExportScopeLabel(scope = 'all') {
+    if (scope === 'file') return '上传文件';
+    if (scope === 'test') return '测试转改写';
+    return '全部记录';
+}
+
+function getRewriteExportIndexes(scope = 'all') {
+    if (scope === 'file') return getRewriteOriginIndexes('file');
+    if (scope === 'test') return getRewriteOriginIndexes('test');
+    return rewriteRecords.map((_, index) => index);
+}
+
+function syncRewriteImportedRecordsFallback() {
+    rewriteImportedRecords = rewriteRecords.map((record, index) => (
+        cloneRewriteRecordData(rewriteImportedRecords[index]) ?? cloneRewriteRecordData(record)
+    ));
+}
+
 function getRewriteRecordStatus(record) {
     const recordIndex = rewriteRecords.indexOf(record);
     const currentLines = recordIndex >= 0
@@ -2705,8 +2901,9 @@ function getRewriteRecordStatus(record) {
     return '未提交';
 }
 
-function summarizeRewriteRecordStatuses() {
-    return rewriteRecords.reduce((summary, record) => {
+function summarizeRewriteRecordStatuses(scope = 'all') {
+    return getRewriteExportIndexes(scope).reduce((summary, index) => {
+        const record = rewriteRecords[index];
         const status = getRewriteRecordStatus(record);
         if (status === '已提交') {
             summary.submitted += 1;
@@ -2715,8 +2912,10 @@ function summarizeRewriteRecordStatuses() {
         } else {
             summary.unannotated += 1;
         }
+        summary.total += 1;
         return summary;
     }, {
+        total: 0,
         submitted: 0,
         unsubmitted: 0,
         unannotated: 0,
@@ -2728,21 +2927,57 @@ function closeRewriteExportModal() {
     rewriteExportModal.classList.add('hidden');
     rewriteExportModal.setAttribute('aria-hidden', 'true');
     rewritePendingExportAction = null;
+    rewritePendingExportScope = 'all';
+    if (rewriteExportScopeChoices) {
+        rewriteExportScopeChoices.classList.add('hidden');
+    }
+    if (rewriteExportConfirmButton) {
+        rewriteExportConfirmButton.classList.remove('hidden');
+    }
 }
 
-function openRewriteExportModal(statusSummary) {
+function openRewriteExportScopeModal() {
     if (!rewriteExportModal || !rewriteExportSummary || !rewriteExportStats) return;
     clearElement(rewriteExportStats);
-    rewriteExportSummary.textContent = '当前文件中存在未提交或未标注数据。强制导出时，只有“已提交”的数据会保留 rewrited，其余记录将按原始导入内容导出。';
-    appendDataItem(rewriteExportStats, '已提交', String(statusSummary.submitted));
-    appendDataItem(rewriteExportStats, '未提交', String(statusSummary.unsubmitted));
-    appendDataItem(rewriteExportStats, '未标注', String(statusSummary.unannotated));
+    rewritePendingExportAction = null;
+    rewritePendingExportScope = 'all';
+    const originSummary = summarizeRewriteRecordOrigins();
+    rewriteExportSummary.textContent = '当前右侧同时存在上传文件数据和测试转改写数据，请选择本次导出范围。';
+    appendDataItem(rewriteExportStats, '上传文件', `${originSummary.file} 条`);
+    appendDataItem(rewriteExportStats, '测试转改写', `${originSummary.test} 条`);
+    if (rewriteExportScopeChoices) {
+        rewriteExportScopeChoices.classList.remove('hidden');
+    }
+    if (rewriteExportConfirmButton) {
+        rewriteExportConfirmButton.classList.add('hidden');
+    }
     rewriteExportModal.classList.remove('hidden');
     rewriteExportModal.setAttribute('aria-hidden', 'false');
 }
 
-function buildRewriteExportRecords() {
-    return rewriteRecords.map((record, index) => {
+function openRewriteExportModal(statusSummary, scope = 'all') {
+    if (!rewriteExportModal || !rewriteExportSummary || !rewriteExportStats) return;
+    clearElement(rewriteExportStats);
+    rewritePendingExportScope = scope;
+    rewriteExportSummary.textContent = `当前导出范围为“${getRewriteExportScopeLabel(scope)}”，其中存在未提交或未标注数据。强制导出时，只有“已提交”的数据会保留 rewrited，其余记录将按原始导入内容导出。`;
+    appendDataItem(rewriteExportStats, '导出范围', getRewriteExportScopeLabel(scope));
+    appendDataItem(rewriteExportStats, '记录数', String(statusSummary.total));
+    appendDataItem(rewriteExportStats, '已提交', String(statusSummary.submitted));
+    appendDataItem(rewriteExportStats, '未提交', String(statusSummary.unsubmitted));
+    appendDataItem(rewriteExportStats, '未标注', String(statusSummary.unannotated));
+    if (rewriteExportScopeChoices) {
+        rewriteExportScopeChoices.classList.add('hidden');
+    }
+    if (rewriteExportConfirmButton) {
+        rewriteExportConfirmButton.classList.remove('hidden');
+    }
+    rewriteExportModal.classList.remove('hidden');
+    rewriteExportModal.setAttribute('aria-hidden', 'false');
+}
+
+function buildRewriteExportRecords(scope = 'all') {
+    return getRewriteExportIndexes(scope).map((index) => {
+        const record = rewriteRecords[index];
         const status = getRewriteRecordStatus(record);
         const currentRecord = cloneRewriteRecordData(record);
         const importedRecord = cloneRewriteRecordData(rewriteImportedRecords[index]);
@@ -2834,6 +3069,7 @@ function appendCurrentSessionToRewriteMode() {
     }
     rewriteImportedRecords.push(cloneRewriteRecordData(record));
     rewriteRecords.push(cloneRewriteRecordData(record));
+    rewriteRecordOrigins.push('test');
     if (!rewriteSourceName) {
         rewriteSourceName = record.source === 'auto_mode' ? 'auto_mode_export.jsonl' : 'manual_session_export.jsonl';
     }
@@ -2853,49 +3089,83 @@ function appendCurrentSessionToRewriteMode() {
     selectRewriteRecord(targetIndex);
 }
 
-function buildRewriteExportContent() {
-    const exportRecords = buildRewriteExportRecords();
-    const format = String(rewriteSourceFormat || '').trim().toLowerCase() === 'jsonl' ? 'jsonl' : 'json';
+function getRewriteExportFormat(scope = 'all') {
+    if (scope === 'test') return 'jsonl';
+    if (scope === 'all') {
+        const originSummary = summarizeRewriteRecordOrigins(getRewriteExportIndexes(scope));
+        if (originSummary.test > 0 && originSummary.file === 0) return 'jsonl';
+        if (originSummary.test > 0 && originSummary.file > 0) return 'jsonl';
+    }
+    return String(rewriteSourceFormat || '').trim().toLowerCase() === 'jsonl' ? 'jsonl' : 'json';
+}
+
+function buildRewriteExportContent(scope = 'all') {
+    const exportRecords = buildRewriteExportRecords(scope);
+    const format = getRewriteExportFormat(scope);
     if (format === 'jsonl') {
         return exportRecords.map((record) => JSON.stringify(record)).join('\n');
     }
     return JSON.stringify(exportRecords, null, 2);
 }
 
-function buildRewriteExportFileName() {
+function buildRewriteExportFileName(scope = 'all') {
     const sourceName = String(rewriteSourceName || 'rewrite_export').trim();
     const baseName = (sourceName.replace(/\.[^.]+$/, '') || 'rewrite_export').replace(/[\\/:*?"<>|]+/g, '_');
-    const extension = String(rewriteSourceFormat || '').trim().toLowerCase() === 'jsonl' ? 'jsonl' : 'json';
-    return `${baseName}_rewrited.${extension}`;
+    const extension = getRewriteExportFormat(scope);
+    const scopeSuffix = scope === 'file'
+        ? 'file'
+        : scope === 'test'
+            ? 'test'
+            : hasMixedRewriteRecordOrigins()
+                ? 'all'
+                : '';
+    return `${baseName}${scopeSuffix ? `_${scopeSuffix}` : ''}_rewrited.${extension}`;
 }
 
 function exportRewriteFile() {
     if (!rewriteRecords.length) return;
-    const statusSummary = summarizeRewriteRecordStatuses();
+    if (hasMixedRewriteRecordOrigins()) {
+        openRewriteExportScopeModal();
+        return;
+    }
+    exportRewriteScopeWithValidation('all');
+}
+
+function exportRewriteScopeWithValidation(scope = 'all') {
+    const indexes = getRewriteExportIndexes(scope);
+    if (!indexes.length) {
+        if (rewriteUploadStatus) {
+            rewriteUploadStatus.textContent = `${getRewriteExportScopeLabel(scope)}没有可导出的记录。`;
+        }
+        return;
+    }
+    const statusSummary = summarizeRewriteRecordStatuses(scope);
     if (statusSummary.unsubmitted > 0 || statusSummary.unannotated > 0) {
         rewritePendingExportAction = () => {
             closeRewriteExportModal();
-            exportRewriteFileWithCurrentState();
+            exportRewriteFileWithCurrentState(scope);
         };
-        openRewriteExportModal(statusSummary);
+        openRewriteExportModal(statusSummary, scope);
         return;
     }
-    exportRewriteFileWithCurrentState();
+    closeRewriteExportModal();
+    exportRewriteFileWithCurrentState(scope);
 }
 
-function exportRewriteFileWithCurrentState() {
+function exportRewriteFileWithCurrentState(scope = 'all') {
     if (!rewriteRecords.length) return;
-    const statusSummary = summarizeRewriteRecordStatuses();
+    const statusSummary = summarizeRewriteRecordStatuses(scope);
     if (statusSummary.unsubmitted > 0 || statusSummary.unannotated > 0) {
         // Export is intentionally selective; non-submitted records fall back to imported content.
         if (rewriteUploadStatus) {
-            rewriteUploadStatus.textContent = '存在未提交或未标注数据，导出文件中仅保留已提交记录的 rewrited。';
+            rewriteUploadStatus.textContent = `${getRewriteExportScopeLabel(scope)}存在未提交或未标注数据，导出文件中仅保留已提交记录的 rewrited。`;
         }
     }
-    const content = buildRewriteExportContent();
-    const fileName = buildRewriteExportFileName();
+    const content = buildRewriteExportContent(scope);
+    const fileName = buildRewriteExportFileName(scope);
+    const format = getRewriteExportFormat(scope);
     const blob = new Blob([content], {
-        type: String(rewriteSourceFormat || '').trim().toLowerCase() === 'jsonl'
+        type: format === 'jsonl'
             ? 'application/x-ndjson;charset=utf-8'
             : 'application/json;charset=utf-8',
     });
@@ -2910,7 +3180,7 @@ function exportRewriteFileWithCurrentState() {
         URL.revokeObjectURL(objectUrl);
     }, 0);
     if (rewriteUploadStatus) {
-        rewriteUploadStatus.textContent = `已导出编辑后文件：${fileName}`;
+        rewriteUploadStatus.textContent = `已导出${getRewriteExportScopeLabel(scope)}：${fileName}`;
     }
 }
 
@@ -3448,8 +3718,59 @@ function getFilteredRewriteRecordIndexes() {
         .map(({ index }) => index);
 }
 
+function buildRewriteRecordButton(index) {
+    const record = rewriteRecords[index];
+    const meta = buildRewriteRecordMeta(record);
+    const statusClass = buildRewriteStatusClass(meta.status);
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'scenario-item';
+    button.dataset.recordIndex = String(index);
+    if (meta.hasSourceIssue) {
+        button.classList.add('is-invalid-source');
+        button.title = `原始对话未通过当前结构校验：${meta.sourceValidation.text}`;
+    }
+    if (index === rewriteSelectedIndex) {
+        button.classList.add('active');
+    }
+    button.innerHTML = `
+        <span class="scenario-title">${escapeHtml(buildRewriteRecordTitle(record, index))}</span>
+        <span class="scenario-meta">第 ${index + 1} 条</span>
+        <span class="scenario-meta">轮次/行数：${meta.turns}</span>
+        <span class="scenario-issue ${statusClass}">状态：${escapeHtml(meta.status)}</span>
+    `;
+    button.addEventListener('click', () => {
+        selectRewriteRecord(index);
+    });
+    return button;
+}
+
+function appendRewriteRecordGroup(container, { title, indexes, total }) {
+    const section = document.createElement('section');
+    section.className = 'rewrite-record-group';
+    const header = document.createElement('div');
+    header.className = 'rewrite-record-group-header';
+    header.innerHTML = `
+        <span>${escapeHtml(title)}</span>
+        <span>${indexes.length} / ${total}</span>
+    `;
+    const list = document.createElement('div');
+    list.className = 'rewrite-record-group-list';
+    if (indexes.length) {
+        indexes.forEach((index) => {
+            list.appendChild(buildRewriteRecordButton(index));
+        });
+    } else {
+        list.innerHTML = '<div class="terminal-hint">没有匹配记录。</div>';
+    }
+    section.appendChild(header);
+    section.appendChild(list);
+    container.appendChild(section);
+}
+
 function renderRewriteRecordList() {
     clearElement(rewriteRecordList);
+    rewriteRecordList.classList.remove('has-groups');
     if (!rewriteRecords.length) {
         rewriteRecordList.innerHTML = '<div class="terminal-hint">导入文件后显示记录列表</div>';
         if (rewriteRecordSearchStatus) {
@@ -3459,42 +3780,46 @@ function renderRewriteRecordList() {
     }
 
     const matchedIndexes = getFilteredRewriteRecordIndexes();
+    const originSummary = summarizeRewriteRecordOrigins();
+    const isMixed = originSummary.file > 0 && originSummary.test > 0;
     if (rewriteRecordSearchStatus) {
         const query = String(rewriteRecordSearchQuery || '').trim();
-        rewriteRecordSearchStatus.textContent = query
-            ? `当前匹配 ${matchedIndexes.length} 条记录，回车跳到首条匹配。`
-            : `当前共 ${rewriteRecords.length} 条记录，输入后实时筛选。`;
+        if (isMixed) {
+            const matchedOriginSummary = summarizeRewriteRecordOrigins(matchedIndexes);
+            rewriteRecordSearchStatus.textContent = query
+                ? `当前匹配 ${matchedIndexes.length} 条，上传文件 ${matchedOriginSummary.file} 条，测试转改写 ${matchedOriginSummary.test} 条。`
+                : `当前共 ${rewriteRecords.length} 条，上传文件 ${originSummary.file} 条，测试转改写 ${originSummary.test} 条。`;
+        } else {
+            rewriteRecordSearchStatus.textContent = query
+                ? `当前匹配 ${matchedIndexes.length} 条记录，回车跳到首条匹配。`
+                : `当前共 ${rewriteRecords.length} 条记录，输入后实时筛选。`;
+        }
     }
     if (!matchedIndexes.length) {
         rewriteRecordList.innerHTML = '<div class="terminal-hint">没有匹配到对应记录。</div>';
         return;
     }
 
-    matchedIndexes.forEach((index) => {
-        const record = rewriteRecords[index];
-        const meta = buildRewriteRecordMeta(record);
-        const statusClass = buildRewriteStatusClass(meta.status);
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'scenario-item';
-        button.dataset.recordIndex = String(index);
-        if (meta.hasSourceIssue) {
-            button.classList.add('is-invalid-source');
-            button.title = `原始对话未通过当前结构校验：${meta.sourceValidation.text}`;
-        }
-        if (index === rewriteSelectedIndex) {
-            button.classList.add('active');
-        }
-        button.innerHTML = `
-            <span class="scenario-title">${escapeHtml(buildRewriteRecordTitle(record, index))}</span>
-            <span class="scenario-meta">第 ${index + 1} 条</span>
-            <span class="scenario-meta">轮次/行数：${meta.turns}</span>
-            <span class="scenario-issue ${statusClass}">状态：${escapeHtml(meta.status)}</span>
-        `;
-        button.addEventListener('click', () => {
-            selectRewriteRecord(index);
+    if (isMixed) {
+        rewriteRecordList.classList.add('has-groups');
+        const groupContainer = document.createElement('div');
+        groupContainer.className = 'rewrite-record-groups';
+        appendRewriteRecordGroup(groupContainer, {
+            title: '上传文件',
+            indexes: matchedIndexes.filter((index) => getRewriteRecordOrigin(index) === 'file'),
+            total: originSummary.file,
         });
-        rewriteRecordList.appendChild(button);
+        appendRewriteRecordGroup(groupContainer, {
+            title: '测试转改写',
+            indexes: matchedIndexes.filter((index) => getRewriteRecordOrigin(index) === 'test'),
+            total: originSummary.test,
+        });
+        rewriteRecordList.appendChild(groupContainer);
+        return;
+    }
+
+    matchedIndexes.forEach((index) => {
+        rewriteRecordList.appendChild(buildRewriteRecordButton(index));
     });
 }
 
@@ -3507,6 +3832,11 @@ function renderRewriteFileInfo() {
     appendDataItem(rewriteFileInfo, '文件名', rewriteSourceName || '-');
     appendDataItem(rewriteFileInfo, '格式', rewriteSourceFormat || '-');
     appendDataItem(rewriteFileInfo, '记录数', String(rewriteRecords.length));
+    const originSummary = summarizeRewriteRecordOrigins();
+    if (originSummary.file > 0 && originSummary.test > 0) {
+        appendDataItem(rewriteFileInfo, '上传文件', `${originSummary.file} 条`);
+        appendDataItem(rewriteFileInfo, '测试转改写', `${originSummary.test} 条`);
+    }
 }
 
 function renderRewriteRecordInfo(record) {
@@ -3901,6 +4231,9 @@ function deleteRewriteRecord(recordIndex) {
     if (recordIndex < rewriteImportedRecords.length) {
         rewriteImportedRecords.splice(recordIndex, 1);
     }
+    if (recordIndex < rewriteRecordOrigins.length) {
+        rewriteRecordOrigins.splice(recordIndex, 1);
+    }
     const nextEditCache = rebuildRewriteIndexedCache(rewriteRecordEditCache, recordIndex);
     const nextHistoryCache = rebuildRewriteIndexedCache(rewriteRecordHistoryCache, recordIndex);
     rewriteRecordEditCache.clear();
@@ -3973,23 +4306,49 @@ async function submitRewriteRecordReview(recordIndex) {
 
 async function importRewriteFile(file) {
     if (!file) return;
-    rewriteRecordEditCache.clear();
-    rewriteRecordHistoryCache.clear();
-    rewriteActiveEditSession = null;
+    const preservedTestRecords = [];
+    const preservedTestImportedRecords = [];
+    rewriteRecords.forEach((record, index) => {
+        if (getRewriteRecordOrigin(index) !== 'test') return;
+        preservedTestRecords.push(cloneRewriteRecordData(record));
+        preservedTestImportedRecords.push(cloneRewriteRecordData(rewriteImportedRecords[index]) ?? cloneRewriteRecordData(record));
+    });
     const text = await file.text();
     const { parsed, format } = parseRewriteSourcePayload(text, file.name);
     await resolveRewriteImportPreferences(parsed);
     const records = parseRewriteRecords(parsed, { dialogueKeyOverride: rewriteDialogueKeyPreference });
-    rewriteImportedRecords = cloneRewriteRecordData(records) || [];
-    rewriteRecords = cloneRewriteRecordData(records) || [];
+    const importedFileRecords = cloneRewriteRecordData(records) || [];
+    rewriteRecordEditCache.clear();
+    rewriteRecordHistoryCache.clear();
+    rewriteActiveEditSession = null;
+    rewriteImportedRecords = [
+        ...(cloneRewriteRecordData(records) || []),
+        ...preservedTestImportedRecords,
+    ];
+    rewriteRecords = [
+        ...importedFileRecords,
+        ...preservedTestRecords,
+    ];
+    rewriteRecordOrigins = [
+        ...importedFileRecords.map(() => 'file'),
+        ...preservedTestRecords.map(() => 'test'),
+    ];
+    syncRewriteImportedRecordsFallback();
     rewriteAvailableRoles = collectRewriteAvailableRoles(rewriteRecords);
     rewriteSelectedIndex = -1;
     rewriteSourceName = file.name;
     rewriteSourceFormat = format;
     renderRewriteFileInfo();
     renderRewriteRecordList();
-    setRewriteUploadStatus(`已导入 ${file.name}，共 ${records.length} 条记录。`);
-    selectRewriteRecord(0);
+    const extraMessage = preservedTestRecords.length
+        ? `；已保留测试转改写 ${preservedTestRecords.length} 条`
+        : '';
+    setRewriteUploadStatus(`已导入 ${file.name}，共 ${records.length} 条记录${extraMessage}。`);
+    if (rewriteRecords.length) {
+        selectRewriteRecord(0);
+    } else {
+        applyRewriteEmptyState();
+    }
 }
 
 function shouldOfferIssueReference(entry) {
@@ -4020,17 +4379,19 @@ function closeTerminalTurnMenu() {
     terminalTurnMenu.style.top = '';
 }
 
-function openTerminalTurnMenu({ roundIndex, hasAddressIeDisplay, clientX, clientY }) {
-    if (!terminalTurnMenu || !terminalToggleAddressIeButton) return;
+function openTerminalTurnMenu({ roundIndex, hasIeDisplay, clientX, clientY }) {
+    if (!terminalTurnMenu || !terminalInsertAddressIeButton || !terminalInsertTelephoneIeButton || !terminalRemoveIeButton) return;
     terminalTurnMenuState = {
         roundIndex: Number(roundIndex || 0),
-        hasAddressIeDisplay: Boolean(hasAddressIeDisplay),
+        hasIeDisplay: Boolean(hasIeDisplay),
     };
-    terminalToggleAddressIeButton.textContent = hasAddressIeDisplay
-        ? '移除 function_call 与 observation'
-        : '插入 function_call 与 observation';
+    terminalInsertAddressIeButton.textContent = hasIeDisplay ? '替换为地址抽取' : '地址抽取';
+    terminalInsertTelephoneIeButton.textContent = hasIeDisplay ? '替换为电话抽取' : '电话抽取';
+    terminalRemoveIeButton.textContent = '移除抽取';
+    terminalRemoveIeButton.hidden = !hasIeDisplay;
+    terminalRemoveIeButton.classList.toggle('hidden', !hasIeDisplay);
     terminalTurnMenu.style.left = `${Math.max(16, Math.min(clientX, window.innerWidth - 252))}px`;
-    terminalTurnMenu.style.top = `${Math.max(16, Math.min(clientY, window.innerHeight - 72))}px`;
+    terminalTurnMenu.style.top = `${Math.max(16, Math.min(clientY, window.innerHeight - 148))}px`;
     terminalTurnMenu.classList.remove('hidden');
     terminalTurnMenu.setAttribute('aria-hidden', 'false');
 }
@@ -4115,7 +4476,7 @@ function updateCallStartTimeValidationState() {
 function updateStartSessionButtonState() {
     const canStart = Boolean(authenticatedUser)
         && !sessionBusy
-        && !reviewPending
+        && !hasBlockingReviewPending()
         && !isReviewModalVisible()
         && isCallStartTimeValid();
     startSessionButton.disabled = !canStart;
@@ -4274,22 +4635,36 @@ function endTextMagnifierPress(event) {
     hideTextMagnifier();
 }
 
-async function hydrateKnownAddressPrefill(force = false) {
+async function hydrateKnownAddressPrefill(force = false, options = {}) {
     if (!authenticatedUser || !selectedScenario) return;
+    const { explicit = false, autoMode = false } = options;
     const currentValue = knownAddressInput.value.trim();
+    if (knownAddressExplicitOverride && !explicit && (!force || currentValue || !autoMode)) return;
     if (!force && currentValue && currentValue !== autoKnownAddressValue) return;
     const scenarioId = selectedScenario.id;
     try {
         const params = new URLSearchParams({ scenario_id: scenarioId });
+        if (autoMode) {
+            params.set('auto_mode', 'true');
+        }
         const data = await apiFetch(`/api/mock-known-address?${params.toString()}`);
         if (!selectedScenario || selectedScenario.id !== scenarioId) return;
         autoKnownAddressValue = String(data.known_address || '').trim();
         knownAddressInput.value = autoKnownAddressValue;
+        knownAddressExplicitOverride = Boolean(explicit);
     } catch (error) {
         if (authenticatedUser) {
             appendTerminalLine(`[系统错误] 预填已知地址失败：${error.message}`, 'error');
         }
     }
+}
+
+async function randomizeManualSessionInputsBeforeStart(options = {}) {
+    const { autoMode = false } = options;
+    selectedScenario = buildConfiguredScenarioSelection();
+    prefillMockCallStartTime(true);
+    updateCallStartTimeValidationState();
+    await hydrateKnownAddressPrefill(true, { autoMode });
 }
 
 function formatElapsedDuration(startValue, endValue = '') {
@@ -4365,7 +4740,11 @@ function updateSessionContext(scenario, sessionConfig = {}) {
     const hiddenContext = scenario.hidden_context || {};
 
     appendSummaryChip(sessionContextSummary, '场景', scenario.scenario_id || '-');
-    appendSummaryChip(sessionContextSummary, '诉求类型', request.request_type || '-');
+    appendSummaryChip(
+        sessionContextSummary,
+        '诉求类型',
+        getManualRequestLabel(request.request_type) || request.request_type || '-',
+    );
     appendSummaryChip(
         sessionContextSummary,
         '已知地址',
@@ -4378,23 +4757,26 @@ function updateSessionContext(scenario, sessionConfig = {}) {
     );
 
     [
-        ['full_name', customer.full_name],
-        ['surname', customer.surname],
-        ['phone', customer.phone],
-        ['address', customer.address],
-        ['persona', customer.persona],
-        ['speech_style', customer.speech_style],
+        ['姓名', customer.full_name],
+        ['姓氏', customer.surname],
+        ['性别', hiddenContext.gender || customer.gender],
+        ['联系电话', customer.phone],
+        ['真实地址', customer.address],
     ].forEach(([key, value]) => appendContextItem(sessionCustomerContainer, key, value));
 
     [
-        ['request_type', request.request_type],
-        ['issue', request.issue],
-        ['desired_resolution', request.desired_resolution],
-        ['availability', request.availability],
+        ['诉求类型', getManualRequestLabel(request.request_type) || request.request_type],
+        ['问题描述', request.issue],
+        ['期望处理', request.desired_resolution],
+        ['可服务时间', request.availability],
     ].forEach(([key, value]) => appendContextItem(sessionRequestContainer, key, value));
 
-    const visiblePersonaFields = PERSONA_HIDDEN_CONTEXT_FIELDS
+    const visiblePersonaFields = [
+        ['用户画像', customer.persona],
+        ['说话风格', customer.speech_style],
+        ...PERSONA_HIDDEN_CONTEXT_FIELDS
         .map(([key, label]) => [label, hiddenContext[key]])
+    ]
         .filter(([, value]) => {
             if (value === null || value === undefined) return false;
             if (typeof value === 'string') return value.trim() !== '';
@@ -4435,12 +4817,95 @@ function buildTerminalProcessingLine(text = '', { animate = true } = {}) {
     return processingLine;
 }
 
+function terminalIePayloadForEntityType(entityType = 'addressInfo') {
+    const normalized = String(entityType || '').trim();
+    if (normalized === 'telephone' || normalized === 'telephone_number') {
+        return REWRITE_FUNCTION_CALL_TELEPHONE_PAYLOAD;
+    }
+    return REWRITE_FUNCTION_CALL_ADDRESS_PAYLOAD;
+}
+
+function terminalEntriesWithPendingIeDisplay(entries = []) {
+    const renderedEntries = Array.isArray(entries) ? [...entries] : [];
+    if (!pendingManualIeDisplay || !pendingManualIeDisplay.enabled) {
+        return renderedEntries;
+    }
+
+    const targetRoundIndex = Number(pendingManualIeDisplay.roundIndex || 0);
+    if (!targetRoundIndex) return renderedEntries;
+
+    const nextEntries = [];
+    let inserted = false;
+    let suppressIeLinesForTarget = false;
+    renderedEntries.forEach((entry) => {
+        const entryRoundIndex = Number(entry.round_index || entry.round_count_snapshot || 0);
+        if (
+            entry.entry_type === 'turn'
+            && entry.tone === 'user'
+            && Number(entry.round_index || 0) === targetRoundIndex
+        ) {
+            nextEntries.push({
+                ...entry,
+                has_address_ie_display: true,
+            });
+            nextEntries.push({
+                entry_type: 'message',
+                tone: 'system',
+                text: `function_call: ${terminalIePayloadForEntityType(pendingManualIeDisplay.entityType)}`,
+                round_count_snapshot: targetRoundIndex,
+                is_pending_ie_function_call: true,
+            });
+            inserted = true;
+            suppressIeLinesForTarget = true;
+            return;
+        }
+
+        if (
+            suppressIeLinesForTarget
+            && entry.entry_type === 'message'
+            && entryRoundIndex === targetRoundIndex
+            && (
+                String(entry.text || '').trim().startsWith('function_call:')
+                || String(entry.text || '').trim().startsWith('observation:')
+            )
+        ) {
+            return;
+        }
+
+        if (entry.entry_type === 'turn' && entryRoundIndex !== targetRoundIndex) {
+            suppressIeLinesForTarget = false;
+        }
+        nextEntries.push(entry);
+    });
+
+    return inserted ? nextEntries : renderedEntries;
+}
+
+function appendTerminalTurnLabel(target, entry) {
+    const rawLabel = String(entry?.round_label || '').trim();
+    const hasModelMarker = Boolean(entry?.model_intent_inference_attempted) || rawLabel.endsWith('*');
+    const baseLabel = hasModelMarker ? rawLabel.replace(/\*+$/, '') : rawLabel;
+    target.appendChild(document.createTextNode(`[${baseLabel}`));
+    if (hasModelMarker) {
+        const marker = document.createElement('span');
+        marker.className = 'terminal-model-marker';
+        marker.classList.toggle('is-unapplied', Boolean(entry?.model_intent_inference_unapplied));
+        marker.textContent = '*';
+        marker.title = entry?.model_intent_inference_unapplied
+            ? '已调用模型，但模型结果未被流程采纳'
+            : '已调用模型并采纳模型判断';
+        target.appendChild(marker);
+    }
+    target.appendChild(document.createTextNode(']'));
+}
+
 function renderTerminalEntries(entries = []) {
     terminalOutput.innerHTML = '';
-    const renderedEntries = Array.isArray(entries) ? [...entries] : [];
+    const baseEntries = Array.isArray(entries) ? [...entries] : [];
     if (pendingManualUserEntry && currentSessionId && !sessionClosed) {
-        renderedEntries.push(pendingManualUserEntry);
+        baseEntries.push(pendingManualUserEntry);
     }
+    const renderedEntries = terminalEntriesWithPendingIeDisplay(baseEntries);
     terminalOutput.classList.toggle(
         'is-processing-only',
         Boolean(terminalProcessingState?.active) && renderedEntries.length === 0,
@@ -4466,7 +4931,7 @@ function renderTerminalEntries(entries = []) {
                 const labelTrigger = document.createElement('button');
                 labelTrigger.type = 'button';
                 labelTrigger.className = 'terminal-turn-trigger';
-                labelTrigger.textContent = `[${entry.round_label}]`;
+                appendTerminalTurnLabel(labelTrigger, entry);
                 labelTrigger.title = '删除该用户行及其下方所有内容';
                 labelTrigger.dataset.roundIndex = String(entry.round_index || '');
                 labelTrigger.dataset.restoreCheckpointIndex = String(
@@ -4485,7 +4950,11 @@ function renderTerminalEntries(entries = []) {
                 textNode.textContent = ` ${entry.speaker}: ${entry.text}`;
                 textNode.dataset.roundIndex = String(entry.round_index || '');
                 textNode.dataset.hasAddressIeDisplay = entry.has_address_ie_display ? 'true' : 'false';
-                if (entry.is_pending_reply) {
+                const isWaitingOnIe = Boolean(
+                    pendingManualIeDisplay?.enabled
+                    && Number(pendingManualIeDisplay.roundIndex || 0) === Number(entry.round_index || 0),
+                );
+                if (entry.is_pending_reply && !isWaitingOnIe) {
                     textNode.classList.add('is-awaiting-response');
                     textNode.dataset.scanText = textNode.textContent;
                     line.classList.add('is-awaiting-response');
@@ -4495,14 +4964,24 @@ function renderTerminalEntries(entries = []) {
                 const trigger = document.createElement('button');
                 trigger.type = 'button';
                 trigger.className = 'terminal-reference-trigger';
-                trigger.textContent = `[${entry.round_label}] ${entry.speaker}: ${entry.text}`;
+                appendTerminalTurnLabel(trigger, entry);
+                trigger.appendChild(document.createTextNode(` ${entry.speaker}: ${entry.text}`));
                 trigger.dataset.referenceTrigger = 'fault-issue-categories';
                 line.appendChild(trigger);
             } else {
-                line.textContent = `[${entry.round_label}] ${entry.speaker}: ${entry.text}`;
+                appendTerminalTurnLabel(line, entry);
+                line.appendChild(document.createTextNode(` ${entry.speaker}: ${entry.text}`));
             }
         } else {
-            line.textContent = entry.text || '';
+            if (entry.is_pending_ie_function_call) {
+                line.classList.add('terminal-ie-pending-line');
+                const label = document.createElement('span');
+                label.className = 'terminal-processing-label terminal-ie-pending-label';
+                label.textContent = entry.text || '';
+                line.appendChild(label);
+            } else {
+                line.textContent = entry.text || '';
+            }
         }
 
         terminalOutput.appendChild(line);
@@ -4638,7 +5117,8 @@ function setSessionBusyState(busy) {
     renderTerminalEntries(sessionTerminalEntries);
 }
 
-function showPendingManualUserEntry(text) {
+function showPendingManualUserEntry(text, options = {}) {
+    const { awaitingResponse = true } = options;
     const normalizedText = String(text || '').trim();
     if (!normalizedText || !currentSessionId || sessionClosed) {
         pendingManualUserEntry = null;
@@ -4652,7 +5132,7 @@ function showPendingManualUserEntry(text) {
         speaker: '用户',
         text: normalizedText,
         has_address_ie_display: false,
-        is_pending_reply: true,
+        is_pending_reply: Boolean(awaitingResponse),
     };
     renderTerminalEntries(sessionTerminalEntries);
 }
@@ -4661,6 +5141,16 @@ function clearPendingManualUserEntry() {
     if (!pendingManualUserEntry) return;
     pendingManualUserEntry = null;
     renderTerminalEntries(sessionTerminalEntries);
+}
+
+function hasBlockingReviewPending() {
+    return reviewPending && !sessionClosed;
+}
+
+function clearClosedSessionReviewBeforeNewRun() {
+    if (reviewPending && sessionClosed) {
+        resetReviewState();
+    }
 }
 
 function resetReviewState() {
@@ -4746,6 +5236,7 @@ function applySessionView(data) {
 
     stopAutoModePolling();
     pendingManualUserEntry = null;
+    pendingManualIeDisplay = null;
     currentSessionId = data.session_id;
     currentAutoModeId = '';
     autoModeJobId = '';
@@ -4762,6 +5253,7 @@ function applySessionView(data) {
     updateScenarioHeader(data.scenario);
     updateSessionContext(data.scenario, data.session_config || {});
     updateInspector(data.collected_slots, data.runtime_state, data.scenario);
+    updateAutoModePreview([]);
     renderTerminalEntries(sessionTerminalEntries);
     hideIssueReferencePopover();
     closeTerminalTurnMenu();
@@ -4894,6 +5386,33 @@ function updateInspector(slots = {}, state = {}, scenario = null) {
             <span class="data-value mono">${JSON.stringify(value)}</span>
         `;
         stateCont.appendChild(item);
+    });
+}
+
+function updateAutoModePreview(lines = []) {
+    if (!autoModePreviewContainer) return;
+    const normalizedLines = Array.isArray(lines)
+        ? lines.map((line) => String(line || '').trim()).filter(Boolean)
+        : [];
+    if (!normalizedLines.length) {
+        autoModePreviewContainer.innerHTML = '<p class="terminal-hint">点击自动模式后显示</p>';
+        return;
+    }
+    autoModePreviewContainer.innerHTML = '';
+    normalizedLines.forEach((line) => {
+        const item = document.createElement('div');
+        item.className = 'data-item auto-mode-preview-item';
+        const separatorIndex = line.search(/[：:]/);
+        const key = separatorIndex > 0 ? line.slice(0, separatorIndex).trim() : '预演';
+        const value = separatorIndex > 0 ? line.slice(separatorIndex + 1).trim() : line;
+        const keyNode = document.createElement('span');
+        keyNode.className = 'data-key';
+        keyNode.textContent = key;
+        const valueNode = document.createElement('span');
+        valueNode.className = 'data-value filled';
+        valueNode.textContent = value;
+        item.append(keyNode, valueNode);
+        autoModePreviewContainer.appendChild(item);
     });
 }
 
@@ -5852,6 +6371,7 @@ function resetWorkspace() {
     sessionStartedAt = '';
     sessionEndedAt = '';
     autoKnownAddressValue = '';
+    knownAddressExplicitOverride = false;
     autoCallStartTimeValue = '';
     stopSessionTimer();
     refreshSessionTimerDisplay();
@@ -5861,6 +6381,7 @@ function resetWorkspace() {
     updateScenarioHeader(null);
     updateSessionContext(null, {});
     updateInspector({}, {});
+    updateAutoModePreview([]);
     setSessionStatus('idle');
     setSessionIdIndicator('');
     setNextRound(1);
@@ -5879,8 +6400,7 @@ function resetWorkspace() {
 
 function applyAuthenticatedState(user) {
     authenticatedUser = user;
-    authUserName.textContent = user.display_name || user.username;
-    authUserMeta.textContent = `备案账号：${user.username}`;
+    authUserName.textContent = `测试管理员: ${user.username || '-'}`;
     setAuthError('');
     updateCallStartTimeValidationState();
     sanitizeManualMaxRoundsInput();
@@ -5897,7 +6417,6 @@ function applyLoggedOutState(message = '') {
     closeBlockingActionNotice();
     stopAutoModePolling();
     authUserName.textContent = '未登录';
-    authUserMeta.textContent = '只有备案账号可访问测试台。';
     stopChatPolling();
     resetChatRuntime();
     setPasswordVisibility(false);
@@ -6119,23 +6638,28 @@ function syncReviewModalMode(data = {}) {
 }
 
 async function startSession() {
-    if (reviewPending) {
+    if (hasBlockingReviewPending()) {
         appendTerminalLine('请先完成上一条测试记录的评审；如已关闭弹窗，可点击“打开评审”继续。', 'error');
         return;
     }
+    clearClosedSessionReviewBeforeNewRun();
 
+    await randomizeManualSessionInputsBeforeStart({ autoMode: false });
     if (!updateCallStartTimeValidationState()) {
         updateStartSessionButtonState();
         return;
     }
-    selectedScenario = buildConfiguredScenarioSelection();
+    const historyDeviceConfig = getHistoryDeviceConfig();
     const payload = {
         scenario_id: '',
         auto_generate_hidden_settings: document.getElementById('auto-hidden-settings').checked,
         product_category: selectedScenario.product_category,
         request_type: selectedScenario.request_type,
-        known_address: knownAddressInput.value,
-        ivr_utterance: ivrUtteranceInput?.value || '',
+        history_device_brand: historyDeviceConfig.brand,
+        history_device_category: historyDeviceConfig.category,
+        history_device_purchase_date: historyDeviceConfig.purchase_date,
+        known_address: getKnownAddressPayloadValue({ includeAutoPrefill: true }),
+        ivr_utterance: '空气能热水器需要维修',
         call_start_time: callStartTimeInput.value.trim(),
         use_session_start_time_as_call_start_time: useSessionStartTimeCheckbox.checked,
         max_rounds: getManualMaxRoundsValue(),
@@ -6144,6 +6668,7 @@ async function startSession() {
 
     const output = document.getElementById('terminal-output');
     output.innerHTML = '';
+    pendingManualIeDisplay = null;
     if (payload.auto_generate_hidden_settings) {
         setTerminalProcessingState({
             active: true,
@@ -6172,6 +6697,7 @@ async function startSession() {
         currentSlotKeys = [];
         sessionClosed = true;
         sessionTerminalEntries = [];
+        pendingManualIeDisplay = null;
         sessionReviewLocked = false;
         resetReviewState();
         setSessionStatus('error');
@@ -6208,6 +6734,7 @@ function applyAutoModeView(data) {
     updateScenarioHeader(data?.scenario || null);
     updateSessionContext(data?.scenario || null, data?.session_config || {});
     updateInspector(data?.collected_slots || {}, data?.runtime_state || {}, data?.scenario || null);
+    updateAutoModePreview(data?.auto_mode_preview_lines || []);
     renderTerminalEntries(sessionTerminalEntries);
     hideIssueReferencePopover();
     closeTerminalTurnMenu();
@@ -6276,27 +6803,33 @@ async function pollAutoModeJob() {
 
 async function runAutoMode() {
     if (!isTestAdminUser()) return;
-    if (reviewPending) {
+    if (hasBlockingReviewPending()) {
         appendTerminalLine('请先完成上一条测试记录的评审；如已关闭弹窗，可点击“打开评审”继续。', 'error');
-        return;
-    }
-    if (!updateCallStartTimeValidationState()) {
-        updateStartSessionButtonState();
         return;
     }
     if (currentSessionId && !sessionClosed) {
         appendTerminalLine('请先结束当前手工测试会话，再执行自动模式。', 'error');
         return;
     }
+    clearClosedSessionReviewBeforeNewRun();
 
-    selectedScenario = buildConfiguredScenarioSelection();
+    await randomizeManualSessionInputsBeforeStart({ autoMode: true });
+    if (!updateCallStartTimeValidationState()) {
+        updateStartSessionButtonState();
+        return;
+    }
+    const historyDeviceConfig = getHistoryDeviceConfig();
+    const autoGenerateHiddenSettings = document.getElementById('auto-hidden-settings').checked;
     const payload = {
         scenario_id: '',
-        auto_generate_hidden_settings: document.getElementById('auto-hidden-settings').checked,
+        auto_generate_hidden_settings: autoGenerateHiddenSettings,
         product_category: selectedScenario.product_category,
         request_type: selectedScenario.request_type,
-        known_address: knownAddressInput.value,
-        ivr_utterance: ivrUtteranceInput?.value || '',
+        history_device_brand: historyDeviceConfig.brand,
+        history_device_category: historyDeviceConfig.category,
+        history_device_purchase_date: historyDeviceConfig.purchase_date,
+        known_address: getKnownAddressPayloadValue({ includeAutoPrefill: true }),
+        ivr_utterance: '空气能热水器需要维修',
         call_start_time: callStartTimeInput.value.trim(),
         use_session_start_time_as_call_start_time: useSessionStartTimeCheckbox.checked,
         max_rounds: getManualMaxRoundsValue(),
@@ -6406,10 +6939,32 @@ async function sendMessage() {
     sessionInputHistoryIndex = -1;
     sessionInputDraft = '';
     userInput.value = '';
-    showPendingManualUserEntry(rawText);
+    showPendingManualUserEntry(rawText, { awaitingResponse: false });
     setSessionBusyState(true);
     let errorMessage = '';
     try {
+        try {
+            const pendingIe = await apiFetch('/api/session/pending-ie', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session_id: currentSessionId, text: rawText }),
+            });
+            const pendingIeEntityType = String(pendingIe?.entity_type || '').trim();
+            if (pendingIeEntityType) {
+                pendingManualIeDisplay = {
+                    enabled: true,
+                    roundIndex: Number(pendingIe?.round_index || nextRoundIndex || 1),
+                    entityType: pendingIeEntityType,
+                };
+            } else if (pendingManualUserEntry) {
+                pendingManualUserEntry.is_pending_reply = true;
+            }
+        } catch (_pendingError) {
+            if (pendingManualUserEntry) {
+                pendingManualUserEntry.is_pending_reply = true;
+            }
+        }
+        renderTerminalEntries(sessionTerminalEntries);
         const data = await apiFetch('/api/session/respond', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -6421,6 +6976,7 @@ async function sendMessage() {
     } finally {
         if (errorMessage) {
             clearPendingManualUserEntry();
+            pendingManualIeDisplay = null;
         }
         setSessionBusyState(false);
         if (errorMessage) {
@@ -6462,9 +7018,18 @@ async function rewindFromUserRound(roundIndex, restoreCheckpointIndex) {
     }
 }
 
-async function toggleAddressIeDisplayForRound(roundIndex, enabled) {
+async function toggleIeDisplayForRound(roundIndex, enabled, entityType = 'addressInfo') {
     if (!currentSessionId || sessionBusy || roundIndex < 1) return;
 
+    closeTerminalTurnMenu();
+    pendingManualIeDisplay = enabled
+        ? {
+            enabled: true,
+            roundIndex: Number(roundIndex || 0),
+            entityType,
+        }
+        : null;
+    renderTerminalEntries(sessionTerminalEntries);
     setSessionBusyState(true);
     let errorMessage = '';
     try {
@@ -6475,17 +7040,19 @@ async function toggleAddressIeDisplayForRound(roundIndex, enabled) {
                 session_id: currentSessionId,
                 round_index: roundIndex,
                 enabled: Boolean(enabled),
+                entity_type: entityType,
             }),
         });
+        pendingManualIeDisplay = null;
         applySessionView(data);
     } catch (error) {
+        pendingManualIeDisplay = null;
         errorMessage = error.message;
         if (errorMessage.includes('评审已提交')) {
             sessionReviewLocked = true;
         }
     } finally {
         setSessionBusyState(false);
-        closeTerminalTurnMenu();
         if (sessionReviewLocked) {
             renderTerminalEntries(sessionTerminalEntries);
             updateInputAvailability(false);
@@ -6504,14 +7071,42 @@ manualProductCategorySelect?.addEventListener('change', () => {
 manualRequestTypeSelect?.addEventListener('change', () => {
     syncManualScenarioSelection({ refreshKnownAddress: true });
 });
-manualMaxRoundsInput?.addEventListener('change', () => {
-    sanitizeManualMaxRoundsInput();
-    syncManualScenarioSelection();
+historyDeviceBrandSelect?.addEventListener('change', () => {
+    syncHistoryDeviceCategoryOptions();
+    syncManualScenarioSelection({ refreshKnownAddress: false });
 });
-manualMaxRoundsInput?.addEventListener('blur', () => {
-    sanitizeManualMaxRoundsInput();
-    syncManualScenarioSelection();
+historyDeviceCategorySelect?.addEventListener('change', () => {
+    syncManualScenarioSelection({ refreshKnownAddress: false });
 });
+[
+    historyDevicePurchaseYearInput,
+    historyDevicePurchaseMonthInput,
+    historyDevicePurchaseDayInput,
+].forEach((input) => {
+    input?.addEventListener('input', () => {
+        input.value = String(input.value || '').replace(/\D+/g, '');
+        syncHistoryDeviceDateValueFromParts();
+        syncManualScenarioSelection({ refreshKnownAddress: false });
+    });
+    input?.addEventListener('blur', () => {
+        if (input === historyDevicePurchaseMonthInput || input === historyDevicePurchaseDayInput) {
+            const value = String(input.value || '').trim();
+            if (value) input.value = String(Number(value));
+        }
+        syncHistoryDeviceDateValueFromParts();
+        syncManualScenarioSelection({ refreshKnownAddress: false });
+    });
+});
+historyDevicePurchaseDateInput?.addEventListener('input', () => {
+    setHistoryDeviceDateParts(historyDevicePurchaseDateInput.value);
+    syncManualScenarioSelection({ refreshKnownAddress: false });
+});
+historyDeviceCalendarButton?.addEventListener('click', openHistoryDeviceCalendarPicker);
+generateHistoryDeviceDateButton?.addEventListener('click', () => {
+    setHistoryDeviceDateParts(randomHistoryDevicePurchaseDate());
+    syncManualScenarioSelection({ refreshKnownAddress: false });
+});
+clearHistoryDeviceButton?.addEventListener('click', clearHistoryDeviceConfig);
 document.getElementById('logout-btn').onclick = logout;
 startSessionButton.onclick = () => {
     startSession();
@@ -6556,7 +7151,7 @@ if (rewriteExportCloseButton) {
     rewriteExportCloseButton.addEventListener('click', () => {
         closeRewriteExportModal();
         if (rewriteUploadStatus) {
-            rewriteUploadStatus.textContent = '已取消导出，存在未提交或未标注数据。';
+            rewriteUploadStatus.textContent = '已取消导出。';
         }
     });
 }
@@ -6564,7 +7159,7 @@ if (rewriteExportCancelButton) {
     rewriteExportCancelButton.addEventListener('click', () => {
         closeRewriteExportModal();
         if (rewriteUploadStatus) {
-            rewriteUploadStatus.textContent = '已取消导出，存在未提交或未标注数据。';
+            rewriteUploadStatus.textContent = '已取消导出。';
         }
     });
 }
@@ -6578,12 +7173,20 @@ if (rewriteExportConfirmButton) {
         }
     });
 }
+if (rewriteExportScopeChoices) {
+    rewriteExportScopeChoices.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-rewrite-export-scope]');
+        if (!button) return;
+        const scope = String(button.dataset.rewriteExportScope || 'all').trim() || 'all';
+        exportRewriteScopeWithValidation(scope);
+    });
+}
 if (rewriteExportModal) {
     rewriteExportModal.addEventListener('click', (event) => {
         if (event.target === rewriteExportModal || event.target.classList.contains('modal-backdrop')) {
             closeRewriteExportModal();
             if (rewriteUploadStatus) {
-                rewriteUploadStatus.textContent = '已取消导出，存在未提交或未标注数据。';
+                rewriteUploadStatus.textContent = '已取消导出。';
             }
         }
     });
@@ -6629,7 +7232,9 @@ rewriteFileInput.addEventListener('change', async (event) => {
     try {
         await importRewriteFile(file);
     } catch (error) {
-        resetRewriteWorkspace();
+        if (rewriteFileInput) rewriteFileInput.value = '';
+        renderRewriteFileInfo();
+        renderRewriteRecordList();
         setRewriteUploadStatus(error.message, { isError: true });
     }
 });
@@ -6769,9 +7374,10 @@ sessionIdCopyButton.addEventListener('click', copyCurrentSessionId);
 clearKnownAddressButton.addEventListener('click', () => {
     knownAddressInput.value = '';
     autoKnownAddressValue = '';
+    knownAddressExplicitOverride = true;
 });
 generateKnownAddressButton.addEventListener('click', () => {
-    hydrateKnownAddressPrefill(true);
+    hydrateKnownAddressPrefill(true, { explicit: true });
 });
 generateCallStartTimeButton.addEventListener('click', () => {
     useSessionStartTimeCheckbox.checked = false;
@@ -6780,8 +7386,15 @@ generateCallStartTimeButton.addEventListener('click', () => {
     updateStartSessionButtonState();
 });
 knownAddressInput.addEventListener('input', () => {
-    if (knownAddressInput.value.trim() !== autoKnownAddressValue) {
+    const currentValue = knownAddressInput.value.trim();
+    if (!currentValue) {
         autoKnownAddressValue = '';
+        knownAddressExplicitOverride = true;
+    } else if (currentValue !== autoKnownAddressValue) {
+        autoKnownAddressValue = '';
+        knownAddressExplicitOverride = true;
+    } else {
+        knownAddressExplicitOverride = false;
     }
 });
 callStartTimeInput.addEventListener('input', () => {
@@ -6843,7 +7456,7 @@ terminalOutput.addEventListener('contextmenu', (event) => {
     }
     openTerminalTurnMenu({
         roundIndex,
-        hasAddressIeDisplay: userTextNode.dataset.hasAddressIeDisplay === 'true',
+        hasIeDisplay: userTextNode.dataset.hasAddressIeDisplay === 'true',
         clientX: event.clientX,
         clientY: event.clientY,
     });
@@ -6863,11 +7476,27 @@ rewriteRecordList.addEventListener('contextmenu', (event) => {
     openRewriteRecordMenu(recordIndex, event.clientX, event.clientY);
 });
 issueReferenceCloseButton.addEventListener('click', hideIssueReferencePopover);
-terminalToggleAddressIeButton.addEventListener('click', () => {
+terminalInsertAddressIeButton.addEventListener('click', () => {
     if (!terminalTurnMenuState) return;
-    toggleAddressIeDisplayForRound(
+    toggleIeDisplayForRound(
         Number(terminalTurnMenuState.roundIndex || 0),
-        !terminalTurnMenuState.hasAddressIeDisplay,
+        true,
+        'addressInfo',
+    ).catch(() => {});
+});
+terminalInsertTelephoneIeButton.addEventListener('click', () => {
+    if (!terminalTurnMenuState) return;
+    toggleIeDisplayForRound(
+        Number(terminalTurnMenuState.roundIndex || 0),
+        true,
+        'telephone',
+    ).catch(() => {});
+});
+terminalRemoveIeButton.addEventListener('click', () => {
+    if (!terminalTurnMenuState) return;
+    toggleIeDisplayForRound(
+        Number(terminalTurnMenuState.roundIndex || 0),
+        false,
     ).catch(() => {});
 });
 rewriteRecordDeleteButton?.addEventListener('click', () => {
@@ -7220,6 +7849,7 @@ setNextRound(1);
 resetReviewState();
 setPasswordVisibility(false);
 prefillMockCallStartTime(true);
+syncHistoryDeviceCategoryOptions();
 updateCallStartTimeValidationState();
 updateStartSessionButtonState();
 resizeCursorTrailCanvas();

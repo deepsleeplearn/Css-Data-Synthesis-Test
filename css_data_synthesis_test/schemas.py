@@ -146,7 +146,11 @@ class DialogueTurn:
     text: str
     round_index: int
     model_intent_inference_used: bool = False
+    model_intent_inference_attempted: bool = False
+    model_intent_inference_unapplied: bool = False
     previous_user_intent_model_inference_used: bool | None = None
+    previous_user_intent_model_inference_attempted: bool | None = None
+    previous_user_intent_model_inference_unapplied: bool | None = None
     post_display_lines: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -161,10 +165,36 @@ class DialogueTurn:
             return bool(self.previous_user_intent_model_inference_used)
         return bool(self.model_intent_inference_used)
 
+    @property
+    def effective_model_intent_inference_attempted(self) -> bool:
+        if (
+            normalize_speaker(self.speaker) == SERVICE_SPEAKER
+            and self.previous_user_intent_model_inference_attempted is not None
+        ):
+            return bool(self.previous_user_intent_model_inference_attempted)
+        return bool(self.model_intent_inference_attempted or self.effective_model_intent_inference_used)
+
+    @property
+    def effective_model_intent_inference_unapplied(self) -> bool:
+        if (
+            normalize_speaker(self.speaker) == SERVICE_SPEAKER
+            and self.previous_user_intent_model_inference_unapplied is not None
+        ):
+            return bool(self.previous_user_intent_model_inference_unapplied)
+        return bool(
+            self.model_intent_inference_unapplied
+            or (
+                self.effective_model_intent_inference_attempted
+                and not self.effective_model_intent_inference_used
+            )
+        )
+
     def to_display_dict(self) -> dict[str, Any]:
         round_label = str(self.round_index)
         effective_used = self.effective_model_intent_inference_used
-        if normalize_speaker(self.speaker) == SERVICE_SPEAKER and effective_used:
+        effective_attempted = self.effective_model_intent_inference_attempted
+        effective_unapplied = self.effective_model_intent_inference_unapplied
+        if normalize_speaker(self.speaker) == SERVICE_SPEAKER and effective_attempted:
             round_label = f"{round_label}*"
         return {
             "display_kind": "turn",
@@ -173,8 +203,16 @@ class DialogueTurn:
             "round_index": self.round_index,
             "round_label": round_label,
             "model_intent_inference_used": effective_used,
+            "model_intent_inference_attempted": effective_attempted,
+            "model_intent_inference_unapplied": effective_unapplied,
             "previous_user_intent_model_inference_used": (
                 effective_used if normalize_speaker(self.speaker) == SERVICE_SPEAKER else None
+            ),
+            "previous_user_intent_model_inference_attempted": (
+                effective_attempted if normalize_speaker(self.speaker) == SERVICE_SPEAKER else None
+            ),
+            "previous_user_intent_model_inference_unapplied": (
+                effective_unapplied if normalize_speaker(self.speaker) == SERVICE_SPEAKER else None
             ),
             "post_display_lines": list(self.post_display_lines),
         }
@@ -195,7 +233,11 @@ def build_display_transcript(transcript: list[DialogueTurn]) -> list[dict[str, A
                     "round_index": turn.round_index,
                     "round_label": "",
                     "model_intent_inference_used": False,
+                    "model_intent_inference_attempted": False,
+                    "model_intent_inference_unapplied": False,
                     "previous_user_intent_model_inference_used": None,
+                    "previous_user_intent_model_inference_attempted": None,
+                    "previous_user_intent_model_inference_unapplied": None,
                 }
             )
     return display_transcript

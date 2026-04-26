@@ -108,6 +108,62 @@ DEFAULT_USER_REPLY_OFF_TOPIC_ROUNDS_WEIGHTS = {
     "2": 0.12,
     "3": 0.03,
 }
+DEFAULT_PRODUCT_ROUTING_ENTRY_WEIGHTS = {
+    "brand_series": 0.35,
+    "model": 0.05,
+    "unknown": 0.60,
+}
+DEFAULT_PRODUCT_ROUTING_BRAND_SERIES_WEIGHTS = {
+    "colmo": 0.23,
+    "cooling_or_little_swan": 0.15,
+    "home_series": 0.40,
+    "lieyan": 0.22,
+}
+DEFAULT_PRODUCT_ROUTING_USAGE_SCENE_WEIGHTS = {
+    "family": 0.56,
+    "villa_apartment_barber": 0.20,
+    "other_unknown": 0.24,
+}
+DEFAULT_PRODUCT_ROUTING_PURCHASE_OR_PROPERTY_WEIGHTS = {
+    "self_buy": 0.65,
+    "unknown": 0.10,
+    "property_bundle": 0.25,
+}
+DEFAULT_PRODUCT_ROUTING_PROPERTY_YEAR_WEIGHTS = {
+    "before_2021": 0.60,
+    "after_2021": 0.40,
+}
+DEFAULT_PRODUCT_ROUTING_HISTORY_CONFIRMATION_WEIGHTS = {
+    "yes": 0.68,
+    "no_unknown": 0.32,
+}
+DEFAULT_AUTO_MODE_IVR_PRODUCT_KIND_WEIGHTS = {
+    "air_energy": 0.7,
+    "water_heater": 0.3,
+}
+DEFAULT_AUTO_MODE_WATER_HEATER_OPENING_REPLY_WEIGHTS = {
+    "confirm": 0.45,
+    "change_brand": 0.15,
+    "change_product_type": 0.15,
+    "change_request": 0.15,
+    "change_brand_request": 0.10,
+}
+DEFAULT_AUTO_MODE_HISTORY_DEVICE_BRAND_WEIGHTS = {
+    "美的": 0.25,
+    "COLMO": 0.20,
+    "真暖": 0.10,
+    "真省": 0.10,
+    "雪焰": 0.08,
+    "暖家": 0.08,
+    "煤改电": 0.07,
+    "真享": 0.07,
+    "烈焰": 0.05,
+}
+DEFAULT_AUTO_MODE_HISTORY_DEVICE_CATEGORY_WEIGHTS = {
+    "家用空气能热水机": 0.75,
+    "空气能热水机": 0.25,
+}
+SERVICE_QUERY_PREFIX_CHOICES = ("好的", "嗯嗯", "了解了", "")
 
 
 def _load_bool(env_name: str, default: bool) -> bool:
@@ -131,6 +187,7 @@ class AppConfig:
     service_agent_model: str
     default_temperature: float
     service_ok_prefix_probability: float
+    service_query_prefix_weights: dict[str, float]
     second_round_include_issue_probability: float
     max_rounds: int
     max_concurrency: int
@@ -179,6 +236,37 @@ class AppConfig:
     )
     address_segment_5_strategy_weights: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_ADDRESS_SEGMENT_5_STRATEGY_WEIGHTS)
+    )
+    product_routing_entry_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_PRODUCT_ROUTING_ENTRY_WEIGHTS)
+    )
+    product_routing_brand_series_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_PRODUCT_ROUTING_BRAND_SERIES_WEIGHTS)
+    )
+    product_routing_usage_scene_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_PRODUCT_ROUTING_USAGE_SCENE_WEIGHTS)
+    )
+    product_routing_purchase_or_property_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_PRODUCT_ROUTING_PURCHASE_OR_PROPERTY_WEIGHTS)
+    )
+    product_routing_property_year_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_PRODUCT_ROUTING_PROPERTY_YEAR_WEIGHTS)
+    )
+    product_routing_history_confirmation_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_PRODUCT_ROUTING_HISTORY_CONFIRMATION_WEIGHTS)
+    )
+    auto_mode_ivr_product_kind_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_AUTO_MODE_IVR_PRODUCT_KIND_WEIGHTS)
+    )
+    auto_mode_water_heater_opening_reply_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_AUTO_MODE_WATER_HEATER_OPENING_REPLY_WEIGHTS)
+    )
+    auto_mode_history_device_probability: float = 0.35
+    auto_mode_history_device_brand_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_AUTO_MODE_HISTORY_DEVICE_BRAND_WEIGHTS)
+    )
+    auto_mode_history_device_category_weights: dict[str, float] = field(
+        default_factory=lambda: dict(DEFAULT_AUTO_MODE_HISTORY_DEVICE_CATEGORY_WEIGHTS)
     )
 
 
@@ -247,6 +335,37 @@ def _load_optional_weight_map(env_name: str) -> dict[str, float] | None:
     return {str(key): float(value) for key, value in parsed.items()}
 
 
+def _load_service_query_prefix_weights(ok_prefix_probability: float) -> dict[str, float]:
+    raw = os.getenv("SERVICE_QUERY_PREFIX_WEIGHTS", "").strip()
+    if not raw:
+        probability = max(0.0, min(1.0, float(ok_prefix_probability)))
+        return {
+            "好的": probability,
+            "嗯嗯": 0.0,
+            "了解了": 0.0,
+            "": 1.0 - probability,
+        }
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("SERVICE_QUERY_PREFIX_WEIGHTS must be valid JSON.") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError("SERVICE_QUERY_PREFIX_WEIGHTS must be a JSON object.")
+
+    weights = {prefix: 0.0 for prefix in SERVICE_QUERY_PREFIX_CHOICES}
+    for key, value in parsed.items():
+        prefix = str(key)
+        if prefix not in weights:
+            allowed = "、".join(f'"{item}"' for item in SERVICE_QUERY_PREFIX_CHOICES)
+            raise ValueError(f"SERVICE_QUERY_PREFIX_WEIGHTS only supports prefixes: {allowed}.")
+        weights[prefix] = max(0.0, float(value))
+    if sum(weights.values()) <= 0:
+        raise ValueError("SERVICE_QUERY_PREFIX_WEIGHTS must contain at least one positive weight.")
+    return weights
+
+
 def _load_segment_strategy_weights(
     *,
     env_name: str,
@@ -293,6 +412,8 @@ def load_config() -> AppConfig:
         "ADDRESS_SEGMENT_MERGE_STRATEGY_WEIGHTS"
     )
 
+    service_ok_prefix_probability = float(os.getenv("SERVICE_OK_PREFIX_PROBABILITY", "0.7"))
+
     return AppConfig(
         openai_base_url=base_url,
         openai_api_key=api_key,
@@ -301,7 +422,8 @@ def load_config() -> AppConfig:
         user_agent_model=os.getenv("USER_AGENT_MODEL", default_model).strip(),
         service_agent_model=os.getenv("SERVICE_AGENT_MODEL", default_model).strip(),
         default_temperature=float(os.getenv("DEFAULT_TEMPERATURE", "1.0")),
-        service_ok_prefix_probability=float(os.getenv("SERVICE_OK_PREFIX_PROBABILITY", "0.7")),
+        service_ok_prefix_probability=service_ok_prefix_probability,
+        service_query_prefix_weights=_load_service_query_prefix_weights(service_ok_prefix_probability),
         second_round_include_issue_probability=float(
             os.getenv("SECOND_ROUND_INCLUDE_ISSUE_PROBABILITY", "0.4")
         ),
@@ -318,6 +440,49 @@ def load_config() -> AppConfig:
         product_routing_enabled=_load_bool("PRODUCT_ROUTING_ENABLED", True),
         product_routing_apply_probability=float(
             os.getenv("PRODUCT_ROUTING_APPLY_PROBABILITY", "1.0")
+        ),
+        product_routing_entry_weights=_load_weight_map(
+            "PRODUCT_ROUTING_ENTRY_WEIGHTS",
+            DEFAULT_PRODUCT_ROUTING_ENTRY_WEIGHTS,
+        ),
+        product_routing_brand_series_weights=_load_weight_map(
+            "PRODUCT_ROUTING_BRAND_SERIES_WEIGHTS",
+            DEFAULT_PRODUCT_ROUTING_BRAND_SERIES_WEIGHTS,
+        ),
+        product_routing_usage_scene_weights=_load_weight_map(
+            "PRODUCT_ROUTING_USAGE_SCENE_WEIGHTS",
+            DEFAULT_PRODUCT_ROUTING_USAGE_SCENE_WEIGHTS,
+        ),
+        product_routing_purchase_or_property_weights=_load_weight_map(
+            "PRODUCT_ROUTING_PURCHASE_OR_PROPERTY_WEIGHTS",
+            DEFAULT_PRODUCT_ROUTING_PURCHASE_OR_PROPERTY_WEIGHTS,
+        ),
+        product_routing_property_year_weights=_load_weight_map(
+            "PRODUCT_ROUTING_PROPERTY_YEAR_WEIGHTS",
+            DEFAULT_PRODUCT_ROUTING_PROPERTY_YEAR_WEIGHTS,
+        ),
+        product_routing_history_confirmation_weights=_load_weight_map(
+            "PRODUCT_ROUTING_HISTORY_CONFIRMATION_WEIGHTS",
+            DEFAULT_PRODUCT_ROUTING_HISTORY_CONFIRMATION_WEIGHTS,
+        ),
+        auto_mode_ivr_product_kind_weights=_load_weight_map(
+            "AUTO_MODE_IVR_PRODUCT_KIND_WEIGHTS",
+            DEFAULT_AUTO_MODE_IVR_PRODUCT_KIND_WEIGHTS,
+        ),
+        auto_mode_water_heater_opening_reply_weights=_load_weight_map(
+            "AUTO_MODE_WATER_HEATER_OPENING_REPLY_WEIGHTS",
+            DEFAULT_AUTO_MODE_WATER_HEATER_OPENING_REPLY_WEIGHTS,
+        ),
+        auto_mode_history_device_probability=float(
+            os.getenv("AUTO_MODE_HISTORY_DEVICE_PROBABILITY", "0.35")
+        ),
+        auto_mode_history_device_brand_weights=_load_weight_map(
+            "AUTO_MODE_HISTORY_DEVICE_BRAND_WEIGHTS",
+            DEFAULT_AUTO_MODE_HISTORY_DEVICE_BRAND_WEIGHTS,
+        ),
+        auto_mode_history_device_category_weights=_load_weight_map(
+            "AUTO_MODE_HISTORY_DEVICE_CATEGORY_WEIGHTS",
+            DEFAULT_AUTO_MODE_HISTORY_DEVICE_CATEGORY_WEIGHTS,
         ),
         hidden_settings_similarity_threshold=float(
             os.getenv("HIDDEN_SETTINGS_SIMILARITY_THRESHOLD", "0.82")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import copy
 import random
 import re
 from dataclasses import dataclass, field
@@ -25,7 +26,6 @@ from css_data_synthesis_test.product_routing import (
     allowed_product_routing_answer_keys,
     default_unknown_product_routing_answer_key,
     get_product_routing_steps,
-    infer_model_lookup_answer_key,
     infer_product_routing_answer_key,
     next_product_routing_steps_from_observed_trace,
 )
@@ -50,6 +50,7 @@ MOBILE_PHONE_PATTERN = re.compile(r"^1[3-9]\d{9}$")
 ADDRESS_COMMUNITY_LABEL_SUFFIXES = ("小区", "社区", "花园", "公寓", "苑", "府", "里", "村")
 PromptVariant = str | tuple[str, float]
 PromptConfig = list[PromptVariant]
+QUERY_PREFIX_CHOICES = ("好的", "嗯嗯", "了解了", "")
 
 
 @dataclass
@@ -127,7 +128,7 @@ class ServiceDialoguePolicy:
     ADDRESS_RECOLLECTION_PROMPT = "了解了，麻烦您重新提供一下地址，包括省、市、区、乡镇。"
     ADDRESS_CONFIRMATION_TEMPLATE = "跟您确认一下，地址是{address}，对吗？"
     KNOWN_ADDRESS_CONFIRMATION_TEMPLATE = "您的地址是{address}，对吗？"
-    PRODUCT_ARRIVAL_PROMPT = "请问{product}已经送到了吗？"
+    PRODUCT_ARRIVAL_PROMPT = "请问您的热水器已经送到了吗？"
     PRODUCT_MODEL_PROMPT = "请问产品型号方便提供一下吗？"
     # 每条话术支持配置为 [(文案, 权重), ...]，每次发送时使用 random.choices 按权重随机选择。
     SURNAME_PROMPT: PromptConfig = [("请问您贵姓？", 1.0)]
@@ -170,11 +171,12 @@ class ServiceDialoguePolicy:
     ADDRESS_RECOLLECTION_PROMPT: PromptConfig = [("了解了，麻烦您重新提供一下地址，包括省、市、区、乡镇。", 1.0)]
     ADDRESS_CONFIRMATION_TEMPLATE: PromptConfig = [("跟您确认一下，地址是{address}，对吗？", 1.0)]
     KNOWN_ADDRESS_CONFIRMATION_TEMPLATE: PromptConfig = [("您的地址是{address}，对吗？", 1.0)]
-    PRODUCT_ARRIVAL_PROMPT: PromptConfig = [("请问{product}已经送到了吗？", 1.0)]
+    PRODUCT_ARRIVAL_PROMPT: PromptConfig = [("请问您的热水器已经送到了吗？", 1.0)]
     PRODUCT_MODEL_PROMPT: PromptConfig = [("请问产品型号方便提供一下吗？", 1.0)]
     def __init__(
         self,
         ok_prefix_probability: float = 1.0,
+        query_prefix_weights: dict[str, float] | None = None,
         rng: random.Random | None = None,
         address_inference_callback: Callable[..., dict[str, Any] | None] | None = None,
         address_collection_acceptance_inference_callback: Callable[..., dict[str, Any] | None] | None = None,
@@ -189,6 +191,10 @@ class ServiceDialoguePolicy:
         product_routing_enabled: bool = True,
     ):
         self.ok_prefix_probability = max(0.0, min(1.0, ok_prefix_probability))
+        self.query_prefix_weights = self._normalize_query_prefix_weights(
+            query_prefix_weights,
+            fallback_probability=self.ok_prefix_probability,
+        )
         self.rng = rng or random.Random()
         self.address_inference_callback = address_inference_callback
         self.address_collection_acceptance_inference_callback = address_collection_acceptance_inference_callback
@@ -201,6 +207,7 @@ class ServiceDialoguePolicy:
         self.phone_inference_callback = phone_inference_callback
         self.product_routing_intent_inference_callback = product_routing_intent_inference_callback
         self.product_routing_enabled = product_routing_enabled
+        self.last_model_intent_inference_attempted = False
         self.last_used_model_intent_inference = False
 
     def respond(
@@ -211,6 +218,7 @@ class ServiceDialoguePolicy:
         collected_slots: dict[str, str],
         runtime_state: ServiceRuntimeState,
     ) -> ServicePolicyResult:
+        self.last_model_intent_inference_attempted = False
         self.last_used_model_intent_inference = False
         has_service_turn = any(normalize_speaker(turn.speaker) == SERVICE_SPEAKER for turn in transcript)
         if not has_service_turn and not transcript:
@@ -638,6 +646,15 @@ class ServiceDialoguePolicy:
             slot_updates = {"request_type": current_request_type}
             merged_slots = dict(collected_slots)
             merged_slots.update(slot_updates)
+            preanswered_routing_result = self._try_advance_product_routing_from_preanswered_brand(
+                scenario=scenario,
+                brand_or_series=current_brand,
+                collected_slots=collected_slots,
+                slot_updates=slot_updates,
+                runtime_state=runtime_state,
+            )
+            if preanswered_routing_result is not None:
+                return preanswered_routing_result
             next_slot = self._next_slot_to_request(merged_slots, effective_required_slots(scenario))
             return self._transition_to_next_slot(
                 scenario=scenario,
@@ -1190,7 +1207,7 @@ class ServiceDialoguePolicy:
                 user_text=user_text,
                 user_round_index=user_round_index,
             )
-            if not observed_answer_key:
+            if not observed_answer_key and self.product_routing_intent_inference_callback is None:
                 observed_answer_key = default_unknown_product_routing_answer_key(prompt_key)
             if not observed_answer_key:
                 runtime_state.expected_product_routing_response = True
@@ -1366,14 +1383,19 @@ class ServiceDialoguePolicy:
             and not collected_slots["surname"].strip()
             and self._signature_matches_prompt(previous_service_signature, self.SURNAME_PROMPT)
         ):
+            freeform_surname = ""
             if self.surname_inference_callback is not None:
                 freeform_surname = self._extract_surname_with_model(
                     user_text,
                     user_round_index=user_round_index,
                 )
-            elif self._has_known_value(scenario.customer.surname) and scenario.customer.surname in user_text:
+            if (
+                not freeform_surname
+                and self._has_known_value(scenario.customer.surname)
+                and scenario.customer.surname in user_text
+            ):
                 freeform_surname = scenario.customer.surname
-            else:
+            if not freeform_surname:
                 freeform_surname = self._extract_freeform_surname(user_text)
             if freeform_surname:
                 slot_updates["surname"] = freeform_surname
@@ -1459,7 +1481,7 @@ class ServiceDialoguePolicy:
         )
 
     def _prepend_fault_acknowledgement(self, reply: str) -> str:
-        normalized_reply = re.sub(r"^好的[，,\s]*", "", (reply or "").strip())
+        normalized_reply = self._strip_query_prefix((reply or "").strip())
         if not normalized_reply:
             return self.FAULT_ACKNOWLEDGEMENT_PREFIX
         return f"{self.FAULT_ACKNOWLEDGEMENT_PREFIX}，{normalized_reply}"
@@ -1534,6 +1556,16 @@ class ServiceDialoguePolicy:
         if include_brand:
             return f"好的，请问您要{action}的{normalized_brand}热水器是空气能热水器，还是燃气热水器、还是电热水器？"
         return "好的，请问您的热水器是空气能热水器，还是燃气热水器、还是电热水器？"
+
+    @staticmethod
+    def _normalize_water_heater_brand_candidate(brand: str) -> str:
+        candidate = str(brand or "").strip()
+        compact = re.sub(r"[\s，。！？、,.!]", "", candidate).lower()
+        if not compact:
+            return ""
+        if compact in {"colmo", "科目", "科慕", "可么", "可木", "可慕", "扣摸", "扣慕"}:
+            return "COLMO"
+        return candidate
 
     @staticmethod
     def _last_turn_by_speaker(
@@ -1935,10 +1967,12 @@ class ServiceDialoguePolicy:
                 ):
                     self.last_used_model_intent_inference = True
                     return answer_key
+            return ""
 
         heuristic = infer_product_routing_answer_key(prompt_key, user_text)
         if heuristic:
             return heuristic
+
         return ""
 
     def _classify_opening_intent(
@@ -2053,10 +2087,15 @@ class ServiceDialoguePolicy:
             previous_service_text=previous_service_text,
             user_round_index=user_round_index,
         )
+        request_type = resolved.get("request_type", "")
+        if request_type not in {"fault", "installation"}:
+            request_type = ""
+        if request_type == str(current_request_type or "").strip():
+            request_type = ""
         return {
             "intent": resolved.get("intent", "") if resolved.get("intent", "") in {"yes", "no", "unknown"} else "unknown",
-            "brand": resolved.get("brand", ""),
-            "request_type": resolved.get("request_type", "") if resolved.get("request_type", "") in {"fault", "installation"} else "",
+            "brand": self._normalize_water_heater_brand_candidate(resolved.get("brand", "")),
+            "request_type": request_type,
             "heater_type": resolved.get("heater_type", "") if resolved.get("heater_type", "") in {"air_energy", "gas", "electric", "water_heater"} else "",
         }
 
@@ -2132,11 +2171,12 @@ class ServiceDialoguePolicy:
             return ""
         return issue_description
 
-    @staticmethod
     def _invoke_inference_callback(
+        self,
         callback: Callable[..., dict[str, Any] | None],
         **kwargs: Any,
     ) -> dict[str, Any] | None:
+        self.last_model_intent_inference_attempted = True
         signature = inspect.signature(callback)
         accepted_kwargs = {
             name: value
@@ -4019,8 +4059,18 @@ class ServiceDialoguePolicy:
     @staticmethod
     def _normalize_prompt_text(text: str) -> str:
         normalized = (text or "").strip()
-        normalized = re.sub(r"^好的[，,\s]*", "", normalized)
+        normalized = ServiceDialoguePolicy._strip_query_prefix(normalized)
         return normalized.rstrip("。！？!?")
+
+    @staticmethod
+    def _strip_query_prefix(text: str) -> str:
+        normalized = str(text or "").strip()
+        for prefix in ("好的", "嗯嗯", "了解了"):
+            pattern = rf"^{re.escape(prefix)}[，,\s]*"
+            updated = re.sub(pattern, "", normalized)
+            if updated != normalized:
+                return updated.strip()
+        return normalized
 
     @staticmethod
     def _resolve_prompt_variants(prompt_config: str | PromptConfig) -> tuple[list[str], list[float]]:
@@ -4154,7 +4204,10 @@ class ServiceDialoguePolicy:
     @classmethod
     def is_product_arrival_prompt(cls, text: str) -> bool:
         normalized = cls._normalize_prompt_text(text)
-        return normalized.startswith("请问") and normalized.endswith("已经送到了吗")
+        return normalized.startswith("请问") and (
+            normalized.endswith("已经送到了吗")
+            or normalized.endswith("到货了没")
+        )
 
     @classmethod
     def is_product_model_prompt(cls, text: str) -> bool:
@@ -4176,12 +4229,40 @@ class ServiceDialoguePolicy:
         return selected.format(**format_kwargs) if format_kwargs else selected
 
     def _with_optional_ok_prefix(self, text: str) -> str:
-        normalized = text.strip()
-        if not normalized or normalized.startswith("好的"):
+        normalized = self._strip_query_prefix(text)
+        if not normalized:
             return normalized
-        if self.rng.random() < self.ok_prefix_probability:
-            return f"好的，{normalized}"
-        return normalized
+        prefixes = list(self.query_prefix_weights.keys())
+        weights = [max(0.0, float(self.query_prefix_weights[prefix])) for prefix in prefixes]
+        selected_prefix = self.rng.choices(prefixes, weights=weights, k=1)[0]
+        if not selected_prefix:
+            return normalized
+        return f"{selected_prefix}，{normalized}"
+
+    @staticmethod
+    def _normalize_query_prefix_weights(
+        query_prefix_weights: dict[str, float] | None,
+        *,
+        fallback_probability: float,
+    ) -> dict[str, float]:
+        if query_prefix_weights is None:
+            probability = max(0.0, min(1.0, float(fallback_probability)))
+            return {
+                "好的": probability,
+                "嗯嗯": 0.0,
+                "了解了": 0.0,
+                "": 1.0 - probability,
+            }
+        weights = {prefix: 0.0 for prefix in QUERY_PREFIX_CHOICES}
+        for key, value in query_prefix_weights.items():
+            prefix = str(key)
+            if prefix not in weights:
+                allowed = "、".join(f'"{item}"' for item in QUERY_PREFIX_CHOICES)
+                raise ValueError(f"query_prefix_weights only supports prefixes: {allowed}.")
+            weights[prefix] = max(0.0, float(value))
+        if sum(weights.values()) <= 0:
+            raise ValueError("query_prefix_weights must contain at least one positive weight.")
+        return weights
 
     def _surname_prompt(self) -> str:
         return self._with_optional_ok_prefix(self._choose_prompt_text(self.SURNAME_PROMPT))
@@ -4994,6 +5075,10 @@ class ServiceDialoguePolicy:
         result: str,
     ) -> None:
         hidden_context = scenario.hidden_context if isinstance(scenario.hidden_context, dict) else {}
+        if "product_routing_initial_plan" not in hidden_context:
+            existing_plan = hidden_context.get("product_routing_plan")
+            if isinstance(existing_plan, dict):
+                hidden_context["product_routing_initial_plan"] = copy.deepcopy(existing_plan)
         summary_parts = [item for item in trace if str(item).strip()]
         if result:
             summary_parts.append(result)
@@ -5055,8 +5140,46 @@ class ServiceDialoguePolicy:
         if not prompt_key:
             return None
 
-        observed_answer_key = infer_product_routing_answer_key(prompt_key, user_text)
+        observed_answer_key = self._classify_product_routing_answer_key(
+            prompt_key=prompt_key,
+            user_text=user_text,
+            user_round_index=user_round_index,
+        )
         if not observed_answer_key:
+            return None
+
+        return self._advance_product_routing_with_answer(
+            scenario=scenario,
+            collected_slots=collected_slots,
+            slot_updates=slot_updates,
+            runtime_state=runtime_state,
+            observed_answer_key=observed_answer_key,
+        )
+
+    def _try_advance_product_routing_from_preanswered_brand(
+        self,
+        *,
+        scenario: Scenario,
+        brand_or_series: str,
+        collected_slots: dict[str, str],
+        slot_updates: dict[str, str],
+        runtime_state: ServiceRuntimeState,
+    ) -> ServicePolicyResult | None:
+        if not self._should_run_product_routing(scenario, runtime_state):
+            return None
+
+        steps = self._product_routing_steps(scenario)
+        if runtime_state.product_routing_step_index >= len(steps):
+            return None
+        current_step = steps[runtime_state.product_routing_step_index]
+        if str(current_step.get("prompt_key", "")).strip() != "brand_or_series":
+            return None
+
+        observed_answer_key = self._classify_product_routing_answer_key(
+            prompt_key="brand_or_series",
+            user_text=brand_or_series,
+        )
+        if not observed_answer_key.startswith("brand_series."):
             return None
 
         return self._advance_product_routing_with_answer(
@@ -5079,10 +5202,10 @@ class ServiceDialoguePolicy:
     ) -> ServicePolicyResult:
         runtime_state.product_routing_observed_trace.append(observed_answer_key)
         resolved_post_answer_trace = list(post_answer_trace or [])
-        if observed_answer_key == "entry.model" and not resolved_post_answer_trace:
-            fallback_model_lookup = infer_model_lookup_answer_key(scenario.product.model)
-            if fallback_model_lookup:
-                resolved_post_answer_trace.append(fallback_model_lookup)
+        if observed_answer_key == "entry.model":
+            resolved_post_answer_trace = [
+                item for item in resolved_post_answer_trace if not str(item).strip().startswith("model_lookup.")
+            ]
         if resolved_post_answer_trace:
             runtime_state.product_routing_observed_trace.extend(
                 item for item in resolved_post_answer_trace if str(item).strip()
@@ -5090,6 +5213,7 @@ class ServiceDialoguePolicy:
         next_steps, result = next_product_routing_steps_from_observed_trace(
             runtime_state.product_routing_observed_trace,
             model_hint=scenario.product.model,
+            hidden_context=scenario.hidden_context,
         )
         self._update_product_routing_plan(
             scenario=scenario,

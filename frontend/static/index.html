@@ -48,100 +48,150 @@
                     <p class="eyebrow">Manual Mode</p>
                     <h1>CLI 手工对话测试台</h1>
                 </div>
-                <p class="section-copy">仅保留与 `interactive-test` 一致的手工输入模式，支持 `/help`、`/slots`、`/state`、`/quit`；点击任意用户行可删除该行及其下方所有内容，右键用户文本可手动插入或移除 function_call 展示。</p>
+                <p class="section-copy">仅保留与 `interactive-test` 一致的手工输入模式，支持 `/help`、`/slots`、`/state`、`/quit`。</p>
             </section>
 
             <section class="panel-section left-panel-account">
-                <div class="section-heading compact">
-                    <p class="eyebrow">Account</p>
+                <div class="account-header-row">
                     <h2>当前账号</h2>
-                </div>
-                <div class="account-card-inline">
-                    <div>
-                        <div id="auth-user-name" class="account-name">未登录</div>
-                        <p id="auth-user-meta" class="section-copy">只有备案账号可访问测试台。</p>
-                    </div>
                     <button id="logout-btn" class="ghost-btn" type="button">退出登录</button>
                 </div>
+                <div class="account-card-inline">
+                    <div class="account-main">
+                        <div id="auth-user-name" class="account-name">未登录</div>
+                    </div>
+                </div>
             </section>
 
-            <section class="panel-section">
-                <div class="section-heading compact">
-                    <h2>会话配置</h2>
-                </div>
-                <label class="field">
-                    <div class="field-heading">
-                        <span>已知地址</span>
-                        <div class="field-action-group">
-                            <button id="generate-known-address-btn" class="field-action-btn" type="button">随机生成</button>
-                            <button id="clear-known-address-btn" class="field-action-btn" type="button">清空</button>
-                        </div>
+            <div class="left-panel-scroll-area">
+                <section class="panel-section session-config-card">
+                    <div class="section-heading compact">
+                        <h2>会话配置</h2>
                     </div>
-                    <textarea id="known-address" rows="3" placeholder="可选。填写后，客服会优先走地址核对流程。"></textarea>
-                </label>
-                <label class="field">
-                    <div class="field-heading">
-                        <span>通话开始时间</span>
-                        <div class="field-action-group">
-                            <button id="generate-call-start-time-btn" class="field-action-btn" type="button">随机生成</button>
+                    <div class="field">
+                        <div class="field-heading">
+                            <label for="known-address">已知地址</label>
+                            <div class="field-action-group">
+                                <button id="generate-known-address-btn" class="field-action-btn" type="button">随机生成</button>
+                                <button id="clear-known-address-btn" class="field-action-btn" type="button">清空</button>
+                            </div>
                         </div>
+                        <input id="known-address" type="text" placeholder="可选。填写后，客服会优先走地址核对流程。">
                     </div>
-                    <input id="call-start-time" type="text" placeholder="YYYY-MM-DD HH:MM:SS">
-                    <p id="call-start-time-error" class="field-error hidden">通话开始时间格式必须为 YYYY-MM-DD HH:MM:SS</p>
-                </label>
-                <label class="toggle">
-                    <input id="use-session-start-time" type="checkbox">
-                    <span>使用点击“启动测试会话”的时间作为通话开始时间</span>
-                </label>
-                <label class="toggle">
-                    <input id="auto-hidden-settings" type="checkbox">
-                    <span>启动时自动生成隐藏设定</span>
-                </label>
-                <label class="toggle">
-                    <input id="persist-to-db" type="checkbox">
-                    <span>结束后持久化到数据库</span>
-                </label>
-            </section>
+                    <div class="field">
+                        <div class="field-heading">
+                            <label for="call-start-time">通话开始时间</label>
+                            <div class="field-action-group">
+                                <button id="generate-call-start-time-btn" class="field-action-btn" type="button">随机生成</button>
+                            </div>
+                        </div>
+                        <input id="call-start-time" type="text" placeholder="YYYY-MM-DD HH:MM:SS">
+                        <p id="call-start-time-error" class="field-error hidden">通话开始时间格式必须为 YYYY-MM-DD HH:MM:SS</p>
+                    </div>
+                    <label class="toggle">
+                        <input id="use-session-start-time" type="checkbox">
+                        <span>使用点击“启动测试会话”的时间作为通话开始时间</span>
+                    </label>
+                    <label class="toggle">
+                        <input id="auto-hidden-settings" type="checkbox">
+                        <span>启动时自动生成隐藏设定</span>
+                    </label>
+                    <label class="toggle">
+                        <input id="persist-to-db" type="checkbox">
+                        <span>结束后持久化到数据库</span>
+                    </label>
+                </section>
 
-            <section class="panel-section grow">
-                <div class="section-heading compact">
-                    <h2>场景设置</h2>
-                </div>
-                <div id="scenario-list" class="scenario-list scenario-config-list">
-                    <label class="field">
-                        <div class="field-heading">
-                            <span>产品</span>
+                <section class="panel-section scenario-settings-card">
+                    <div class="section-heading compact">
+                        <h2>场景设置</h2>
+                    </div>
+                    <div id="scenario-list" class="scenario-list scenario-config-list">
+                        <div class="scenario-config-row">
+                            <label class="field">
+                                <div class="field-heading">
+                                    <span>产品</span>
+                                </div>
+                                <select id="manual-product-category">
+                                    <option value="空气能热水机" selected>空气能热水机</option>
+                                    <option value="热水器">热水器</option>
+                                    <option value="燃气热水器">燃气热水器</option>
+                                    <option value="电热水器">电热水器</option>
+                                </select>
+                            </label>
+                            <label class="field">
+                                <div class="field-heading">
+                                    <span>诉求</span>
+                                </div>
+                                <select id="manual-request-type">
+                                    <option value="fault" selected>维修</option>
+                                    <option value="installation">安装</option>
+                                </select>
+                            </label>
                         </div>
-                        <select id="manual-product-category">
-                            <option value="空气能热水机" selected>空气能热水机</option>
-                            <option value="热水器">热水器</option>
-                            <option value="燃气热水器">燃气热水器</option>
-                            <option value="电热水器">电热水器</option>
-                        </select>
-                    </label>
-                    <label class="field">
-                        <div class="field-heading">
-                            <span>诉求</span>
+                    </div>
+                </section>
+
+                <section class="panel-section history-device-card">
+                    <div class="section-heading compact">
+                        <h2>历史设备</h2>
+                    </div>
+                    <div class="history-device-grid">
+                        <label class="field">
+                            <div class="field-heading">
+                                <span>品牌</span>
+                            </div>
+                            <select id="history-device-brand">
+                                <option value="" selected>未知</option>
+                                <option value="美的">美的</option>
+                                <option value="COLMO">COLMO</option>
+                                <option value="真暖">真暖</option>
+                                <option value="真省">真省</option>
+                                <option value="雪焰">雪焰</option>
+                                <option value="暖家">暖家</option>
+                                <option value="煤改电">煤改电</option>
+                                <option value="真享">真享</option>
+                                <option value="烈焰">烈焰</option>
+                            </select>
+                        </label>
+                        <label class="field">
+                            <div class="field-heading">
+                                <span>品类</span>
+                            </div>
+                            <select id="history-device-category">
+                                <option value="" selected>未知</option>
+                            </select>
+                        </label>
+                        <div class="field history-date-field">
+                            <div class="field-heading">
+                                <label for="history-device-purchase-date">购买时间</label>
+                                <span class="field-action-group">
+                                    <button id="generate-history-device-date-btn" class="ghost-btn tiny" type="button">随机</button>
+                                    <button id="clear-history-device-btn" class="ghost-btn tiny" type="button">清空</button>
+                                </span>
+                            </div>
+                            <div class="history-date-shell">
+                                <button id="history-device-calendar-btn" class="history-date-icon" type="button" aria-label="选择购买日期"></button>
+                                <input id="history-device-purchase-date" class="history-date-picker" type="date" aria-label="选择购买日期">
+                                <div class="history-date-parts" aria-label="购买时间">
+                                    <label class="history-date-part">
+                                        <input id="history-device-purchase-year" type="text" inputmode="numeric" maxlength="4" placeholder="yyyy">
+                                        <span>年</span>
+                                    </label>
+                                    <label class="history-date-part">
+                                        <input id="history-device-purchase-month" type="text" inputmode="numeric" maxlength="2" placeholder="mm">
+                                        <span>月</span>
+                                    </label>
+                                    <label class="history-date-part">
+                                        <input id="history-device-purchase-day" type="text" inputmode="numeric" maxlength="2" placeholder="dd">
+                                        <span>日</span>
+                                    </label>
+                                </div>
+                            </div>
                         </div>
-                        <select id="manual-request-type">
-                            <option value="fault" selected>维修</option>
-                            <option value="installation">安装</option>
-                        </select>
-                    </label>
-                    <label class="field">
-                        <div class="field-heading">
-                            <span>最大轮次</span>
-                        </div>
-                        <input id="manual-max-rounds" type="number" min="1" step="1" value="32">
-                    </label>
-                    <label class="field">
-                        <div class="field-heading">
-                            <span>IVR 诉求原话</span>
-                        </div>
-                        <textarea id="ivr-utterance" rows="2" placeholder="可选。填写后会记录 IVR 原话，但首轮仍按这里的产品和诉求配置启动。">空气能热水器需要维修</textarea>
-                    </label>
-                </div>
-            </section>
+                    </div>
+                </section>
+            </div>
 
             <section class="panel-section action-dock">
                 <button id="start-session-btn" class="primary-btn dock-btn">启动测试会话</button>
@@ -182,7 +232,7 @@
                 <section id="session-context-panel" class="session-context-panel hidden">
                     <div class="session-context-header">
                         <div>
-                            <p class="eyebrow">Session Context</p>
+                            <p class="eyebrow">会话设定</p>
                             <h3 id="session-context-title">本次会话设定</h3>
                         </div>
                         <span id="session-context-mode" class="context-mode-badge">未开始</span>
@@ -291,6 +341,15 @@
                 </div>
                 <div id="address-slots-container" class="data-list">
                     <p class="terminal-hint">地址环节开始后显示</p>
+                </div>
+            </section>
+
+            <section id="auto-mode-preview-panel" class="panel-section right-panel-section">
+                <div class="section-heading compact">
+                    <h2>自动模式预演</h2>
+                </div>
+                <div id="auto-mode-preview-container" class="data-list auto-mode-preview-list">
+                    <p class="terminal-hint">点击自动模式后显示</p>
                 </div>
             </section>
         </aside>
@@ -480,7 +539,9 @@
         <button id="rewrite-record-delete-btn" class="chat-message-menu-btn chat-message-menu-btn-danger" type="button">删除</button>
     </div>
     <div id="terminal-turn-menu" class="chat-message-menu hidden" hidden aria-hidden="true">
-        <button id="terminal-toggle-address-ie-btn" class="chat-message-menu-btn" type="button">插入 function_call 与 observation</button>
+        <button id="terminal-insert-address-ie-btn" class="chat-message-menu-btn" type="button">地址抽取</button>
+        <button id="terminal-insert-telephone-ie-btn" class="chat-message-menu-btn" type="button">电话抽取</button>
+        <button id="terminal-remove-ie-btn" class="chat-message-menu-btn chat-message-menu-btn-danger" type="button">移除抽取</button>
     </div>
 
     <aside id="chat-window" class="chat-window hidden" hidden aria-hidden="true">
@@ -587,7 +648,7 @@
 
             <label class="toggle">
                 <input id="review-persist-to-db" type="checkbox">
-                <span>将本次测试记录写入 SQLite</span>
+                <span>将本次测试记录写入数据库</span>
             </label>
 
             <div class="modal-actions">
@@ -608,6 +669,11 @@
             </div>
             <p id="rewrite-export-summary" class="section-copy">当前文件包含未完成数据，请确认是否继续导出。</p>
             <div id="rewrite-export-stats" class="data-list"></div>
+            <div id="rewrite-export-scope-choices" class="rewrite-export-scope-choices hidden">
+                <button class="secondary-btn" type="button" data-rewrite-export-scope="file">仅导出文件</button>
+                <button class="secondary-btn" type="button" data-rewrite-export-scope="test">仅导出测试转改写</button>
+                <button class="primary-btn" type="button" data-rewrite-export-scope="all">一起导出</button>
+            </div>
             <div class="modal-actions">
                 <button id="rewrite-export-cancel-btn" class="secondary-btn" type="button">取消</button>
                 <button id="rewrite-export-confirm-btn" class="primary-btn" type="button">强制提交导出</button>

@@ -22,7 +22,13 @@ class ConfigTests(unittest.TestCase):
                     "SERVICE_AGENT_MODEL": "service-model",
                     "PRODUCT_ROUTING_ENABLED": "false",
                     "PRODUCT_ROUTING_APPLY_PROBABILITY": "0.25",
+                    "AUTO_MODE_IVR_PRODUCT_KIND_WEIGHTS": '{"air_energy": 0.2, "water_heater": 0.8}',
+                    "AUTO_MODE_WATER_HEATER_OPENING_REPLY_WEIGHTS": '{"confirm": 0.1, "change_request": 0.9}',
+                    "AUTO_MODE_HISTORY_DEVICE_PROBABILITY": "0.75",
+                    "AUTO_MODE_HISTORY_DEVICE_BRAND_WEIGHTS": '{"美的": 0.6, "烈焰": 0.4}',
+                    "AUTO_MODE_HISTORY_DEVICE_CATEGORY_WEIGHTS": '{"家用空气能热水机": 0.2, "空气能热水机": 0.8}',
                     "SECOND_ROUND_INCLUDE_ISSUE_PROBABILITY": "0.9",
+                    "SERVICE_QUERY_PREFIX_WEIGHTS": '{"好的": 0.2, "嗯嗯": 0.3, "了解了": 0.4, "": 0.1}',
                     "ADDRESS_SEGMENTED_REPLY_PROBABILITY": "0.8",
                     "ADDRESS_SEGMENT_ROUNDS_WEIGHTS": '{"2": 0.1, "3": 0.9, "4": 0.0}',
                     "ADDRESS_SEGMENT_3_STRATEGY_WEIGHTS": '{"province_city_district__locality__detail": 1.0}',
@@ -45,7 +51,14 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.service_agent_model, "service-model")
         self.assertFalse(config.product_routing_enabled)
         self.assertEqual(config.product_routing_apply_probability, 0.25)
+        self.assertEqual(config.auto_mode_ivr_product_kind_weights["water_heater"], 0.8)
+        self.assertEqual(config.auto_mode_water_heater_opening_reply_weights["change_request"], 0.9)
+        self.assertEqual(config.auto_mode_history_device_probability, 0.75)
+        self.assertEqual(config.auto_mode_history_device_brand_weights["烈焰"], 0.4)
+        self.assertEqual(config.auto_mode_history_device_category_weights["空气能热水机"], 0.8)
         self.assertEqual(config.second_round_include_issue_probability, 0.9)
+        self.assertEqual(config.service_query_prefix_weights["嗯嗯"], 0.3)
+        self.assertEqual(config.service_query_prefix_weights[""], 0.1)
         self.assertEqual(config.address_segmented_reply_probability, 0.8)
         self.assertEqual(config.address_segment_rounds_weights["3"], 0.9)
         self.assertEqual(
@@ -78,6 +91,10 @@ class ConfigTests(unittest.TestCase):
                     "OPENAI_BASE_URL": "https://example.com/v1/chat/completions",
                     "OPENAI_API_KEY": "env-api-key",
                     "ADDRESS_SEGMENT_MERGE_STRATEGY_WEIGHTS": '{"province_city_district__locality__detail": 0.9, "province_city_district__locality_detail": 0.8, "province_city__district__locality__detail": 0.7}',
+                    "ADDRESS_SEGMENT_2_STRATEGY_WEIGHTS": "",
+                    "ADDRESS_SEGMENT_3_STRATEGY_WEIGHTS": "",
+                    "ADDRESS_SEGMENT_4_STRATEGY_WEIGHTS": "",
+                    "ADDRESS_SEGMENT_5_STRATEGY_WEIGHTS": "",
                 },
                 clear=False,
             ):
