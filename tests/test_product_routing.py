@@ -294,7 +294,7 @@ class ProductRoutingPlanTests(unittest.TestCase):
                 self.assertEqual(answer_key, "brand_series.colmo")
 
     def test_infer_product_routing_answer_key_maps_lieyan_homophones(self):
-        for user_text in ("莲叶的", "莲炎的", "列焰的", "连叶的"):
+        for user_text in ("莲叶的", "莲炎的", "列焰的", "连叶的", "连夜的好像", "莲夜系列"):
             with self.subTest(user_text=user_text):
                 answer_key = infer_product_routing_answer_key("brand_or_series", user_text)
 

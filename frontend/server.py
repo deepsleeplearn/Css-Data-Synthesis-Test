@@ -18,7 +18,7 @@ import atexit
 import time
 import random
 from datetime import datetime, timedelta, timezone
-from dataclasses import asdict, replace
+from dataclasses import asdict, is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -120,6 +120,7 @@ AUTH_SESSION_TTL = timedelta(hours=12)
 DEFAULT_REGISTERED_ACCOUNTS_FILE = PROJECT_ROOT / "frontend" / "registered_accounts.local.json"
 DISPLAY_TIMEZONE = timezone(timedelta(hours=8))
 DISPLAY_TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+FRONTEND_MODEL_OPTIONS = ("gpt-4o", "qwen3-32b")
 
 try:
     config = replace(load_config(), hidden_settings_store=None)
@@ -177,37 +178,104 @@ FLOW_REVIEW_OPTIONS = [
 ]
 
 
-def _build_service_policy():
+def _normalize_frontend_model_name(model_name: str) -> str:
+    normalized = str(model_name or "").strip()
+    if normalized in FRONTEND_MODEL_OPTIONS:
+        return normalized
+    configured_default = str(getattr(config, "default_model", "") or "").strip()
+    if configured_default in FRONTEND_MODEL_OPTIONS:
+        return configured_default
+    return "gpt-4o"
+
+
+def _config_for_model(model_name: str):
+    normalized_model = _normalize_frontend_model_name(model_name)
+    endpoints = getattr(config, "model_endpoints", {}) or {}
+    selected_endpoint = dict(endpoints.get(normalized_model, {}))
+    selected_base_url = str(selected_endpoint.get("base_url") or getattr(config, "openai_base_url", "") or "")
+    selected_api_key = str(selected_endpoint.get("api_key") or getattr(config, "openai_api_key", "") or "")
+    selected_user = str(selected_endpoint.get("user") or getattr(config, "user", "") or "")
+    if is_dataclass(config):
+        return replace(
+            config,
+            default_model=normalized_model,
+            user_agent_model=normalized_model,
+            service_agent_model=normalized_model,
+            openai_base_url=selected_base_url,
+            openai_api_key=selected_api_key,
+            user=selected_user,
+        )
+    active_config = copy.copy(config)
+    setattr(active_config, "default_model", normalized_model)
+    setattr(active_config, "user_agent_model", normalized_model)
+    setattr(active_config, "service_agent_model", normalized_model)
+    if not hasattr(active_config, "model_endpoints"):
+        setattr(active_config, "model_endpoints", {})
+    if not hasattr(active_config, "openai_base_url"):
+        setattr(active_config, "openai_base_url", "")
+    if not hasattr(active_config, "openai_api_key"):
+        setattr(active_config, "openai_api_key", "")
+    if not hasattr(active_config, "user"):
+        setattr(active_config, "user", "")
+    active_config.openai_base_url = selected_base_url
+    active_config.openai_api_key = selected_api_key
+    active_config.user = selected_user
+    if not hasattr(active_config, "request_timeout"):
+        setattr(active_config, "request_timeout", 90.0)
+    if not hasattr(active_config, "second_round_include_issue_probability"):
+        setattr(active_config, "second_round_include_issue_probability", 0.4)
+    return active_config
+
+
+def _client_for_model(model_name: str) -> OpenAIChatClient:
+    return OpenAIChatClient(_config_for_model(model_name))
+
+
+def _disable_unavailable_model_callbacks(agent: ServiceAgent, active_config: Any) -> ServiceAgent:
+    if str(getattr(active_config, "openai_api_key", "") or "").strip():
+        return agent
+    # Unit tests and offline runs often stub config without credentials. Keep the
+    # original deterministic routing fallback instead of forcing a failed model call.
+    agent.policy.product_routing_intent_inference_callback = None
+    return agent
+
+
+def _build_service_policy(model_name: str = ""):
+    active_config = _config_for_model(model_name)
     service_agent = ServiceAgent(
-        llm_client,
-        model=config.service_agent_model,
-        temperature=config.default_temperature,
-        ok_prefix_probability=config.service_ok_prefix_probability,
-        query_prefix_weights=config.service_query_prefix_weights,
-        product_routing_enabled=config.product_routing_enabled,
-        product_routing_apply_probability=config.product_routing_apply_probability,
+        OpenAIChatClient(active_config),
+        model=active_config.service_agent_model,
+        temperature=active_config.default_temperature,
+        ok_prefix_probability=active_config.service_ok_prefix_probability,
+        query_prefix_weights=active_config.service_query_prefix_weights,
+        product_routing_enabled=active_config.product_routing_enabled,
+        product_routing_apply_probability=active_config.product_routing_apply_probability,
     )
+    _disable_unavailable_model_callbacks(service_agent, active_config)
     return service_agent.policy
 
 
-def _build_service_agent() -> ServiceAgent:
-    return ServiceAgent(
-        llm_client,
-        model=config.service_agent_model,
-        temperature=config.default_temperature,
-        ok_prefix_probability=config.service_ok_prefix_probability,
-        query_prefix_weights=config.service_query_prefix_weights,
-        product_routing_enabled=config.product_routing_enabled,
-        product_routing_apply_probability=config.product_routing_apply_probability,
+def _build_service_agent(model_name: str = "") -> ServiceAgent:
+    active_config = _config_for_model(model_name)
+    service_agent = ServiceAgent(
+        OpenAIChatClient(active_config),
+        model=active_config.service_agent_model,
+        temperature=active_config.default_temperature,
+        ok_prefix_probability=active_config.service_ok_prefix_probability,
+        query_prefix_weights=active_config.service_query_prefix_weights,
+        product_routing_enabled=active_config.product_routing_enabled,
+        product_routing_apply_probability=active_config.product_routing_apply_probability,
     )
+    return _disable_unavailable_model_callbacks(service_agent, active_config)
 
 
-def _build_user_agent() -> UserAgent:
+def _build_user_agent(model_name: str = "") -> UserAgent:
+    active_config = _config_for_model(model_name)
     return UserAgent(
-        llm_client,
-        model=config.user_agent_model,
-        temperature=config.default_temperature,
-        second_round_include_issue_probability=config.second_round_include_issue_probability,
+        OpenAIChatClient(active_config),
+        model=active_config.user_agent_model,
+        temperature=active_config.default_temperature,
+        second_round_include_issue_probability=active_config.second_round_include_issue_probability,
     )
 
 
@@ -229,6 +297,7 @@ class StartSessionRequest(BaseModel):
     scenario_index: int = 0
     product_category: str = ""
     request_type: str = ""
+    model_name: str = "gpt-4o"
     history_device_brand: str = ""
     history_device_category: str = ""
     history_device_purchase_date: str = ""
@@ -267,6 +336,7 @@ class AddressIeDisplayRequest(BaseModel):
 class RewriteIeObservationRequest(BaseModel):
     entity_type: str = "addressInfo"
     dialogue_lines: list[str] = []
+    model_name: str = "gpt-4o"
 
 
 class LoginRequest(BaseModel):
@@ -1409,10 +1479,17 @@ def _infer_ivr_product_kind(text: str) -> str:
     return ""
 
 
-def _classify_ivr_opening_with_model(ivr_text: str) -> dict[str, str]:
+def _classify_ivr_opening_with_model(
+    ivr_text: str,
+    *,
+    active_client: OpenAIChatClient | None = None,
+    active_config: Any | None = None,
+) -> dict[str, str]:
     sanitized = _sanitize_manual_user_text(ivr_text)
     if not sanitized:
         return {"product_kind": "", "request_type": ""}
+    resolved_client = active_client or llm_client
+    resolved_config = active_config or config
     system_prompt = """你是家电客服电话 IVR 首轮意图识别助手。
 
 任务：只根据用户在进入人工客服前的一句 IVR 诉求，判断产品意图和诉求类型。
@@ -1435,8 +1512,8 @@ def _classify_ivr_opening_with_model(ivr_text: str) -> dict[str, str]:
   "request_type": "installation|fault|unknown"
 }"""
     try:
-        payload = llm_client.complete_json(
-            model=config.service_agent_model,
+        payload = resolved_client.complete_json(
+            model=resolved_config.service_agent_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"IVR原话: {sanitized}\n只返回 JSON。"},
@@ -1454,6 +1531,9 @@ def _classify_ivr_opening_with_model(ivr_text: str) -> dict[str, str]:
 def _apply_ivr_opening_override(
     scenario: Scenario,
     ivr_utterance: str,
+    *,
+    active_client: OpenAIChatClient | None = None,
+    active_config: Any | None = None,
 ) -> tuple[Scenario, str, bool]:
     sanitized = _sanitize_manual_user_text(ivr_utterance)
     if not sanitized:
@@ -1461,7 +1541,11 @@ def _apply_ivr_opening_override(
 
     inferred_request_type = _infer_ivr_request_type(sanitized)
     inferred_product_kind = _infer_ivr_product_kind(sanitized)
-    model_result = _classify_ivr_opening_with_model(sanitized)
+    model_result = _classify_ivr_opening_with_model(
+        sanitized,
+        active_client=active_client,
+        active_config=active_config,
+    )
 
     request_type = _normalize_ivr_request_type(model_result.get("request_type", "")) or inferred_request_type
     product_kind = str(model_result.get("product_kind", "")).strip().lower() or inferred_product_kind
@@ -1504,6 +1588,8 @@ def _prepare_manual_test_scenario(
     force_local_hidden_settings: bool = False,
     frontend_auto_address_policy: bool = False,
 ) -> tuple[Scenario, str, int, str, bool]:
+    active_config = _config_for_model(req.model_name)
+    active_client = OpenAIChatClient(active_config)
     manual_request_type = _normalize_ivr_request_type(req.request_type)
     manual_product_category = _normalize_manual_product_category(req.product_category)
     if manual_request_type or manual_product_category:
@@ -1518,15 +1604,15 @@ def _prepare_manual_test_scenario(
         scenario = _apply_frontend_auto_address_policy_seed(scenario, req.known_address)
 
     if req.auto_generate_hidden_settings:
-        if not config.openai_api_key or "YOUR_API_KEY" in config.openai_api_key:
-            raise ValueError("未配置 OPENAI_API_KEY，请检查 .env 文件。")
-        tool = HiddenSettingsTool(llm_client, config)
+        if not active_config.openai_api_key or "YOUR_API_KEY" in active_config.openai_api_key:
+            raise ValueError("未配置所选模型的 API_KEY，请检查 .env 文件。")
+        tool = HiddenSettingsTool(active_client, active_config)
         scenario = tool.generate_for_scenario(
             scenario,
             use_utterance_reference=True,
         )
     elif force_local_hidden_settings:
-        tool = HiddenSettingsTool(llm_client, config)
+        tool = HiddenSettingsTool(active_client, active_config)
         scenario = tool.hydrate_scenario_locally(scenario)
     elif _manual_test_requires_generated_hidden_settings(scenario):
         scenario = _hydrate_manual_test_scenario_locally(scenario)
@@ -1549,6 +1635,8 @@ def _prepare_manual_test_scenario(
         scenario, ivr_notice, ivr_opening_enabled = _apply_ivr_opening_override(
             scenario,
             req.ivr_utterance,
+            active_client=active_client,
+            active_config=active_config,
         )
     _attach_product_routing_weight_overrides(scenario.hidden_context)
     _reset_product_routing_plan(scenario.hidden_context)
@@ -1641,6 +1729,7 @@ def _build_auto_mode_preview_lines(scenario: Scenario) -> list[str]:
 
 
 def _create_auto_mode_job(req: StartSessionRequest) -> tuple[str, dict[str, Any]]:
+    selected_model_name = _normalize_frontend_model_name(req.model_name)
     req, _ = _auto_mode_ivr_request(req)
     req = _auto_mode_history_device_request(req)
     scenario, _known_address_notice, rounds_limit, _ivr_notice, ivr_opening_enabled = _prepare_manual_test_scenario(
@@ -1663,6 +1752,7 @@ def _create_auto_mode_job(req: StartSessionRequest) -> tuple[str, dict[str, Any]
     auto_mode_id = f"auto-{datetime.now(DISPLAY_TIMEZONE).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
     session = {
         "auto_mode_id": auto_mode_id,
+        "model_name": selected_model_name,
         "scenario": scenario,
         "runtime_state": ServiceRuntimeState(),
         "transcript": [],
@@ -1676,6 +1766,7 @@ def _create_auto_mode_job(req: StartSessionRequest) -> tuple[str, dict[str, Any]
         "ended_at": "",
         "session_config": {
             "scenario_id": scenario.scenario_id,
+            "model_name": selected_model_name,
             "product_category": str(req.product_category or "").strip(),
             "request_type": str(req.request_type or "").strip(),
             "history_device_brand": str(req.history_device_brand or "").strip(),
@@ -1832,8 +1923,11 @@ async def _run_auto_mode_job_async(job_id: str) -> None:
         rounds_limit = int(session["rounds_limit"])
         job["updated_at"] = time.time()
 
-    service_agent = _build_service_agent()
-    user_agent = _build_user_agent()
+    model_name = str(session.get("model_name") or session.get("session_config", {}).get("model_name") or "").strip()
+    service_agent = _build_service_agent(model_name)
+    user_agent = _build_user_agent(model_name)
+    active_config = _config_for_model(model_name)
+    active_client = OpenAIChatClient(active_config)
 
     try:
         if _is_auto_mode_abort_requested(job_id):
@@ -1918,12 +2012,16 @@ async def _run_auto_mode_job_async(job_id: str) -> None:
                     turn=user_turn,
                     transcript=transcript + [user_turn],
                     runtime_state=runtime_state,
+                    client=active_client,
+                    model=active_config.service_agent_model,
                 )
                 auto_address_observation = _append_address_ie_display_lines(
                     policy=service_agent.policy,
                     turn=user_turn,
                     transcript=transcript + [user_turn],
                     runtime_state=runtime_state,
+                    client=active_client,
+                    model=active_config.service_agent_model,
                 )
                 with AUTO_MODE_JOB_LOCK:
                     transcript.append(user_turn)
@@ -2189,6 +2287,9 @@ def _restore_checkpoint_index_for_round(
 def _serialize_session_for_storage(session: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "username": str(session.get("username", "")).strip(),
+        "model_name": _normalize_frontend_model_name(
+            str(session.get("model_name") or session.get("session_config", {}).get("model_name") or "")
+        ),
         "scenario": session["scenario"].to_dict(),
         "base_scenario": dict(session.get("base_scenario", {})),
         "runtime_state": asdict(session["runtime_state"]),
@@ -2215,11 +2316,15 @@ def _serialize_session_for_storage(session: dict[str, Any]) -> dict[str, Any]:
 def _deserialize_session_from_storage(payload: dict[str, Any]) -> dict[str, Any]:
     scenario = Scenario.from_dict(dict(payload.get("scenario", {})))
     runtime_state = ServiceRuntimeState(**dict(payload.get("runtime_state", {})))
+    model_name = _normalize_frontend_model_name(
+        str(payload.get("model_name") or payload.get("session_config", {}).get("model_name") or "")
+    )
     session: dict[str, Any] = {
         "username": str(payload.get("username", "")).strip(),
+        "model_name": model_name,
         "scenario": scenario,
         "base_scenario": dict(payload.get("base_scenario", {})),
-        "policy": _build_service_policy(),
+        "policy": _build_service_policy(model_name),
         "runtime_state": runtime_state,
         "transcript": _deserialize_turns_from_storage(payload.get("transcript")),
         "trace": list(payload.get("trace", [])),
@@ -2441,7 +2546,11 @@ def _append_address_ie_display_lines(
     turn: DialogueTurn,
     transcript: list[DialogueTurn],
     runtime_state: ServiceRuntimeState,
+    client: OpenAIChatClient | None = None,
+    model: str = "",
 ) -> dict[str, Any] | None:
+    resolved_client = client or llm_client
+    resolved_model = model or config.service_agent_model
     previous_service_text = ""
     for previous_turn in reversed(transcript[:-1]):
         if previous_turn.speaker == SERVICE_SPEAKER:
@@ -2470,7 +2579,8 @@ def _append_address_ie_display_lines(
             if confirmation_address:
                 observation = build_address_model_observation(
                     confirmation_address,
-                    client=llm_client,
+                    client=resolved_client,
+                    model=resolved_model,
                 )
                 turn.post_display_lines.append(policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY)
                 turn.post_display_lines.append(
@@ -2491,7 +2601,8 @@ def _append_address_ie_display_lines(
             if denial_address:
                 observation = build_address_model_observation(
                     transcript,
-                    client=llm_client,
+                    client=resolved_client,
+                    model=resolved_model,
                 )
                 turn.post_display_lines.append(policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY)
                 turn.post_display_lines.append(
@@ -2517,7 +2628,8 @@ def _append_address_ie_display_lines(
         return None
     observation = build_address_model_observation(
         transcript,
-        client=llm_client,
+        client=resolved_client,
+        model=resolved_model,
     )
     turn.post_display_lines.append(policy.ADDRESS_IE_FUNCTION_CALL_DISPLAY)
     turn.post_display_lines.append(f"observation: {json.dumps(observation, ensure_ascii=False)}")
@@ -2626,7 +2738,11 @@ def _append_phone_ie_display_lines(
     turn: DialogueTurn,
     transcript: list[DialogueTurn],
     runtime_state: ServiceRuntimeState,
+    client: OpenAIChatClient | None = None,
+    model: str = "",
 ) -> dict[str, Any] | None:
+    resolved_client = client or llm_client
+    resolved_model = model or config.service_agent_model
     if not runtime_state.awaiting_phone_keypad_input:
         return None
     previous_service_text = ""
@@ -2638,7 +2754,8 @@ def _append_phone_ie_display_lines(
         return None
     observation = build_telephone_model_observation(
         transcript,
-        client=llm_client,
+        client=resolved_client,
+        model=resolved_model,
     )
     runtime_state.pending_phone_ie_observation = dict(observation)
     turn.post_display_lines.append(policy.PHONE_IE_FUNCTION_CALL_DISPLAY)
@@ -2659,12 +2776,17 @@ def _ie_post_display_lines_for_transcript(
     transcript: list[DialogueTurn],
     *,
     entity_type: str = "addressInfo",
+    client: OpenAIChatClient | None = None,
+    model: str = "",
 ) -> list[str]:
     normalized_entity_type = _normalize_manual_ie_entity_type(entity_type)
+    resolved_client = client or llm_client
+    resolved_model = model or config.service_agent_model
     if normalized_entity_type == "telephone":
         observation = build_telephone_model_observation(
             transcript,
-            client=llm_client,
+            client=resolved_client,
+            model=resolved_model,
         )
         return [
             ServiceDialoguePolicy.PHONE_IE_FUNCTION_CALL_DISPLAY,
@@ -2673,7 +2795,8 @@ def _ie_post_display_lines_for_transcript(
 
     observation = build_address_model_observation(
         transcript,
-        client=llm_client,
+        client=resolved_client,
+        model=resolved_model,
     )
     return [
         ServiceDialoguePolicy.ADDRESS_IE_FUNCTION_CALL_DISPLAY,
@@ -2700,6 +2823,10 @@ def _apply_manual_ie_display_lines(
     entity_type: str = "addressInfo",
 ) -> bool:
     normalized_entity_type = _normalize_manual_ie_entity_type(entity_type)
+    active_config = _config_for_model(
+        str(session.get("model_name") or session.get("session_config", {}).get("model_name") or "")
+    )
+    active_client = OpenAIChatClient(active_config)
     transcript = session.get("transcript", [])
     turn_match = _find_user_turn_by_round_index(transcript, round_index)
     if turn_match is None:
@@ -2720,6 +2847,8 @@ def _apply_manual_ie_display_lines(
         observation_lines = _ie_post_display_lines_for_transcript(
             transcript[: turn_position + 1],
             entity_type=normalized_entity_type,
+            client=active_client,
+            model=active_config.service_agent_model,
         )
         updated_lines = preserved_lines + observation_lines
         changed = updated_lines != list(user_turn.post_display_lines)
@@ -2749,6 +2878,8 @@ def _apply_manual_ie_display_lines(
             checkpoint_observation_lines = _ie_post_display_lines_for_transcript(
                 checkpoint_transcript[: checkpoint_turn_position + 1],
                 entity_type=normalized_entity_type,
+                client=active_client,
+                model=active_config.service_agent_model,
             )
             checkpoint_user_turn.post_display_lines = checkpoint_preserved_lines + checkpoint_observation_lines
         else:
@@ -3767,9 +3898,11 @@ def start_session(
         )
 
         session_id = str(uuid.uuid4())
-        policy = _build_service_policy()
+        selected_model_name = _normalize_frontend_model_name(req.model_name)
+        policy = _build_service_policy(selected_model_name)
         sessions[session_id] = {
             "username": current_user["username"],
+            "model_name": selected_model_name,
             "scenario": scenario,
             "base_scenario": scenario.to_dict(),
             "policy": policy,
@@ -3790,6 +3923,7 @@ def start_session(
             "review_submitted": False,
             "session_config": {
                 "scenario_id": scenario.scenario_id,
+                "model_name": selected_model_name,
                 "product_category": str(req.product_category or "").strip(),
                 "request_type": str(req.request_type or "").strip(),
                 "history_device_brand": str(req.history_device_brand or "").strip(),
@@ -4057,6 +4191,10 @@ def respond(
     scenario = session["scenario"]
     policy = session["policy"]
     required_slots = session["required_slots"]
+    active_config = _config_for_model(
+        str(session.get("model_name") or session.get("session_config", {}).get("model_name") or "")
+    )
+    active_client = OpenAIChatClient(active_config)
     user_turn = DialogueTurn(
         speaker=USER_SPEAKER,
         text=punctuated_user_text,
@@ -4068,12 +4206,16 @@ def respond(
         turn=user_turn,
         transcript=transcript,
         runtime_state=runtime_state,
+        client=active_client,
+        model=active_config.service_agent_model,
     )
     auto_address_observation = _append_address_ie_display_lines(
         policy=policy,
         turn=user_turn,
         transcript=transcript,
         runtime_state=runtime_state,
+        client=active_client,
+        model=active_config.service_agent_model,
     )
 
     try:
@@ -4248,7 +4390,9 @@ def rewind_session(
         raise HTTPException(status_code=409, detail="当前会话状态节点损坏，无法回退。")
 
     session["scenario"] = _rebuild_scenario_for_checkpoint(session, checkpoint)
-    session["policy"] = _build_service_policy()
+    session["policy"] = _build_service_policy(
+        str(session.get("model_name") or session.get("session_config", {}).get("model_name") or "")
+    )
     session["transcript"] = _deserialize_turns_from_storage(checkpoint.get("transcript"))
     session["terminal_entries"] = _copy_terminal_entries(checkpoint.get("terminal_entries", []))
     session["collected_slots"] = dict(checkpoint.get("collected_slots", {}))
@@ -4317,11 +4461,12 @@ def build_rewrite_ie_observation(
     if not dialogue_lines:
         raise HTTPException(status_code=400, detail="请先在 function_call 上方保留用户/客服对话内容。")
 
+    active_config = _config_for_model(req.model_name)
     observation = build_ie_model_observation(
         dialogue_lines,
         entity_type,
-        client=llm_client,
-        model=config.service_agent_model,
+        client=OpenAIChatClient(active_config),
+        model=active_config.service_agent_model,
     )
     return {"observation": observation}
 

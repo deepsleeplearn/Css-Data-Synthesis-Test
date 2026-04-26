@@ -151,6 +151,13 @@ def build_config(
         default_model="qwen3.5-plus",
         user_agent_model="qwen3.5-plus",
         service_agent_model="qwen3.5-plus",
+        model_endpoints={
+            "qwen3.5-plus": {
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "api_key": "sk-a5735e44c73347978f9a4664ef8bea7d",
+                "user": "test-user",
+            }
+        },
         default_temperature=0.7,
         service_ok_prefix_probability=0.7,
         service_query_prefix_weights={"好的": 0.7, "嗯嗯": 0.0, "了解了": 0.0, "": 0.3},
@@ -582,6 +589,58 @@ class HiddenSettingsToolTests(unittest.TestCase):
                     "fault",
                     scenario_id="midea_heat_pump_fault_001",
                 )
+
+    def test_normalize_generated_payload_rejects_repair_description_for_installation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store_path = Path(temp_dir) / "hidden_settings_history.jsonl"
+            tool = HiddenSettingsTool(SequenceFakeClient([]), build_config(store_path))
+
+            with self.assertRaisesRegex(ValueError, "installation issue"):
+                tool._normalize_generated_payload(
+                    build_candidate(
+                        full_name="王海涛",
+                        surname="王",
+                        phone="13912345678",
+                        address="浙江省杭州市余杭区良渚街道阳光家园8幢2单元502室",
+                        persona="普通家庭用户，担心水费异常。",
+                        speech_style="说话有点着急，会连续补充细节。",
+                        issue="热水器下面的管子一直排热水不停，水表转得很快，家里水量不正常。",
+                        desired_resolution="安排师傅上门检查维修，尽快修好。",
+                        availability="明天下午都在家",
+                        emotion="着急",
+                        urgency="较高",
+                        prior_attempts="自己关过阀门但没弄明白。",
+                        special_constraints="家里白天有人。",
+                    ),
+                    "installation",
+                )
+
+    def test_normalize_generated_payload_accepts_clear_installation_description(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store_path = Path(temp_dir) / "hidden_settings_history.jsonl"
+            tool = HiddenSettingsTool(SequenceFakeClient([]), build_config(store_path))
+
+            normalized = tool._normalize_generated_payload(
+                build_candidate(
+                    full_name="王海涛",
+                    surname="王",
+                    phone="13912345678",
+                    address="浙江省杭州市余杭区良渚街道阳光家园8幢2单元502室",
+                    persona="普通家庭用户，想尽快把新机器装好。",
+                    speech_style="说话直接，重点问安装时间。",
+                    issue="新买的热水器已经送到家了，还没安装，想预约师傅上门安装。",
+                    desired_resolution="安排师傅上门安装并确认需要准备的辅材和费用。",
+                    availability="明天下午都在家",
+                    emotion="平稳",
+                    urgency="中等",
+                    prior_attempts="看过安装说明，但不确定现场要准备什么。",
+                    special_constraints="小区进门需要提前登记。",
+                ),
+                "installation",
+            )
+
+            self.assertEqual(normalized["request"]["request_type"], "installation")
+            self.assertIn("安装", normalized["request"]["issue"])
 
     def test_normalize_generated_payload_sanitizes_formatted_mobile_phone(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -2638,8 +2697,8 @@ class UserPromptTests(unittest.TestCase):
                             address="甘肃省兰州市城关区五泉街道福寿小区8号楼2单元1202室",
                             persona="语气温和，但希望客服快一点登记完",
                             speech_style="整体简洁，确认信息时会按流程快速回答",
-                            issue="空气能热水器制热太慢，想尽快安排检查",
-                            desired_resolution="尽快安排人员上门确认机器情况",
+                            issue="新买的空气能热水器已经送到家了，想预约师傅上门安装",
+                            desired_resolution="尽快安排人员上门安装并确认辅材费用",
                             availability="周日下午两点后",
                             emotion="有些担心",
                             urgency="中",

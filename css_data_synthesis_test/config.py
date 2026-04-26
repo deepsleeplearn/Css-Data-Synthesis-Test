@@ -19,12 +19,9 @@ def _refresh_env_from_file() -> None:
     if load_dotenv:
         load_dotenv(ENV_PATH, override=True)
 
-LLMS = {
-    "gpt-4o": {
-        "base_url": "",
-        "api_key": "",
-        "user": ""
-    }
+MODEL_ENV_PREFIXES = {
+    "gpt-4o": "OPENAI_GPT_4O",
+    "qwen3-32b": "OPENAI_QWEN3_32B",
 }
 
 DEFAULT_MODEL_REQUEST_PROFILES = {
@@ -185,6 +182,7 @@ class AppConfig:
     default_model: str
     user_agent_model: str
     service_agent_model: str
+    model_endpoints: dict[str, dict[str, str]]
     default_temperature: float
     service_ok_prefix_probability: float
     service_query_prefix_weights: dict[str, float]
@@ -297,6 +295,37 @@ def load_model_request_profiles() -> dict[str, dict[str, object]]:
     return profiles
 
 
+def _load_model_endpoints() -> dict[str, dict[str, str]]:
+    endpoints: dict[str, dict[str, str]] = {}
+    for fallback_model, prefix in MODEL_ENV_PREFIXES.items():
+        model_name = os.getenv(f"{prefix}_MODEL", fallback_model).strip() or fallback_model
+        base_url = os.getenv(f"{prefix}_BASE_URL", "").strip()
+        api_key = os.getenv(f"{prefix}_API_KEY", "").strip()
+        user = os.getenv(f"{prefix}_USER", "").strip()
+        if base_url or api_key or user:
+            endpoints[model_name] = {
+                "base_url": base_url,
+                "api_key": api_key,
+                "user": user,
+            }
+
+    legacy_model = os.getenv("OPENAI_MODEL", "").strip()
+    legacy_base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+    legacy_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    legacy_user = os.getenv("OPENAI_USER", "").strip()
+    if legacy_model and (legacy_base_url or legacy_api_key or legacy_user):
+        endpoints.setdefault(
+            legacy_model,
+            {
+                "base_url": legacy_base_url,
+                "api_key": legacy_api_key,
+                "user": legacy_user,
+            },
+        )
+
+    return endpoints
+
+
 def _load_weight_map(
     env_name: str,
     default: dict[str, float],
@@ -397,17 +426,31 @@ def _load_segment_strategy_weights(
 
 def load_config() -> AppConfig:
     _refresh_env_from_file()
-    default_model = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
-    model_defaults = LLMS.get(default_model, {})
-    api_key = os.getenv("OPENAI_API_KEY", model_defaults.get("api_key", "")).strip()
+    default_model = os.getenv("OPENAI_DEFAULT_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o")).strip()
+    model_endpoints = _load_model_endpoints()
+    model_defaults = model_endpoints.get(default_model, {})
+    api_key = (
+        model_defaults.get("api_key", "")
+        or os.getenv("OPENAI_API_KEY", "")
+    ).strip()
     if not api_key:
-        raise ValueError("Missing OPENAI_API_KEY. Set it in environment variables or .env.")
+        raise ValueError(
+            f"Missing API key for {default_model}. Set {MODEL_ENV_PREFIXES.get(default_model, 'OPENAI')}_API_KEY."
+        )
 
-    base_url = os.getenv("OPENAI_BASE_URL", model_defaults.get("base_url", "")).strip()
+    base_url = (
+        model_defaults.get("base_url", "")
+        or os.getenv("OPENAI_BASE_URL", "")
+    ).strip()
     if not base_url:
-        raise ValueError("Missing OPENAI_BASE_URL. Set it in environment variables or .env.")
+        raise ValueError(
+            f"Missing base URL for {default_model}. Set {MODEL_ENV_PREFIXES.get(default_model, 'OPENAI')}_BASE_URL."
+        )
 
-    user = os.getenv("OPENAI_USER", model_defaults.get("user", "")).strip()
+    user = (
+        model_defaults.get("user", "")
+        or os.getenv("OPENAI_USER", "")
+    ).strip()
     legacy_segment_strategy_weights = _load_optional_weight_map(
         "ADDRESS_SEGMENT_MERGE_STRATEGY_WEIGHTS"
     )
@@ -419,8 +462,9 @@ def load_config() -> AppConfig:
         openai_api_key=api_key,
         user=user,
         default_model=default_model,
-        user_agent_model=os.getenv("USER_AGENT_MODEL", default_model).strip(),
-        service_agent_model=os.getenv("SERVICE_AGENT_MODEL", default_model).strip(),
+        user_agent_model=os.getenv("USER_AGENT_MODEL", default_model).strip() or default_model,
+        service_agent_model=os.getenv("SERVICE_AGENT_MODEL", default_model).strip() or default_model,
+        model_endpoints=model_endpoints,
         default_temperature=float(os.getenv("DEFAULT_TEMPERATURE", "1.0")),
         service_ok_prefix_probability=service_ok_prefix_probability,
         service_query_prefix_weights=_load_service_query_prefix_weights(service_ok_prefix_probability),

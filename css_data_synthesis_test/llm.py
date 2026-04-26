@@ -54,14 +54,26 @@ class OpenAIChatClient:
         return f"{compact[:limit]}..."
 
     def _build_headers(self, model: str) -> dict[str, str]:
+        endpoint = self._endpoint_for_model(model)
         headers = {
             "Aimp-Biz-Id": model,
-            "Authorization": f"Bearer {self.config.openai_api_key}",
+            "Authorization": f"Bearer {endpoint['api_key']}",
             "Content-Type": "application/json",
         }
-        if self.config.user.strip():
-            headers["AIGC-USER"] = self.config.user.strip()
+        if endpoint["user"]:
+            headers["AIGC-USER"] = endpoint["user"]
         return headers
+
+    def _endpoint_for_model(self, model: str) -> dict[str, str]:
+        endpoint = dict(self.config.model_endpoints.get(model, {}))
+        base_url = str(endpoint.get("base_url") or self.config.openai_base_url).strip()
+        api_key = str(endpoint.get("api_key") or self.config.openai_api_key).strip()
+        user = str(endpoint.get("user") or self.config.user).strip()
+        if not base_url:
+            raise RuntimeError(f"Missing base URL for model {model}.")
+        if not api_key:
+            raise RuntimeError(f"Missing API key for model {model}.")
+        return {"base_url": base_url, "api_key": api_key, "user": user}
 
     def _build_payload(
         self,
@@ -257,21 +269,23 @@ class OpenAIChatClient:
     def _send_request(
         self,
         *,
+        base_url: str,
         headers: dict[str, str],
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         with httpx.Client(timeout=self.config.request_timeout) as client:
-            response = client.post(self.config.openai_base_url, json=payload, headers=headers)
+            response = client.post(base_url, json=payload, headers=headers)
         return self._parse_response(response)
 
     async def _send_request_async(
         self,
         *,
+        base_url: str,
         headers: dict[str, str],
         payload: dict[str, Any],
     ) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=self.config.request_timeout) as client:
-            response = await client.post(self.config.openai_base_url, json=payload, headers=headers)
+            response = await client.post(base_url, json=payload, headers=headers)
         return self._parse_response(response)
 
     def _parse_response(self, response: httpx.Response) -> dict[str, Any]:
@@ -323,7 +337,12 @@ class OpenAIChatClient:
             enable_thinking=enable_thinking,
             additional_payload=additional_payload,
         )
-        response = self._send_request(headers=self._build_headers(model), payload=payload)
+        endpoint = self._endpoint_for_model(model)
+        response = self._send_request(
+            base_url=endpoint["base_url"],
+            headers=self._build_headers(model),
+            payload=payload,
+        )
         return self._extract_message_content(response)
 
     def complete_json(
@@ -381,7 +400,9 @@ class OpenAIChatClient:
             enable_thinking=enable_thinking,
             additional_payload=additional_payload,
         )
+        endpoint = self._endpoint_for_model(model)
         response = await self._send_request_async(
+            base_url=endpoint["base_url"],
             headers=self._build_headers(model),
             payload=payload,
         )

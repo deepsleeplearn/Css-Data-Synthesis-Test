@@ -112,6 +112,7 @@ let manualShellRightHidden = false;
 let manualShellLeftWidth = 320;
 let manualShellRightWidth = 340;
 let manualShellResizeState = null;
+let selectedModelName = 'gpt-4o';
 
 const authGate = document.getElementById('auth-gate');
 const appShell = document.getElementById('app-shell');
@@ -158,6 +159,8 @@ const callStartTimeInput = document.getElementById('call-start-time');
 const generateCallStartTimeButton = document.getElementById('generate-call-start-time-btn');
 const callStartTimeError = document.getElementById('call-start-time-error');
 const useSessionStartTimeCheckbox = document.getElementById('use-session-start-time');
+const modelSelectorButton = document.getElementById('model-selector-btn');
+const modelSelectorMenu = document.getElementById('model-selector-menu');
 const modeSwitchButton = document.getElementById('mode-switch-btn');
 const reviewModal = document.getElementById('review-modal');
 const rewriteExportModal = document.getElementById('rewrite-export-modal');
@@ -3453,7 +3456,11 @@ async function generateRewriteObservationLine(recordIndex, functionCallLineId) {
         const data = await apiFetch('/api/rewrite/ie-observation', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ entity_type: targetType, dialogue_lines: dialogueLines }),
+            body: JSON.stringify({
+                entity_type: targetType,
+                dialogue_lines: dialogueLines,
+                model_name: selectedModelName,
+            }),
         });
         const observation = data?.observation ?? {};
         const observationText = serializeRewriteObservationPayload(observation);
@@ -6636,6 +6643,26 @@ function syncReviewModalMode(data = {}) {
     }
 }
 
+function setSelectedModelName(modelName) {
+    const normalized = ['gpt-4o', 'qwen3-32b'].includes(String(modelName || '').trim())
+        ? String(modelName || '').trim()
+        : 'gpt-4o';
+    selectedModelName = normalized;
+    if (modelSelectorButton) {
+        modelSelectorButton.textContent = `模型：${selectedModelName}`;
+    }
+    document.querySelectorAll('.model-selector-option').forEach((option) => {
+        option.classList.toggle('is-active', option.dataset.modelName === selectedModelName);
+    });
+}
+
+function setModelSelectorOpen(open) {
+    if (!modelSelectorButton || !modelSelectorMenu) return;
+    modelSelectorMenu.classList.toggle('hidden', !open);
+    modelSelectorMenu.setAttribute('aria-hidden', open ? 'false' : 'true');
+    modelSelectorButton.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
 async function startSession() {
     if (hasBlockingReviewPending()) {
         appendTerminalLine('请先完成上一条测试记录的评审；如已关闭弹窗，可点击“打开评审”继续。', 'error');
@@ -6651,6 +6678,7 @@ async function startSession() {
     const historyDeviceConfig = getHistoryDeviceConfig();
     const payload = {
         scenario_id: '',
+        model_name: selectedModelName,
         auto_generate_hidden_settings: document.getElementById('auto-hidden-settings').checked,
         product_category: selectedScenario.product_category,
         request_type: selectedScenario.request_type,
@@ -6821,6 +6849,7 @@ async function runAutoMode() {
     const autoGenerateHiddenSettings = document.getElementById('auto-hidden-settings').checked;
     const payload = {
         scenario_id: '',
+        model_name: selectedModelName,
         auto_generate_hidden_settings: autoGenerateHiddenSettings,
         product_category: selectedScenario.product_category,
         request_type: selectedScenario.request_type,
@@ -7506,6 +7535,16 @@ rewriteRecordReviewButton?.addEventListener('click', () => {
     if (!rewriteRecordMenuState) return;
     void submitRewriteRecordReview(Number(rewriteRecordMenuState.recordIndex));
 });
+modelSelectorButton?.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setModelSelectorOpen(modelSelectorMenu?.classList.contains('hidden'));
+});
+modelSelectorMenu?.addEventListener('click', (event) => {
+    const option = event.target.closest('.model-selector-option');
+    if (!option) return;
+    setSelectedModelName(option.dataset.modelName || 'gpt-4o');
+    setModelSelectorOpen(false);
+});
 document.addEventListener('click', (event) => {
     if (issueReferencePopover.classList.contains('hidden')) return;
     const clickedInsidePopover = event.target.closest('#issue-reference-popover');
@@ -7513,6 +7552,11 @@ document.addEventListener('click', (event) => {
     if (!clickedInsidePopover && !clickedTrigger) {
         hideIssueReferencePopover();
     }
+});
+document.addEventListener('click', (event) => {
+    if (!modelSelectorMenu || modelSelectorMenu.classList.contains('hidden')) return;
+    if (event.target.closest('.model-selector')) return;
+    setModelSelectorOpen(false);
 });
 document.addEventListener('click', (event) => {
     if (!terminalTurnMenu || terminalTurnMenu.classList.contains('hidden')) return;
@@ -7847,6 +7891,7 @@ setNextRound(1);
 }
 resetReviewState();
 setPasswordVisibility(false);
+setSelectedModelName('gpt-4o');
 prefillMockCallStartTime(true);
 syncHistoryDeviceCategoryOptions();
 updateCallStartTimeValidationState();

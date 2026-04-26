@@ -84,7 +84,20 @@ BRAND_SERIES_WEIGHTS = {
     "lieyan": 0.22,
 }
 COLMO_HOMOPHONE_TOKENS = ("COLMO", "科目", "科慕", "可么", "可木", "可慕", "扣摸", "扣慕")
-LIEYAN_HOMOPHONE_TOKENS = ("烈焰", "烈炎", "列焰", "列炎", "莲焰", "莲炎", "莲叶", "连焰", "连炎", "连叶")
+LIEYAN_HOMOPHONE_TOKENS = (
+    "烈焰",
+    "烈炎",
+    "列焰",
+    "列炎",
+    "莲焰",
+    "莲炎",
+    "莲叶",
+    "连焰",
+    "连炎",
+    "连叶",
+    "连夜",
+    "莲夜",
+)
 COOLING_OR_LITTLE_SWAN_HOMOPHONE_TOKENS = (
     "酷风",
     "库风",

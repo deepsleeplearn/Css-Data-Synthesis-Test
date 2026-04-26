@@ -63,6 +63,88 @@ PROVINCE_DISPLAY_NAMES = {
     "台湾": "台湾省",
 }
 MUNICIPALITY_PREFIXES = ("北京", "上海", "天津", "重庆")
+MUNICIPALITY_DISTRICT_ALIASES = {
+    "北京市": {
+        "朝阳": "朝阳区",
+        "海淀": "海淀区",
+        "丰台": "丰台区",
+        "东城": "东城区",
+        "西城": "西城区",
+        "石景山": "石景山区",
+        "通州": "通州区",
+        "昌平": "昌平区",
+        "大兴": "大兴区",
+        "顺义": "顺义区",
+        "房山": "房山区",
+        "门头沟": "门头沟区",
+        "怀柔": "怀柔区",
+        "平谷": "平谷区",
+        "密云": "密云区",
+        "延庆": "延庆区",
+    },
+    "上海市": {
+        "浦东": "浦东新区",
+        "黄浦": "黄浦区",
+        "徐汇": "徐汇区",
+        "长宁": "长宁区",
+        "静安": "静安区",
+        "普陀": "普陀区",
+        "虹口": "虹口区",
+        "杨浦": "杨浦区",
+        "闵行": "闵行区",
+        "宝山": "宝山区",
+        "嘉定": "嘉定区",
+        "金山": "金山区",
+        "松江": "松江区",
+        "青浦": "青浦区",
+        "奉贤": "奉贤区",
+        "崇明": "崇明区",
+    },
+    "天津市": {
+        "和平": "和平区",
+        "河东": "河东区",
+        "河西": "河西区",
+        "南开": "南开区",
+        "河北": "河北区",
+        "红桥": "红桥区",
+        "东丽": "东丽区",
+        "西青": "西青区",
+        "津南": "津南区",
+        "北辰": "北辰区",
+        "武清": "武清区",
+        "宝坻": "宝坻区",
+        "滨海": "滨海新区",
+        "宁河": "宁河区",
+        "静海": "静海区",
+        "蓟州": "蓟州区",
+    },
+    "重庆市": {
+        "渝中": "渝中区",
+        "江北": "江北区",
+        "南岸": "南岸区",
+        "沙坪坝": "沙坪坝区",
+        "九龙坡": "九龙坡区",
+        "大渡口": "大渡口区",
+        "北碚": "北碚区",
+        "渝北": "渝北区",
+        "巴南": "巴南区",
+        "万州": "万州区",
+        "涪陵": "涪陵区",
+        "永川": "永川区",
+        "江津": "江津区",
+        "合川": "合川区",
+        "南川": "南川区",
+        "綦江": "綦江区",
+        "大足": "大足区",
+        "璧山": "璧山区",
+        "铜梁": "铜梁区",
+        "潼南": "潼南区",
+        "荣昌": "荣昌区",
+        "开州": "开州区",
+        "梁平": "梁平区",
+        "武隆": "武隆区",
+    },
+}
 COMMUNITY_SUFFIXES = (
     "小区",
     "社区",
@@ -338,6 +420,20 @@ def extract_address_components(text: str) -> AddressComponents:
             remainder = remainder[len(municipality) :]
             break
 
+    municipality_district = ""
+    if city:
+        district_aliases = MUNICIPALITY_DISTRICT_ALIASES.get(city, {})
+        for alias in sorted(district_aliases, key=len, reverse=True):
+            canonical_district = district_aliases[alias]
+            if remainder.startswith(canonical_district):
+                municipality_district = canonical_district
+                remainder = remainder[len(canonical_district) :]
+                break
+            if remainder.startswith(alias):
+                municipality_district = canonical_district
+                remainder = remainder[len(alias) :]
+                break
+
     province_prefix = ""
     if not city:
         province_prefix = next(
@@ -398,9 +494,9 @@ def extract_address_components(text: str) -> AddressComponents:
                 city = f"{suffixless_city_match.group(1)}市"
                 remainder = remainder[suffixless_city_match.end() :]
 
-    district = ""
+    district = municipality_district
     district_match = re.match(r"^[\u4e00-\u9fa5]{1,24}?(?:(?<!小)(?<!社)区|县|旗)", remainder)
-    if district_match:
+    if not district and district_match:
         candidate_district = district_match.group(0)
         trailing_remainder = remainder[district_match.end() :]
         is_numbered_section = bool(re.fullmatch(r"[\u4e00-\u9fa5]{1,20}[一二三四五六七八九十\d]+区", candidate_district))
@@ -425,6 +521,7 @@ def extract_address_components(text: str) -> AddressComponents:
         remainder = remainder[town_match.end() :]
 
     road = ""
+    road_start = -1
     road_end = -1
     road_suffix_pattern = "|".join(re.escape(suffix) for suffix in ROAD_LOCALITY_SUFFIXES if suffix != "弄")
     named_road_match = re.search(
@@ -433,6 +530,7 @@ def extract_address_components(text: str) -> AddressComponents:
     )
     if named_road_match:
         road = named_road_match.group(1)
+        road_start = named_road_match.start()
         road_end = named_road_match.end()
     else:
         lane_match = re.match(r"([零一二三四五六七八九十两\d]+弄)", remainder)
@@ -440,6 +538,7 @@ def extract_address_components(text: str) -> AddressComponents:
             lane_match = re.search(r"([零一二三四五六七八九十两\d]+弄)", remainder)
         if lane_match:
             road = lane_match.group(1)
+            road_start = lane_match.start()
             road_end = lane_match.end()
 
     community = ""
@@ -505,9 +604,18 @@ def extract_address_components(text: str) -> AddressComponents:
         and floor_match.group(1) == building
         and room_match
         and building_match
-        and building_match.start() >= room_match.start()
+            and building_match.start() >= room_match.start()
     ):
         building = ""
+
+    if not community and road_start > 0:
+        fallback_community = remainder[:road_start].strip("，, ")
+        if (
+            re.fullmatch(r"[A-Za-z0-9\u4e00-\u9fa5]{2,20}", fallback_community)
+            and not re.fullmatch(r"[零一二三四五六七八九十两\d]+(?:号|弄)?", fallback_community)
+            and not re.search(r"(?:路|街|大道|巷|弄|胡同|单元|层|室)$", fallback_community)
+        ):
+            community = fallback_community
 
     if not community and building_match:
         locality_start = max(road_end, 0)

@@ -67,6 +67,15 @@
                 <section class="panel-section session-config-card">
                     <div class="section-heading compact">
                         <h2>会话配置</h2>
+                        <div class="model-selector">
+                            <button id="model-selector-btn" class="model-selector-btn" type="button" aria-haspopup="true" aria-expanded="false">
+                                模型：gpt-4o
+                            </button>
+                            <div id="model-selector-menu" class="model-selector-menu hidden" role="menu" aria-hidden="true">
+                                <button class="model-selector-option is-active" type="button" data-model-name="gpt-4o" role="menuitem">gpt-4o</button>
+                                <button class="model-selector-option" type="button" data-model-name="qwen3-32b" role="menuitem">qwen3-32b</button>
+                            </div>
+                        </div>
                     </div>
                     <div class="field">
                         <div class="field-heading">

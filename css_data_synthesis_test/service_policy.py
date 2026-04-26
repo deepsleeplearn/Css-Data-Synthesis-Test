@@ -1378,13 +1378,15 @@ class ServiceDialoguePolicy:
         ):
             slot_updates["request_type"] = scenario.request.request_type
 
+        surname_prompted = self._signature_matches_prompt(previous_service_signature, self.SURNAME_PROMPT)
+        explicit_freeform_surname = self._extract_freeform_surname(user_text)
         if (
             "surname" in collected_slots
             and not collected_slots["surname"].strip()
-            and self._signature_matches_prompt(previous_service_signature, self.SURNAME_PROMPT)
+            and (surname_prompted or explicit_freeform_surname)
         ):
             freeform_surname = ""
-            if self.surname_inference_callback is not None:
+            if surname_prompted and self.surname_inference_callback is not None:
                 freeform_surname = self._extract_surname_with_model(
                     user_text,
                     user_round_index=user_round_index,
@@ -1396,7 +1398,7 @@ class ServiceDialoguePolicy:
             ):
                 freeform_surname = scenario.customer.surname
             if not freeform_surname:
-                freeform_surname = self._extract_freeform_surname(user_text)
+                freeform_surname = explicit_freeform_surname
             if freeform_surname:
                 slot_updates["surname"] = freeform_surname
 
@@ -1479,6 +1481,27 @@ class ServiceDialoguePolicy:
             and not collected_slots.get("issue_description", "").strip()
             and bool(slot_updates.get("issue_description", "").strip())
         )
+
+    def _with_installation_issue_description(
+        self,
+        *,
+        scenario: Scenario,
+        collected_slots: dict[str, str],
+        slot_updates: dict[str, str],
+    ) -> dict[str, str]:
+        if scenario.request.request_type != "installation":
+            return slot_updates
+        if "issue_description" not in collected_slots:
+            return slot_updates
+        if collected_slots.get("issue_description", "").strip():
+            return slot_updates
+        if slot_updates.get("issue_description", "").strip():
+            return slot_updates
+
+        updated_slot_updates = dict(slot_updates)
+        brand = str(scenario.product.brand or "").strip() or "美的"
+        updated_slot_updates["issue_description"] = f"{brand}{self._product_name(scenario)}需要安装。"
+        return updated_slot_updates
 
     def _prepend_fault_acknowledgement(self, reply: str) -> str:
         normalized_reply = self._strip_query_prefix((reply or "").strip())
@@ -4998,6 +5021,16 @@ class ServiceDialoguePolicy:
         runtime_state: ServiceRuntimeState,
         next_slot: str | None,
     ) -> ServicePolicyResult:
+        slot_updates = self._with_installation_issue_description(
+            scenario=scenario,
+            collected_slots=collected_slots,
+            slot_updates=slot_updates,
+        )
+        merged_slots = dict(collected_slots)
+        merged_slots.update(slot_updates)
+        if next_slot and merged_slots.get(next_slot, "").strip():
+            next_slot = self._next_slot_to_request(merged_slots, effective_required_slots(scenario))
+
         if self._should_run_product_routing(scenario, runtime_state):
             return self._start_product_routing_step(
                 scenario=scenario,
@@ -5010,8 +5043,6 @@ class ServiceDialoguePolicy:
                 ),
             )
 
-        merged_slots = dict(collected_slots)
-        merged_slots.update(slot_updates)
         if merged_slots.get("product_routing_result", "").strip() == ROUTING_RESULT_HUMAN:
             return self._handoff_to_human(
                 scenario=scenario,

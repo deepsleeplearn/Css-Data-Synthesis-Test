@@ -4,8 +4,9 @@ __pycache__/
 outputs/
 .pytest_cache/
 .data/hidden_settings_history.jsonl
-.frontend/registered_accounts.local.json
-.css_data_synthesis_test/function_call.py
-.adds/test.jsonl
+frontend/registered_accounts.local.json
+css_data_synthesis_test/function_call.py
+adds/test.jsonl
 .omx/
 .gstack/
+SKILL.md

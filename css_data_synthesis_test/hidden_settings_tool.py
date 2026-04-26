@@ -1054,6 +1054,21 @@ class HiddenSettingsTool:
         product_name = str(scenario.product.category).strip() or "空气能热水器"
         surname_examples = self._sample_prompt_surname_examples(scenario.scenario_id)
         region_examples = self._sample_prompt_region_examples(scenario.scenario_id)
+        if str(scenario.request.request_type or "").strip() == "installation":
+            request_type_guardrail = (
+                "- 当前是安装/报装场景：`request.issue` 必须围绕预约安装、货已到未安装、"
+                "货未到先预约、安装条件、安装费用、安装位置、上门安装或调试。\n"
+                "- 安装场景禁止写成维修问题，不能出现漏水、不加热、不出热水、排水异常、"
+                "水表异常、故障码、异响、跳闸等设备故障现象。\n"
+                "- 安装场景的 `desired_resolution` 必须是安排安装、预约安装、确认安装条件/费用、"
+                "到货后安装或上门调试，不能写“检查维修”“尽快修好”。"
+            )
+        else:
+            request_type_guardrail = (
+                "- 当前是维修/报修场景：`request.issue` 必须是设备故障或使用异常现象。\n"
+                "- 维修场景的 `desired_resolution` 必须是安排检查、维修、排查故障或恢复正常使用，"
+                "不要写成单纯预约安装。"
+            )
         system_prompt = f"""你是一个家电客服数据生成工具，负责给 user_agent 生成隐藏设定。
 
 任务约束：
@@ -1115,6 +1130,7 @@ class HiddenSettingsTool:
 - 故障场景下，大多数 issue 只写 1 个具体故障点，只保留一个核心现象
 - 只有极少数场景可以写 2 个相关故障点，但不要扩展到第 3 个问题，也不要堆砌过多结果后果或温度对比数据
 - 安装场景与故障场景要区分明显
+{request_type_guardrail}
 - 用户画像与说话方式都要具体，且不要写成同一句的重复改写
 - 大多数用户应更像普通来电用户，不要总写成创业者、高管、专家或表达特别流畅的人
 - 姓氏请从中国最常用的 50 个姓氏中随机分散采样；除非有特别理由，不要连续生成相似姓氏
@@ -1263,6 +1279,11 @@ class HiddenSettingsTool:
             normalized["request"]["request_type"],
             scenario_id=scenario_id,
         )
+        self._validate_request_type_consistency(
+            normalized["request"]["issue"],
+            normalized["request"]["desired_resolution"],
+            normalized["request"]["request_type"],
+        )
         self._validate_address_completeness(normalized["customer"]["address"])
         for group_name, group in normalized.items():
             if any(not value for value in group.values()) and group_name != "hidden_context":
@@ -1310,6 +1331,74 @@ class HiddenSettingsTool:
             raise ValueError("Generated hidden settings issue contains too many fault symptoms.")
         if not self._issue_allows_multi_fault(scenario_id, issue):
             raise ValueError("Generated hidden settings issue should usually describe only one fault symptom.")
+
+    @staticmethod
+    def _validate_request_type_consistency(
+        issue_text: str,
+        desired_resolution: str,
+        request_type: str,
+    ) -> None:
+        issue = re.sub(r"\s+", "", issue_text or "")
+        desired = re.sub(r"\s+", "", desired_resolution or "")
+        combined = f"{issue}；{desired}"
+        if str(request_type or "").strip() != "installation":
+            return
+
+        installation_keywords = (
+            "安装",
+            "报装",
+            "装机",
+            "约安装",
+            "预约安装",
+            "上门装",
+            "还没装",
+            "未安装",
+            "装一下",
+            "调试",
+            "安装条件",
+            "安装位置",
+            "辅材",
+            "到货",
+            "货到了",
+            "送到",
+            "送来了",
+            "没到",
+            "未到",
+            "还没到",
+        )
+        repair_keywords = (
+            "维修",
+            "报修",
+            "修好",
+            "修一下",
+            "检查维修",
+            "故障",
+            "坏了",
+            "漏水",
+            "滴水",
+            "排水",
+            "排热水",
+            "水表",
+            "水量不正常",
+            "不加热",
+            "不制热",
+            "不出热水",
+            "加热慢",
+            "忽冷忽热",
+            "温度不稳",
+            "故障码",
+            "报错",
+            "异响",
+            "噪音",
+            "跳闸",
+            "断电",
+            "开不了机",
+            "打不开",
+        )
+        if not any(keyword in combined for keyword in installation_keywords):
+            raise ValueError("Generated hidden settings installation issue must describe installation or appointment.")
+        if any(keyword in combined for keyword in repair_keywords):
+            raise ValueError("Generated hidden settings installation issue must not describe repair or fault symptoms.")
 
     @classmethod
     def _validate_address_completeness(cls, address_text: str) -> None:

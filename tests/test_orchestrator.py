@@ -22,6 +22,13 @@ def build_config() -> AppConfig:
         default_model="gpt-4o",
         user_agent_model="gpt-4o",
         service_agent_model="gpt-4o",
+        model_endpoints={
+            "gpt-4o": {
+                "base_url": "https://example.com/v1/chat/completions",
+                "api_key": "test-api-key",
+                "user": "test-user",
+            }
+        },
         default_temperature=0.7,
         service_ok_prefix_probability=0.0,
         service_query_prefix_weights={"好的": 0.0, "嗯嗯": 0.0, "了解了": 0.0, "": 1.0},

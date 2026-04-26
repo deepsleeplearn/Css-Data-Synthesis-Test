@@ -20,6 +20,18 @@ def build_config() -> AppConfig:
         default_model="gpt-4o",
         user_agent_model="gpt-4o",
         service_agent_model="gpt-4o",
+        model_endpoints={
+            "gpt-4o": {
+                "base_url": "https://aimpapi.midea.com/t-aigc/mip-chat-app/openai/standard/v1/chat/completions",
+                "api_key": "test-api-key",
+                "user": "test-user",
+            },
+            "qwen3-32b": {
+                "base_url": "https://aimpapi.midea.com/t-aigc/aimp-qwen3-32b/v1/chat/completions",
+                "api_key": "qwen-api-key",
+                "user": "qwen-user",
+            },
+        },
         default_temperature=0.7,
         service_ok_prefix_probability=0.7,
         service_query_prefix_weights={"好的": 0.7, "嗯嗯": 0.0, "了解了": 0.0, "": 0.3},
@@ -115,14 +127,14 @@ class RecordingChatClient(OpenAIChatClient):
         self.responses = responses
         self.sent_requests: list[dict] = []
 
-    def _send_request(self, *, headers: dict[str, str], payload: dict[str, object]) -> dict:
-        self.sent_requests.append({"headers": headers, "payload": payload})
+    def _send_request(self, *, base_url: str, headers: dict[str, str], payload: dict[str, object]) -> dict:
+        self.sent_requests.append({"base_url": base_url, "headers": headers, "payload": payload})
         if not self.responses:
             raise AssertionError("No prepared sync response available.")
         return self.responses.pop(0)
 
-    async def _send_request_async(self, *, headers: dict[str, str], payload: dict[str, object]) -> dict:
-        self.sent_requests.append({"headers": headers, "payload": payload})
+    async def _send_request_async(self, *, base_url: str, headers: dict[str, str], payload: dict[str, object]) -> dict:
+        self.sent_requests.append({"base_url": base_url, "headers": headers, "payload": payload})
         if not self.responses:
             raise AssertionError("No prepared async response available.")
         return self.responses.pop(0)

@@ -14,10 +14,15 @@ class ConfigTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "OPENAI_MODEL": "gpt-4o",
-                    "OPENAI_BASE_URL": "https://example.com/v1/chat/completions",
-                    "OPENAI_API_KEY": "env-api-key",
-                    "OPENAI_USER": "env-user",
+                    "OPENAI_DEFAULT_MODEL": "gpt-4o",
+                    "OPENAI_GPT_4O_MODEL": "gpt-4o",
+                    "OPENAI_GPT_4O_BASE_URL": "https://example.com/v1/chat/completions",
+                    "OPENAI_GPT_4O_API_KEY": "env-api-key",
+                    "OPENAI_GPT_4O_USER": "env-user",
+                    "OPENAI_QWEN3_32B_MODEL": "qwen3-32b",
+                    "OPENAI_QWEN3_32B_BASE_URL": "https://example.com/qwen",
+                    "OPENAI_QWEN3_32B_API_KEY": "qwen-key",
+                    "OPENAI_QWEN3_32B_USER": "qwen-user",
                     "USER_AGENT_MODEL": "user-model",
                     "SERVICE_AGENT_MODEL": "service-model",
                     "PRODUCT_ROUTING_ENABLED": "false",
@@ -47,6 +52,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.openai_base_url, "https://example.com/v1/chat/completions")
         self.assertEqual(config.openai_api_key, "env-api-key")
         self.assertEqual(config.user, "env-user")
+        self.assertEqual(config.model_endpoints["qwen3-32b"]["base_url"], "https://example.com/qwen")
+        self.assertEqual(config.model_endpoints["qwen3-32b"]["api_key"], "qwen-key")
         self.assertEqual(config.user_agent_model, "user-model")
         self.assertEqual(config.service_agent_model, "service-model")
         self.assertFalse(config.product_routing_enabled)
@@ -87,9 +94,10 @@ class ConfigTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "OPENAI_MODEL": "gpt-4o",
-                    "OPENAI_BASE_URL": "https://example.com/v1/chat/completions",
-                    "OPENAI_API_KEY": "env-api-key",
+                    "OPENAI_DEFAULT_MODEL": "gpt-4o",
+                    "OPENAI_GPT_4O_MODEL": "gpt-4o",
+                    "OPENAI_GPT_4O_BASE_URL": "https://example.com/v1/chat/completions",
+                    "OPENAI_GPT_4O_API_KEY": "env-api-key",
                     "ADDRESS_SEGMENT_MERGE_STRATEGY_WEIGHTS": '{"province_city_district__locality__detail": 0.9, "province_city_district__locality_detail": 0.8, "province_city__district__locality__detail": 0.7}',
                     "ADDRESS_SEGMENT_2_STRATEGY_WEIGHTS": "",
                     "ADDRESS_SEGMENT_3_STRATEGY_WEIGHTS": "",
@@ -118,9 +126,10 @@ class ConfigTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    "OPENAI_MODEL": "gpt-4o",
-                    "OPENAI_BASE_URL": "https://example.com/v1/chat/completions",
-                    "OPENAI_API_KEY": "env-api-key",
+                    "OPENAI_DEFAULT_MODEL": "gpt-4o",
+                    "OPENAI_GPT_4O_MODEL": "gpt-4o",
+                    "OPENAI_GPT_4O_BASE_URL": "https://example.com/v1/chat/completions",
+                    "OPENAI_GPT_4O_API_KEY": "env-api-key",
                     "ADDRESS_SEGMENT_2_STRATEGY_WEIGHTS": '{"province_city_district_locality__detail": 0.7, "province_city_district__locality_detail": 0.4}',
                 },
                 clear=False,
@@ -138,7 +147,7 @@ class ConfigTests(unittest.TestCase):
                     "OPENAI_API_KEY": "custom-key",
                     "OPENAI_USER": "custom-user",
                 },
-                clear=False,
+                clear=True,
             ):
                 config = load_config()
 
@@ -155,6 +164,7 @@ class ConfigTests(unittest.TestCase):
             os.environ["OPENAI_BASE_URL"] = "https://example.com/from-dotenv"
             os.environ["OPENAI_API_KEY"] = "dotenv-api-key"
             os.environ["OPENAI_USER"] = "dotenv-user"
+            os.environ.pop("OPENAI_DEFAULT_MODEL", None)
             os.environ["USER_AGENT_MODEL"] = "dotenv-user-model"
             os.environ["SERVICE_AGENT_MODEL"] = "dotenv-service-model"
             return True
@@ -169,7 +179,7 @@ class ConfigTests(unittest.TestCase):
                 "USER_AGENT_MODEL": "env-user-model",
                 "SERVICE_AGENT_MODEL": "env-service-model",
             },
-            clear=False,
+            clear=True,
         ):
             with patch.object(config_module, "load_dotenv", side_effect=fake_load_dotenv):
                 config = load_config()
