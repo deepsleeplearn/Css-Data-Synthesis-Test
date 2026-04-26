@@ -5280,9 +5280,8 @@ function updateScenarioHeader(scenario) {
         return;
     }
     const productCategory = String(scenario?.product?.category || '').trim();
-    const productModel = String(scenario?.product?.model || '').trim();
-    const descriptor = [productCategory, productModel].filter(Boolean).join(' ');
-    title.textContent = `${scenario.scenario_id} | ${String(scenario?.product?.brand || '').trim()} ${descriptor}`.trim();
+    const descriptor = [String(scenario?.product?.brand || '').trim(), productCategory].filter(Boolean).join(' ');
+    title.textContent = `${scenario.scenario_id} | ${descriptor}`.trim();
 }
 
 function updateInspector(slots = {}, state = {}, scenario = null) {
